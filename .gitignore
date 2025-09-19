@@ -30,3 +30,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# kinc specific
+kinc
+demo.sh
+dist/

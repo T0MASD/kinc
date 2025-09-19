@@ -1,0 +1,36 @@
+# Example kinc cluster configuration
+# This file shows the available configuration options
+kind: Cluster
+apiVersion: kinc.io/v1alpha1
+metadata:
+  name: example-cluster
+nodes:
+# Control plane nodes
+- role: control-plane
+  image: kindest/node:v1.31.2
+  extraMounts:
+  - hostPath: /tmp/extra-data
+    containerPath: /data
+- role: control-plane
+  image: kindest/node:v1.31.2
+- role: control-plane  
+  image: kindest/node:v1.31.2
+# Worker nodes
+- role: worker
+  image: kindest/node:v1.31.2
+- role: worker
+  image: kindest/node:v1.31.2
+networking:
+  podSubnet: "10.244.0.0/16" 
+  serviceSubnet: "10.96.0.0/12"
+  disableDefaultCNI: false
+kubeadmConfigPatches:
+- |
+  kind: ClusterConfiguration
+  kubernetesVersion: v1.31.2
+  controlPlaneEndpoint: "127.0.0.1:6443"
+- |
+  kind: InitConfiguration
+  nodeRegistration: 
+    kubeletExtraArgs:
+      node-labels: "ingress-ready=true"
