@@ -1,0 +1,9 @@
+[Unit]
+Description=kinc Cluster Configuration Volume
+Documentation=https://github.com/T0MASD/kinc
+
+[Volume]
+VolumeName=kinc-config
+
+[Install]
+WantedBy=multi-user.target
