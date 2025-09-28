@@ -1,0 +1,2 @@
+# Kubelet extra args for rootless operation
+KUBELET_EXTRA_ARGS="--feature-gates=KubeletInUserNamespace=true"
