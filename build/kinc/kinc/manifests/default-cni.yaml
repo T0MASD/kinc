@@ -1,0 +1,110 @@
+
+# kincnetd networking manifest
+# would you kindly template this file
+# would you kindly patch this file
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: kincnet
+rules:
+  - apiGroups:
+    - policy
+    resources:
+    - podsecuritypolicies
+    verbs:
+    - use
+    resourceNames:
+    - kincnet
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - list
+      - watch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: kincnet
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kincnet
+subjects:
+- kind: ServiceAccount
+  name: kincnet
+  namespace: kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kincnet
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kincnet
+  namespace: kube-system
+  labels:
+    tier: node
+    app: kincnet
+    k8s-app: kincnet
+spec:
+  selector:
+    matchLabels:
+      app: kincnet
+  template:
+    metadata:
+      labels:
+        tier: node
+        app: kincnet
+        k8s-app: kincnet
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+      - operator: Exists
+      serviceAccountName: kincnet
+      containers:
+      - name: kincnet-cni
+        image: docker.io/kindest/kindnetd:v20240202-8f1494ea
+        env:
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_SUBNET
+          value: {{ .PodSubnet }}
+        volumeMounts:
+        - name: cni-cfg
+          mountPath: /etc/cni/net.d
+        - name: lib-modules
+          mountPath: /lib/modules
+          readOnly: true
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "50Mi"
+          limits:
+            cpu: "100m"
+            memory: "50Mi"
+        securityContext:
+          privileged: false
+          capabilities:
+            add: ["NET_RAW", "NET_ADMIN"]
+      volumes:
+      - name: cni-cfg
+        hostPath:
+          path: /etc/cni/net.d
+      - name: lib-modules
+        hostPath:
+          path: /lib/modules
+---

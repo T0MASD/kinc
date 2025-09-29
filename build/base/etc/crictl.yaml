@@ -1,0 +1,2 @@
+runtime-endpoint: unix:///var/run/crio/crio.sock
+image-endpoint: unix:///var/run/crio/crio.sock

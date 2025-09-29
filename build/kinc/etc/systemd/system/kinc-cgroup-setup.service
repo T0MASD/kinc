@@ -1,0 +1,17 @@
+[Unit]
+Description=kinc cgroup v2 controller delegation setup
+Documentation=https://github.com/T0MASD/kinc
+Before=kubelet.service
+After=local-fs.target
+RequiredBy=kubelet.service
+ConditionPathExists=/sys/fs/cgroup/cgroup.controllers
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/kinc/scripts/setup-cgroups-v2.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

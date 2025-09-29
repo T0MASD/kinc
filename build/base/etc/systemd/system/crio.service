@@ -1,0 +1,29 @@
+# CRI-O systemd service file for rootless kinc
+# Adapted from the official CRI-O service file
+[Unit]
+Description=Container Runtime Interface for OCI (CRI-O)
+Documentation=https://cri-o.io
+After=network.target local-fs.target
+# disable rate limiting
+StartLimitIntervalSec=0
+
+[Service]
+ExecStartPre=-/sbin/modprobe overlay
+ExecStartPre=-/bin/rm -f /var/run/crio/crio.sock
+ExecStart=/usr/bin/crio
+
+Type=notify
+Delegate=yes
+KillMode=process
+Restart=always
+RestartSec=1
+# Having non-zero Limit*s causes performance problems due to accounting overhead
+# in the kernel. We recommend using cgroups to do container-local accounting.
+LimitNPROC=infinity
+LimitCORE=infinity
+LimitNOFILE=infinity
+TasksMax=infinity
+OOMScoreAdjust=-999
+
+[Install]
+WantedBy=multi-user.target
