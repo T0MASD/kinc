@@ -1,0 +1,9 @@
+[Unit]
+Description=kinc Persistent Data Volume
+Documentation=https://github.com/T0MASD/kinc
+
+[Volume]
+VolumeName=kinc-var-data
+
+[Install]
+WantedBy=multi-user.target

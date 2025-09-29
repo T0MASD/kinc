@@ -1,0 +1,15 @@
+[Unit]
+Description=kinc Kubernetes Cluster Initialization
+After=crio.service
+Requires=crio.service
+# Require kubeadm.conf to be present before starting
+ConditionPathExists=/etc/kinc/config/kubeadm.conf
+
+[Service]
+Type=oneshot
+ExecStart=/etc/kinc/scripts/kinc-init.sh
+RemainAfterExit=yes
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

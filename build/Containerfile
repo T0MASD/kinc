@@ -1,0 +1,135 @@
+# kinc Consolidated Kubernetes Node
+# Single-stage Dockerfile that combines base Fedora + CRI-O + kinc components
+FROM fedora:42
+
+# Set container metadata for systemd
+ENV container=docker
+
+# Cache-busting increment for package updates (increment when packages need updating)
+ARG CACHE_BUST=1
+
+# Install all dependencies using dnf (Fedora package manager)
+# Packages are organized by category:
+# - packages needed to run services (systemd)
+# - packages needed for kubernetes components  
+# - packages needed for networked backed storage with kubernetes
+# - packages needed by the container runtime (CRI-O/crun)
+# - misc packages kind uses itself
+# - packages that provide semi-core kubernetes functionality
+RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
+    && dnf update -y \
+    && dnf install -y \
+      systemd \
+      conntrack-tools nftables iptables-nft iproute ethtool util-linux kmod \
+      libseccomp pigz fuse-overlayfs \
+      nfs-utils iscsi-initiator-utils \
+      bash ca-certificates curl jq procps-ng which hostname \
+      cri-o1.33 crun \
+      containernetworking-plugins \
+      container-selinux \
+      kubernetes1.33 \
+      kubernetes1.33-kubeadm \
+      cri-tools1.33 \
+    && dnf clean all
+
+# Configure systemd (separate layer for better caching)
+RUN echo "Configuring systemd..." \
+    && systemctl mask \
+        dev-hugepages.mount \
+        sys-fs-fuse-connections.mount \
+        systemd-update-utmp.service \
+        systemd-tmpfiles-setup.service \
+        console-getty.service \
+    && rm -f /lib/systemd/system/multi-user.target.wants/* \
+    && rm -f /etc/systemd/system/*.wants/* \
+    && rm -f /lib/systemd/system/local-fs.target.wants/* \
+    && rm -f /lib/systemd/system/sockets.target.wants/*udev* \
+    && rm -f /lib/systemd/system/sockets.target.wants/*initctl* \
+    && rm -f /lib/systemd/system/basic.target.wants/* \
+    && echo "ReadKMsg=no" >> /etc/systemd/journald.conf \
+    && rm -f /sbin/init \
+    && ln -s /usr/lib/systemd/systemd /sbin/init
+
+# Enable/disable base services
+RUN echo "Enabling / Disabling base services ... " \
+    && systemctl enable kubelet.service \
+    && systemctl enable crio.service \
+    && systemctl enable dbus.socket \
+    && systemctl enable dbus-broker.service \
+    && systemctl mask systemd-binfmt.service
+
+# Create required directories
+RUN mkdir -p /etc/kubernetes/manifests \
+    && mkdir -p /etc/systemd/system/multi-user.target.wants
+
+# Copy in static files (adapted for Fedora/CRI-O)
+# all scripts and directories are 0755 (rwx r-x r-x)
+# all non-scripts are 0644 (rw- r-- r--)
+COPY --chmod=0644 base/etc/* /etc/
+COPY --chmod=0644 base/etc/containers/ /etc/containers/
+COPY --chmod=0644 base/etc/crio/ /etc/crio/
+COPY --chmod=0644 base/etc/default/* /etc/default/
+COPY --chmod=0644 base/etc/sysctl.d/* /etc/sysctl.d/
+COPY --chmod=0644 base/etc/systemd/system/* /etc/systemd/system/
+COPY --chmod=0644 base/etc/systemd/system/kubelet.service.d/* /etc/systemd/system/kubelet.service.d/
+
+# Copy rootless crun wrapper for OOM score adjustment fix
+COPY --chmod=0755 base/usr/local/bin/crun-wrapper.sh /usr/local/bin/crun-wrapper.sh
+
+# Copy kinc-specific components
+COPY kinc/etc/systemd/system/kinc-init.service /etc/systemd/system/kinc-init.service
+COPY kinc/etc/systemd/system/kinc-cgroup-setup.service /etc/systemd/system/kinc-cgroup-setup.service
+COPY --chmod=0755 kinc/etc/kinc/scripts/* /etc/kinc/scripts/
+COPY kinc/kinc/manifests/ /kinc/manifests/
+
+# Copy rootless kubelet configuration
+COPY --chmod=0644 base/var/lib/kubelet/config-rootless.yaml /var/lib/kubelet/config-rootless.yaml
+
+# Copy runtime configuration files
+# kubeadm.conf now mounted at runtime via Quadlet volume
+COPY kinc/etc/kinc/patches/ /etc/kinc/patches/
+
+# Setup crun wrapper for rootless OOM score adjustment fix
+RUN echo "Setting up crun wrapper for rootless operation ..." \
+    && mv /usr/bin/crun /usr/bin/crun.orig \
+    && ln -sf /usr/local/bin/crun-wrapper.sh /usr/bin/crun \
+    && echo "crun wrapper installed"
+
+# Enable kinc services now that service files are copied
+RUN echo "Enabling kinc services ..." \
+    && systemctl enable kinc-init.service \
+    && systemctl enable kinc-cgroup-setup.service \
+    && echo "kinc services enabled"
+
+# Set proper permissions for kinc manifests
+RUN chmod -R 755 /kinc/manifests/
+
+# Verify installation and configuration
+RUN crio --version \
+    && /usr/bin/crun.orig --version \
+    && echo "crun wrapper installed:" \
+    && ls -la /usr/bin/crun /usr/bin/crun.orig /usr/local/bin/crun-wrapper.sh \
+    && crictl --version \
+    && kubelet --version \
+    && kubeadm version \
+    && echo "CNI plugins installed via package:" \
+    && ls -la /usr/libexec/cni/ \
+    && echo "SystemD services enabled:" \
+    && systemctl list-unit-files | grep enabled | grep -E "(crio|kubelet|kinc-init|kinc-cgroup-setup)" \
+    && echo "Rootless configurations:" \
+    && ls -la /etc/containers/storage.conf /etc/crio/crio.conf.d/04-rootless-storage.conf /etc/crio/crio.conf.d/05-rootless-cgroup.conf \
+    && echo "✅ CRI-O container runtime configured with rootless support"
+
+# systemd exits on SIGRTMIN+3, not SIGTERM (which re-executes it)
+# https://bugzilla.redhat.com/show_bug.cgi?id=1201657
+STOPSIGNAL SIGRTMIN+3
+
+# Direct systemd entrypoint - no wrapper script needed
+ENTRYPOINT [ "/sbin/init" ]
+
+# Labels for metadata
+LABEL io.kinc.version="v1.33.5-rootless"
+LABEL io.kinc.runtime="crio"
+LABEL io.kinc.init="baked-in"
+LABEL io.kinc.rootless="true"
+LABEL io.kinc.oom-wrapper="jq-based"
