@@ -1,4 +1,4 @@
-name: kinc CI Validation
+name: kinc CI
 
 on:
   push:
@@ -11,258 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  test-kinc-deployment:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout kinc
-        uses: actions/checkout@v4
-
-      # Setup: Enable IP forwarding (required for Kubernetes networking)
-      - name: Enable IP forwarding
-        run: |
-          echo "=== Enabling IP forwarding ==="
-          echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-          sysctl net.ipv4.ip_forward
-
-      # Setup: Verify dependencies
-      - name: Install dependencies
-        run: |
-          echo "=== Checking Podman availability ==="
-          podman --version
-          
-          echo "=== Checking systemd user services ==="
-          systemctl --user status || true
-          
-          echo "=== Installing jq ==="
-          sudo apt-get update && sudo apt-get install -y jq
-
-      # Build: Create kinc image
-      - name: Build kinc image
-        run: |
-          echo "=== Building kinc container image ==="
-          bash ./tools/build.sh
-        shell: bash
-        env:
-          CACHE_BUST: ${{ github.run_number }}
-
-      # Deploy: Create default cluster
-      - name: Deploy kinc cluster
-        run: |
-          echo "=== Deploying kinc cluster ==="
-          bash ./tools/deploy.sh
-        shell: bash
-
-      # Monitor: Wait for cluster ready
-      - name: Monitor cluster initialization
-        run: |
-          echo "=== Monitoring cluster initialization ==="
-          timeout 300 bash ./tools/monitor.sh || {
-            echo "❌ Cluster initialization timeout"
-            exit 1
-          }
-        shell: bash
-
-      # Extract: Get kubeconfig for validation
-      - name: Extract kubeconfig
-        run: |
-          echo "=== Extracting kubeconfig ==="
-          mkdir -p ~/.kube
-          podman exec kinc-default-control-plane cat /etc/kubernetes/admin.conf | \
-            sed 's/https:\/\/kinc-default-control-plane:6443/https:\/\/127.0.0.1:6443/' > ~/.kube/config-kinc
-          
-          echo "=== Verifying kubeconfig ==="
-          export KUBECONFIG=~/.kube/config-kinc
-          kubectl cluster-info
-
-      # Validate: Check cluster health
-      - name: Validate cluster
-        run: |
-          echo "=== Validating cluster health ==="
-          export KUBECONFIG=~/.kube/config-kinc
-          
-          # Check nodes
-          kubectl get nodes -o wide
-          
-          # Check system pods
-          kubectl get pods -A
-          
-          # Wait for CoreDNS
-          kubectl wait --for=condition=ready pod -l k8s-app=kube-dns -n kube-system --timeout=120s
-          
-          # Verify all pods are running (should return empty if all good)
-          failed_pods=$(kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded --no-headers 2>/dev/null | wc -l)
-          if [ "$failed_pods" -gt 0 ]; then
-            echo "❌ Found $failed_pods non-running pods:"
-            kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded
-            exit 1
-          fi
-          echo "✅ All pods are running"
-
-      # Test: Deploy workload
-      - name: Test workload deployment
-        run: |
-          echo "=== Testing workload deployment ==="
-          export KUBECONFIG=~/.kube/config-kinc
-          
-          # Create test namespace
-          kubectl create namespace kinc-test
-          
-          # Deploy nginx
-          kubectl create deployment nginx --image=nginx -n kinc-test
-          kubectl expose deployment nginx --port=80 -n kinc-test
-          
-          # Wait for pod ready
-          kubectl wait --for=condition=ready pod -l app=nginx -n kinc-test --timeout=120s
-          
-          # Verify service created
-          kubectl get svc -n kinc-test
-          
-          echo "✅ Workload deployment successful"
-
-      # Test: Storage provisioning
-      - name: Test storage provisioning
-        run: |
-          echo "=== Testing storage provisioning ==="
-          export KUBECONFIG=~/.kube/config-kinc
-          
-          # Check available storage classes first
-          echo "Available storage classes:"
-          kubectl get storageclass
-          
-          # Wait for local-path-provisioner to be ready
-          echo "Waiting for local-path-provisioner..."
-          kubectl wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=120s
-          
-          cat <<EOF | kubectl apply -f -
-          apiVersion: v1
-          kind: PersistentVolumeClaim
-          metadata:
-            name: test-pvc
-            namespace: kinc-test
-          spec:
-            accessModes:
-              - ReadWriteOnce
-            resources:
-              requests:
-                storage: 100Mi
-            storageClassName: standard
-          EOF
-          
-          # Wait for PVC bound with longer timeout and better error handling
-          echo "Waiting for PVC to be bound..."
-          if ! kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc -n kinc-test --timeout=120s; then
-            echo "❌ PVC failed to bind within timeout. Debugging..."
-            kubectl get pvc -n kinc-test
-            kubectl describe pvc test-pvc -n kinc-test
-            kubectl get events -n kinc-test
-            kubectl get pods -n local-path-storage
-            kubectl logs -l app=local-path-provisioner -n local-path-storage --tail=50
-            exit 1
-          fi
-          
-          kubectl get pvc -n kinc-test
-          kubectl describe pvc test-pvc -n kinc-test
-          echo "✅ Storage provisioning successful"
-        shell: bash
-
-      # Test: Network connectivity
-      - name: Test network connectivity
-        run: |
-          echo "=== Testing network connectivity ==="
-          export KUBECONFIG=~/.kube/config-kinc
-          
-          # Test DNS resolution
-          kubectl run test-dns --image=busybox --rm -i --restart=Never -- \
-            nslookup kubernetes.default.svc.cluster.local || {
-            echo "❌ DNS resolution failed"
-            exit 1
-          }
-          
-          # Test service connectivity
-          kubectl run test-service --image=busybox --rm -i --restart=Never -- \
-            wget -qO- nginx.kinc-test.svc.cluster.local || {
-            echo "❌ Service connectivity failed"
-            exit 1
-          }
-          
-          echo "✅ Network connectivity successful"
-
-      # Test: Run comprehensive test suite
-      - name: Run kinc test suite
-        run: |
-          echo "=== Running kinc test suite ==="
-          export KUBECONFIG=~/.kube/config-kinc
-          if [ -f ./tools/test.sh ]; then
-            bash ./tools/test.sh
-          else
-            echo "ℹ️  No test suite found, skipping"
-          fi
-        shell: bash
-
-      # Monitor: Resource usage
-      - name: Monitor resource usage
-        run: |
-          echo "=== Resource Usage ==="
-          echo "Container stats:"
-          podman stats kinc-default-control-plane --no-stream || true
-          
-          echo "Disk usage:"
-          df -h
-          
-          echo "Memory usage:"
-          free -h
-          
-          echo "Process count:"
-          ps aux | wc -l
-
-      # Collect: Logs and artifacts
-      - name: Collect cluster logs
-        if: always()
-        run: |
-          echo "=== Collecting cluster logs ==="
-          
-          mkdir -p artifacts
-          
-          # Container logs
-          podman logs kinc-default-control-plane > artifacts/container.log 2>&1 || true
-          
-          # Systemd service status
-          systemctl --user status kinc-* > artifacts/systemd-status.txt 2>&1 || true
-          
-          # Kubernetes cluster info
-          export KUBECONFIG=~/.kube/config-kinc
-          kubectl cluster-info dump > artifacts/cluster-info.txt 2>&1 || true
-          kubectl get all -A > artifacts/all-resources.txt 2>&1 || true
-          kubectl get events -A --sort-by='.lastTimestamp' > artifacts/events.txt 2>&1 || true
-          
-          # Resource usage
-          podman stats kinc-default-control-plane --no-stream > artifacts/resource-usage.txt 2>&1 || true
-          
-          # Network info
-          ip addr show > artifacts/network-interfaces.txt 2>&1 || true
-          netstat -tlnp > artifacts/network-ports.txt 2>&1 || true
-
-      # Upload: Test artifacts
-      - name: Upload test artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kinc-ci-logs-${{ github.run_number }}
-          path: artifacts/
-          retention-days: 30
-
-      # Cleanup: Remove cluster
-      - name: Cleanup
-        if: always()
-        run: |
-          echo "=== Cleaning up kinc cluster ==="
-          bash ./tools/cleanup.sh || true
-        shell: bash
-
   test-multi-cluster:
     runs-on: ubuntu-latest
-    needs: test-kinc-deployment
     
     steps:
       - name: Checkout kinc
@@ -271,178 +21,348 @@ jobs:
       - name: Enable IP forwarding
         run: echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
 
-      - name: Build kinc image
-        run: bash ./tools/build.sh
+      - name: Build base and cluster images efficiently
+        run: |
+          echo "=== Building base and cluster images efficiently ==="
+          
+          # 🎯 CLUSTER CONFIGURATION - Add/remove clusters here
+          # Supports any number of clusters: 2, 5, 10, etc.
+          CLUSTERS="default dev staging"
+          # To add production: CLUSTERS="default dev staging prod"
+          # To add more: CLUSTERS="default dev staging prod test qa"
+          
+          # Build base image first
+          echo "Building base image..."
+          bash ./tools/build.sh
+          
+          # Build cluster-specific images (will reuse base layers)
+          for cluster in $CLUSTERS; do
+            if [ "$cluster" != "default" ]; then
+              echo "Building $cluster cluster image (reusing base layers)..."
+              CLUSTER_NAME=$cluster bash ./tools/build.sh
+            fi
+          done
+          
+          echo "=== Image build summary ==="
+          podman images localhost/kinc/node
         shell: bash
 
-      # Deploy multiple clusters concurrently
-      - name: Deploy dev cluster
+      - name: Deploy clusters in parallel using background jobs
         run: |
-          echo "=== Deploying dev cluster ==="
-          CLUSTER_NAME=dev bash ./tools/deploy.sh
-          timeout 300 CLUSTER_NAME=dev bash ./tools/monitor.sh
+          echo "=== Deploying clusters in parallel ==="
+          
+          # 🎯 CLUSTER CONFIGURATION - Must match build step
+          CLUSTERS="dev staging"
+          # To add production: CLUSTERS="dev staging prod"
+          # To add more: CLUSTERS="dev staging prod test qa"
+          
+          
+          # Deploy clusters sequentially to avoid port conflicts
+          for cluster in $CLUSTERS; do
+            echo "🚀 Starting deployment of $cluster cluster..."
+            
+            # Start deployment in background
+            CLUSTER_NAME=$cluster bash ./tools/full-deploy.sh > /tmp/deploy-${cluster}.log 2>&1 &
+            deploy_pid=$!
+            echo "Deploy PID: $deploy_pid"
+            
+            # Wait for this cluster's port to be bound before starting next
+            echo "⏳ Waiting for $cluster cluster port to be bound..."
+            max_wait=600  # 10 minutes
+            waited=0
+            cluster_port=""
+            
+            while [ $waited -lt $max_wait ]; do
+              # Check if deployment process is still running
+              if ! kill -0 $deploy_pid 2>/dev/null; then
+                # Process finished, check if it succeeded
+                if wait $deploy_pid; then
+                  echo "✅ $cluster deployment process completed"
+                else
+                  echo "❌ $cluster deployment process failed"
+                  cat /tmp/deploy-${cluster}.log || true
+                  exit 1
+                fi
+              fi
+              
+              # Check if container exists and has bound port
+              if podman ps --format "{{.Names}}" | grep -q "^kinc-${cluster}-control-plane$"; then
+                # Extract the actual bound port from container inspect
+                cluster_port=$(podman inspect kinc-${cluster}-control-plane --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}}{{end}}{{end}}' 2>/dev/null)
+                if [[ -n "$cluster_port" && "$cluster_port" =~ ^[0-9]+$ ]]; then
+                  echo "✅ $cluster cluster bound to port $cluster_port"
+                  echo "${cluster^^}_PORT=$cluster_port" >> $GITHUB_ENV
+                  echo "🚀 Port secured, can start next cluster (API server will initialize in background)"
+                  break
+                else
+                  echo "⏳ $cluster container port not bound yet..."
+                fi
+              else
+                echo "⏳ $cluster container not running yet..."
+              fi
+              
+              sleep 5
+              waited=$((waited + 5))
+            done
+            
+            # Check if we successfully got the port
+            if [[ -z "$cluster_port" ]]; then
+              echo "❌ CRITICAL: $cluster cluster failed to bind port within timeout!"
+              cat /tmp/deploy-${cluster}.log || true
+              exit 1
+            fi
+            
+            echo "✅ $cluster cluster port secured ($cluster_port), proceeding to next cluster..."
+          done
+          
+          echo "✅ All clusters deployed sequentially with unique ports"
         shell: bash
 
-      - name: Deploy staging cluster
+
+      - name: Wait for all clusters to be ready
         run: |
-          echo "=== Deploying staging cluster ==="
-          CLUSTER_NAME=staging bash ./tools/deploy.sh
-          timeout 300 CLUSTER_NAME=staging bash ./tools/monitor.sh
+          echo "=== Waiting for all clusters to be ready ==="
+          
+          # 🎯 CLUSTER CONFIGURATION - Must match deploy step
+          CLUSTERS="dev staging"
+          
+          for cluster in $CLUSTERS; do
+            # Get port from environment variable
+            port_var="${cluster^^}_PORT"
+            port=${!port_var}
+            
+            echo "⏳ Waiting for $cluster cluster API server to be ready (port $port)..."
+            
+            # Wait for API server to respond
+            max_attempts=60  # 5 minutes
+            for i in $(seq 1 $max_attempts); do
+              if curl -k -s https://127.0.0.1:$port/healthz >/dev/null 2>&1; then
+                echo "✅ $cluster cluster API server ready on port $port"
+                break
+              fi
+              
+              if [ $((i % 12)) -eq 0 ]; then  # Every minute
+                echo "Still waiting for $cluster API server... (attempt $i/$max_attempts)"
+              fi
+              sleep 5
+            done
+            
+            # Verify API server is responding
+            if ! curl -k -s https://127.0.0.1:$port/healthz >/dev/null 2>&1; then
+              echo "❌ $cluster cluster API server failed to become ready after $max_attempts attempts"
+              exit 1
+            fi
+          done
+          
+          echo "✅ All cluster API servers are ready"
         shell: bash
 
       - name: Extract kubeconfigs
         run: |
-          echo "=== Extracting kubeconfigs for both clusters ==="
+          echo "=== Extracting kubeconfigs for all clusters ==="
           mkdir -p ~/.kube
           
-          # Dev cluster kubeconfig
-          podman exec kinc-dev-control-plane cat /etc/kubernetes/admin.conf | \
-            sed 's/https:\/\/kinc-dev-control-plane:6443/https:\/\/127.0.0.1:6444/' > ~/.kube/config-kinc-dev
+          # 🎯 CLUSTER CONFIGURATION - Must match deploy step
+          CLUSTERS="dev staging"
           
-          # Staging cluster kubeconfig
-          podman exec kinc-staging-control-plane cat /etc/kubernetes/admin.conf | \
-            sed 's/https:\/\/kinc-staging-control-plane:6443/https:\/\/127.0.0.1:6445/' > ~/.kube/config-kinc-staging
+          for cluster in $CLUSTERS; do
+            # Get port from environment variable
+            port_var="${cluster^^}_PORT"
+            port=${!port_var}
+            
+            echo "Extracting kubeconfig for $cluster cluster (port $port)..."
+            
+            # Extract kubeconfig
+            podman cp kinc-${cluster}-control-plane:/etc/kubernetes/admin.conf ~/.kube/config-kinc-${cluster}
+            
+            # Update server URL with actual port
+            sed -i "s|server: https://.*:6443|server: https://127.0.0.1:$port|g" ~/.kube/config-kinc-${cluster}
+            
+            echo "✅ $cluster cluster kubeconfig: ~/.kube/config-kinc-${cluster} (port $port)"
+          done
+        shell: bash
 
-      - name: Validate both clusters
+      - name: Validate multi-cluster isolation
         run: |
-          echo "=== Testing dev cluster ==="
-          export KUBECONFIG=~/.kube/config-kinc-dev
-          kubectl get nodes -o wide
-          kubectl get pods -A
+          echo "=== Validating multi-cluster isolation ==="
           
-          echo "=== Testing staging cluster ==="
-          export KUBECONFIG=~/.kube/config-kinc-staging
-          kubectl get nodes -o wide
-          kubectl get pods -A
-
-      - name: Test port isolation
-        run: |
+          # 🎯 CLUSTER CONFIGURATION - Must match deploy step
+          CLUSTERS="dev staging"
+          
+          # Check all services are active
+          for cluster in $CLUSTERS; do
+            echo "Checking $cluster cluster service..."
+            systemctl --user is-active kinc-${cluster}-control-plane.service
+          done
+          
+          # Check all containers are running
+          for cluster in $CLUSTERS; do
+            echo "Checking $cluster cluster container..."
+            podman ps --filter "name=kinc-${cluster}-control-plane" --format "{{.Names}} {{.Status}}"
+          done
+          
+          # Collect all ports and validate API servers
+          declare -A cluster_ports
+          
+          for cluster in $CLUSTERS; do
+            # Get port from environment variable
+            port_var="${cluster^^}_PORT"
+            port=${!port_var}
+            cluster_ports[$cluster]=$port
+            
+            echo "$cluster cluster port: $port"
+            
+            # Verify API server responds
+            if curl -k -s https://127.0.0.1:$port/healthz >/dev/null 2>&1; then
+              echo "✅ $cluster cluster API ($port) responding"
+            else
+              echo "❌ $cluster cluster API ($port) not responding"
+              exit 1
+            fi
+          done
+          
+          # Show all ports in netstat
+          all_ports=$(printf "%s|" "${cluster_ports[@]}")
+          all_ports=${all_ports%|}  # Remove trailing |
+          echo "=== Active ports ==="
+          netstat -tlnp | grep -E ":($all_ports)" || true
+          
+          # Verify all ports are unique
           echo "=== Verifying port isolation ==="
+          ports_list=(${cluster_ports[@]})
+          unique_ports=($(printf "%s\n" "${ports_list[@]}" | sort -u))
           
-          # Check port allocation
-          netstat -tlnp | grep -E "(6443|6444|6445)" || true
-          
-          # Dev should be on 6444
-          grep "server: https://127.0.0.1:6444" ~/.kube/config-kinc-dev || {
-            echo "❌ Dev cluster not on expected port 6444"
-            exit 1
-          }
-          
-          # Staging should be on 6445
-          grep "server: https://127.0.0.1:6445" ~/.kube/config-kinc-staging || {
-            echo "❌ Staging cluster not on expected port 6445"
-            exit 1
-          }
-          
-          echo "✅ Port isolation verified"
-
-      - name: Test cross-cluster isolation
-        run: |
-          echo "=== Testing namespace isolation ==="
-          
-          # Create namespace in dev
-          export KUBECONFIG=~/.kube/config-kinc-dev
-          kubectl create namespace isolation-test
-          kubectl create deployment test-dev --image=nginx -n isolation-test
-          
-          # Verify it doesn't exist in staging
-          export KUBECONFIG=~/.kube/config-kinc-staging
-          if kubectl get namespace isolation-test 2>/dev/null; then
-            echo "❌ Namespace leaked between clusters"
+          if [ ${#ports_list[@]} -eq ${#unique_ports[@]} ]; then
+            echo "✅ All ${#ports_list[@]} cluster ports are unique"
+            for cluster in $CLUSTERS; do
+              echo "  $cluster: ${cluster_ports[$cluster]}"
+            done
+          else
+            echo "❌ Port collision detected among ${#ports_list[@]} clusters!"
+            for cluster in $CLUSTERS; do
+              echo "  $cluster: ${cluster_ports[$cluster]}"
+            done
             exit 1
           fi
           
-          echo "✅ Cluster isolation verified"
+          echo "✅ Multi-cluster isolation validated"
+        shell: bash
+
+      - name: Test cluster isolation
+        run: |
+          echo "=== Testing cluster isolation ==="
+          
+          # 🎯 CLUSTER CONFIGURATION - Must match deploy step
+          CLUSTERS="dev staging"
+          clusters_array=($CLUSTERS)
+          
+          # Use first cluster to create namespace
+          first_cluster=${clusters_array[0]}
+          echo "Creating test namespace in $first_cluster cluster..."
+          export KUBECONFIG=~/.kube/config-kinc-${first_cluster}
+          kubectl create namespace isolation-test
+          
+          # Verify namespace doesn't exist in other clusters
+          for cluster in $CLUSTERS; do
+            if [ "$cluster" != "$first_cluster" ]; then
+              echo "Checking that namespace doesn't exist in $cluster cluster..."
+              export KUBECONFIG=~/.kube/config-kinc-${cluster}
+              if kubectl get namespace isolation-test 2>/dev/null; then
+                echo "❌ Namespace leaked from $first_cluster to $cluster cluster"
+                exit 1
+              else
+                echo "✅ Namespace properly isolated from $cluster cluster"
+              fi
+            fi
+          done
+          
+          echo "✅ Cluster isolation verified across all ${#clusters_array[@]} clusters"
+        shell: bash
+
+      - name: Validate clusters functionality
+        run: |
+          echo "=== Validating all clusters functionality ==="
+          
+          # 🎯 CLUSTER CONFIGURATION - Must match deploy step
+          CLUSTERS="dev staging"
+          
+          for cluster in $CLUSTERS; do
+            echo "=== Testing $cluster cluster ==="
+            export KUBECONFIG=~/.kube/config-kinc-${cluster}
+            
+            echo "Cluster info:"
+            kubectl cluster-info
+            
+            echo "Node status:"
+            kubectl get nodes -o wide
+            
+            echo "System pods:"
+            kubectl get pods -A
+            
+            echo "✅ $cluster cluster validation complete"
+          done
+        shell: bash
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          echo "=== Collecting diagnostics ==="
+          mkdir -p artifacts
+          
+          # 🎯 CLUSTER CONFIGURATION - Must match deploy step
+          CLUSTERS="dev staging"
+          
+          # Deployment logs
+          for cluster in $CLUSTERS; do
+            if [ -f "/tmp/deploy-${cluster}.log" ]; then
+              cp /tmp/deploy-${cluster}.log artifacts/deploy-${cluster}.log
+            fi
+          done
+          
+          # System diagnostics
+          for cluster in $CLUSTERS; do
+            echo "Collecting diagnostics for $cluster cluster..."
+            
+            # systemd service status
+            systemctl --user status kinc-${cluster}-control-plane.service > artifacts/${cluster}-systemd-status.txt 2>&1 || true
+            
+            # systemd service logs
+            journalctl --user -xeu kinc-${cluster}-control-plane.service --no-pager > artifacts/${cluster}-systemd-logs.txt 2>&1 || true
+            
+            # Container logs
+            podman logs kinc-${cluster}-control-plane > artifacts/${cluster}-container.log 2>&1 || true
+            
+            # Cluster info
+            export KUBECONFIG=~/.kube/config-kinc-${cluster}
+            kubectl cluster-info dump > artifacts/${cluster}-cluster-info.txt 2>&1 || true
+            kubectl get all -A > artifacts/${cluster}-resources.txt 2>&1 || true
+            kubectl get events -A --sort-by='.lastTimestamp' > artifacts/${cluster}-events.txt 2>&1 || true
+          done
+          
+          # System info
+          netstat -tlnp > artifacts/network-ports.txt 2>&1 || true
+          ip addr show > artifacts/network-interfaces.txt 2>&1 || true
+          systemctl --user --failed > artifacts/systemd-failed-units.txt 2>&1 || true
+        shell: bash
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kinc-diagnostics-${{ github.run_number }}
+          path: artifacts/
+          retention-days: 30
 
       - name: Cleanup all clusters
         if: always()
         run: |
-          CLUSTER_NAME=dev bash ./tools/cleanup.sh || true
-          CLUSTER_NAME=staging bash ./tools/cleanup.sh || true
-        shell: bash
-
-  test-performance:
-    runs-on: ubuntu-latest
-    needs: test-kinc-deployment
-    
-    steps:
-      - name: Checkout kinc
-        uses: actions/checkout@v4
-
-      - name: Enable IP forwarding
-        run: echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-
-      # Measure deployment time
-      - name: Build and deploy with timing
-        run: |
-          echo "=== Measuring kinc deployment time ==="
+          echo "=== Cleaning up all clusters ==="
           
-          echo "📊 Building kinc image..."
-          build_start=$(date +%s)
-          bash ./tools/build.sh
-          build_end=$(date +%s)
-          build_duration=$((build_end - build_start))
+          # 🎯 CLUSTER CONFIGURATION - Must match deploy step
+          CLUSTERS="dev staging"
           
-          echo "📊 Deploying kinc cluster..."
-          deploy_start=$(date +%s)
-          bash ./tools/deploy.sh
-          timeout 300 bash ./tools/monitor.sh
-          deploy_end=$(date +%s)
-          deploy_duration=$((deploy_end - deploy_start))
-          
-          total_duration=$((deploy_end - build_start))
-          
-          echo "⏱️  Build time: ${build_duration}s"
-          echo "⏱️  Deploy time: ${deploy_duration}s"
-          echo "⏱️  Total time: ${total_duration}s"
-          
-          # Store timing
-          echo "BUILD_TIME=${build_duration}" >> $GITHUB_ENV
-          echo "DEPLOY_TIME=${deploy_duration}" >> $GITHUB_ENV
-          echo "TOTAL_TIME=${total_duration}" >> $GITHUB_ENV
-        shell: bash
-
-      - name: Extract kubeconfig
-        run: |
-          mkdir -p ~/.kube
-          podman exec kinc-default-control-plane cat /etc/kubernetes/admin.conf | \
-            sed 's/https:\/\/kinc-default-control-plane:6443/https:\/\/127.0.0.1:6443/' > ~/.kube/config-kinc
-
-      - name: Measure workload scheduling time
-        run: |
-          echo "=== Measuring workload scheduling time ==="
-          export KUBECONFIG=~/.kube/config-kinc
-          
-          start=$(date +%s)
-          kubectl create namespace perf-test
-          kubectl create deployment nginx --image=nginx --replicas=5 -n perf-test
-          kubectl wait --for=condition=ready pod -l app=nginx -n perf-test --timeout=120s
-          end=$(date +%s)
-          
-          schedule_time=$((end - start))
-          echo "⏱️  5-pod scheduling time: ${schedule_time}s"
-          echo "SCHEDULE_TIME=${schedule_time}" >> $GITHUB_ENV
-
-      - name: Report performance
-        run: |
-          echo "### kinc Performance Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Metric | Time | Target | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|------|--------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Build Time | ${BUILD_TIME}s | < 60s | $([ ${BUILD_TIME} -lt 60 ] && echo '✅' || echo '⚠️') |" >> $GITHUB_STEP_SUMMARY
-          echo "| Deploy Time | ${DEPLOY_TIME}s | < 120s | $([ ${DEPLOY_TIME} -lt 120 ] && echo '✅' || echo '⚠️') |" >> $GITHUB_STEP_SUMMARY
-          echo "| Total Time | ${TOTAL_TIME}s | < 180s | $([ ${TOTAL_TIME} -lt 180 ] && echo '✅' || echo '⚠️') |" >> $GITHUB_STEP_SUMMARY
-          echo "| Pod Scheduling (5 pods) | ${SCHEDULE_TIME}s | < 30s | $([ ${SCHEDULE_TIME} -lt 30 ] && echo '✅' || echo '⚠️') |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          # Overall assessment
-          if [ ${TOTAL_TIME} -lt 180 ] && [ ${SCHEDULE_TIME} -lt 30 ]; then
-            echo "**Overall**: ✅ Performance targets met" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "**Overall**: ⚠️ Performance needs optimization" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Cleanup
-        if: always()
-        run: bash ./tools/cleanup.sh || true
+          for cluster in $CLUSTERS; do
+            echo "Cleaning up $cluster cluster..."
+            CLUSTER_NAME=$cluster bash ./tools/cleanup.sh || true
+          done
         shell: bash

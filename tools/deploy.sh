@@ -149,8 +149,28 @@ echo "✅ Image updated"
 echo
 echo "🚀 Step 5: Starting user services"
 systemctl --user daemon-reload
+
+echo "Starting volume service..."
 systemctl --user start kinc-${CLUSTER_NAME}-var-data-volume.service
-systemctl --user start kinc-${CLUSTER_NAME}-control-plane.service
+
+echo "Starting control plane service..."
+if ! systemctl --user start kinc-${CLUSTER_NAME}-control-plane.service; then
+    echo "❌ Failed to start kinc-${CLUSTER_NAME}-control-plane.service"
+    echo
+    echo "=== systemd Service Status ==="
+    systemctl --user status kinc-${CLUSTER_NAME}-control-plane.service || true
+    echo
+    echo "=== systemd Service Logs ==="
+    journalctl --user -xeu kinc-${CLUSTER_NAME}-control-plane.service --no-pager -n 50 || true
+    echo
+    echo "=== Container Logs (if any) ==="
+    podman logs kinc-${CLUSTER_NAME}-control-plane || true
+    echo
+    echo "=== Failed systemd Units ==="
+    systemctl --user --failed || true
+    exit 1
+fi
+
 echo "✅ Volume and container services started"
 
 # Step 5: Wait for cluster initialization
