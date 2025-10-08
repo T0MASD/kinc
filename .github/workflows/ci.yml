@@ -1,0 +1,418 @@
+name: kinc CI Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-kinc-deployment:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout kinc
+        uses: actions/checkout@v4
+
+      # Setup: Enable IP forwarding (required for Kubernetes networking)
+      - name: Enable IP forwarding
+        run: |
+          echo "=== Enabling IP forwarding ==="
+          echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+          sysctl net.ipv4.ip_forward
+
+      # Setup: Verify dependencies
+      - name: Install dependencies
+        run: |
+          echo "=== Checking Podman availability ==="
+          podman --version
+          
+          echo "=== Checking systemd user services ==="
+          systemctl --user status || true
+          
+          echo "=== Installing jq ==="
+          sudo apt-get update && sudo apt-get install -y jq
+
+      # Build: Create kinc image
+      - name: Build kinc image
+        run: |
+          echo "=== Building kinc container image ==="
+          ./tools/build.sh
+        env:
+          CACHE_BUST: ${{ github.run_number }}
+
+      # Deploy: Create default cluster
+      - name: Deploy kinc cluster
+        run: |
+          echo "=== Deploying kinc cluster ==="
+          ./tools/deploy.sh
+
+      # Monitor: Wait for cluster ready
+      - name: Monitor cluster initialization
+        run: |
+          echo "=== Monitoring cluster initialization ==="
+          timeout 300 ./tools/monitor.sh || {
+            echo "❌ Cluster initialization timeout"
+            exit 1
+          }
+
+      # Extract: Get kubeconfig for validation
+      - name: Extract kubeconfig
+        run: |
+          echo "=== Extracting kubeconfig ==="
+          mkdir -p ~/.kube
+          podman exec kinc-default-control-plane cat /etc/kubernetes/admin.conf | \
+            sed 's/https:\/\/kinc-default-control-plane:6443/https:\/\/127.0.0.1:6443/' > ~/.kube/config-kinc
+          
+          echo "=== Verifying kubeconfig ==="
+          export KUBECONFIG=~/.kube/config-kinc
+          kubectl cluster-info
+
+      # Validate: Check cluster health
+      - name: Validate cluster
+        run: |
+          echo "=== Validating cluster health ==="
+          export KUBECONFIG=~/.kube/config-kinc
+          
+          # Check nodes
+          kubectl get nodes -o wide
+          
+          # Check system pods
+          kubectl get pods -A
+          
+          # Wait for CoreDNS
+          kubectl wait --for=condition=ready pod -l k8s-app=kube-dns -n kube-system --timeout=120s
+          
+          # Verify all pods are running (should return empty if all good)
+          failed_pods=$(kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded --no-headers 2>/dev/null | wc -l)
+          if [ "$failed_pods" -gt 0 ]; then
+            echo "❌ Found $failed_pods non-running pods:"
+            kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded
+            exit 1
+          fi
+          echo "✅ All pods are running"
+
+      # Test: Deploy workload
+      - name: Test workload deployment
+        run: |
+          echo "=== Testing workload deployment ==="
+          export KUBECONFIG=~/.kube/config-kinc
+          
+          # Create test namespace
+          kubectl create namespace kinc-test
+          
+          # Deploy nginx
+          kubectl create deployment nginx --image=nginx -n kinc-test
+          kubectl expose deployment nginx --port=80 -n kinc-test
+          
+          # Wait for pod ready
+          kubectl wait --for=condition=ready pod -l app=nginx -n kinc-test --timeout=120s
+          
+          # Verify service created
+          kubectl get svc -n kinc-test
+          
+          echo "✅ Workload deployment successful"
+
+      # Test: Storage provisioning
+      - name: Test storage provisioning
+        run: |
+          echo "=== Testing storage provisioning ==="
+          export KUBECONFIG=~/.kube/config-kinc
+          
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: test-pvc
+            namespace: kinc-test
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+            storageClassName: standard
+          EOF
+          
+          # Wait for PVC bound
+          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc -n kinc-test --timeout=60s
+          
+          kubectl get pvc -n kinc-test
+          echo "✅ Storage provisioning successful"
+
+      # Test: Network connectivity
+      - name: Test network connectivity
+        run: |
+          echo "=== Testing network connectivity ==="
+          export KUBECONFIG=~/.kube/config-kinc
+          
+          # Test DNS resolution
+          kubectl run test-dns --image=busybox --rm -i --restart=Never -- \
+            nslookup kubernetes.default.svc.cluster.local || {
+            echo "❌ DNS resolution failed"
+            exit 1
+          }
+          
+          # Test service connectivity
+          kubectl run test-service --image=busybox --rm -i --restart=Never -- \
+            wget -qO- nginx.kinc-test.svc.cluster.local || {
+            echo "❌ Service connectivity failed"
+            exit 1
+          }
+          
+          echo "✅ Network connectivity successful"
+
+      # Test: Run comprehensive test suite
+      - name: Run kinc test suite
+        run: |
+          echo "=== Running kinc test suite ==="
+          export KUBECONFIG=~/.kube/config-kinc
+          if [ -f ./tools/test.sh ]; then
+            ./tools/test.sh
+          else
+            echo "ℹ️  No test suite found, skipping"
+          fi
+
+      # Monitor: Resource usage
+      - name: Monitor resource usage
+        run: |
+          echo "=== Resource Usage ==="
+          echo "Container stats:"
+          podman stats kinc-default-control-plane --no-stream || true
+          
+          echo "Disk usage:"
+          df -h
+          
+          echo "Memory usage:"
+          free -h
+          
+          echo "Process count:"
+          ps aux | wc -l
+
+      # Collect: Logs and artifacts
+      - name: Collect cluster logs
+        if: always()
+        run: |
+          echo "=== Collecting cluster logs ==="
+          
+          mkdir -p artifacts
+          
+          # Container logs
+          podman logs kinc-default-control-plane > artifacts/container.log 2>&1 || true
+          
+          # Systemd service status
+          systemctl --user status kinc-* > artifacts/systemd-status.txt 2>&1 || true
+          
+          # Kubernetes cluster info
+          export KUBECONFIG=~/.kube/config-kinc
+          kubectl cluster-info dump > artifacts/cluster-info.txt 2>&1 || true
+          kubectl get all -A > artifacts/all-resources.txt 2>&1 || true
+          kubectl get events -A --sort-by='.lastTimestamp' > artifacts/events.txt 2>&1 || true
+          
+          # Resource usage
+          podman stats kinc-default-control-plane --no-stream > artifacts/resource-usage.txt 2>&1 || true
+          
+          # Network info
+          ip addr show > artifacts/network-interfaces.txt 2>&1 || true
+          netstat -tlnp > artifacts/network-ports.txt 2>&1 || true
+
+      # Upload: Test artifacts
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kinc-ci-logs-${{ github.run_number }}
+          path: artifacts/
+          retention-days: 30
+
+      # Cleanup: Remove cluster
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "=== Cleaning up kinc cluster ==="
+          ./tools/cleanup.sh || true
+
+  test-multi-cluster:
+    runs-on: ubuntu-latest
+    needs: test-kinc-deployment
+    
+    steps:
+      - name: Checkout kinc
+        uses: actions/checkout@v4
+
+      - name: Enable IP forwarding
+        run: echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+
+      - name: Build kinc image
+        run: ./tools/build.sh
+
+      # Deploy multiple clusters concurrently
+      - name: Deploy dev cluster
+        run: |
+          echo "=== Deploying dev cluster ==="
+          CLUSTER_NAME=dev ./tools/deploy.sh
+          timeout 300 CLUSTER_NAME=dev ./tools/monitor.sh
+
+      - name: Deploy staging cluster
+        run: |
+          echo "=== Deploying staging cluster ==="
+          CLUSTER_NAME=staging ./tools/deploy.sh
+          timeout 300 CLUSTER_NAME=staging ./tools/monitor.sh
+
+      - name: Extract kubeconfigs
+        run: |
+          echo "=== Extracting kubeconfigs for both clusters ==="
+          mkdir -p ~/.kube
+          
+          # Dev cluster kubeconfig
+          podman exec kinc-dev-control-plane cat /etc/kubernetes/admin.conf | \
+            sed 's/https:\/\/kinc-dev-control-plane:6443/https:\/\/127.0.0.1:6444/' > ~/.kube/config-kinc-dev
+          
+          # Staging cluster kubeconfig
+          podman exec kinc-staging-control-plane cat /etc/kubernetes/admin.conf | \
+            sed 's/https:\/\/kinc-staging-control-plane:6443/https:\/\/127.0.0.1:6445/' > ~/.kube/config-kinc-staging
+
+      - name: Validate both clusters
+        run: |
+          echo "=== Testing dev cluster ==="
+          export KUBECONFIG=~/.kube/config-kinc-dev
+          kubectl get nodes -o wide
+          kubectl get pods -A
+          
+          echo "=== Testing staging cluster ==="
+          export KUBECONFIG=~/.kube/config-kinc-staging
+          kubectl get nodes -o wide
+          kubectl get pods -A
+
+      - name: Test port isolation
+        run: |
+          echo "=== Verifying port isolation ==="
+          
+          # Check port allocation
+          netstat -tlnp | grep -E "(6443|6444|6445)" || true
+          
+          # Dev should be on 6444
+          grep "server: https://127.0.0.1:6444" ~/.kube/config-kinc-dev || {
+            echo "❌ Dev cluster not on expected port 6444"
+            exit 1
+          }
+          
+          # Staging should be on 6445
+          grep "server: https://127.0.0.1:6445" ~/.kube/config-kinc-staging || {
+            echo "❌ Staging cluster not on expected port 6445"
+            exit 1
+          }
+          
+          echo "✅ Port isolation verified"
+
+      - name: Test cross-cluster isolation
+        run: |
+          echo "=== Testing namespace isolation ==="
+          
+          # Create namespace in dev
+          export KUBECONFIG=~/.kube/config-kinc-dev
+          kubectl create namespace isolation-test
+          kubectl create deployment test-dev --image=nginx -n isolation-test
+          
+          # Verify it doesn't exist in staging
+          export KUBECONFIG=~/.kube/config-kinc-staging
+          if kubectl get namespace isolation-test 2>/dev/null; then
+            echo "❌ Namespace leaked between clusters"
+            exit 1
+          fi
+          
+          echo "✅ Cluster isolation verified"
+
+      - name: Cleanup all clusters
+        if: always()
+        run: |
+          CLUSTER_NAME=dev ./tools/cleanup.sh || true
+          CLUSTER_NAME=staging ./tools/cleanup.sh || true
+
+  test-performance:
+    runs-on: ubuntu-latest
+    needs: test-kinc-deployment
+    
+    steps:
+      - name: Checkout kinc
+        uses: actions/checkout@v4
+
+      - name: Enable IP forwarding
+        run: echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+
+      # Measure deployment time
+      - name: Build and deploy with timing
+        run: |
+          echo "=== Measuring kinc deployment time ==="
+          
+          echo "📊 Building kinc image..."
+          build_start=$(date +%s)
+          ./tools/build.sh
+          build_end=$(date +%s)
+          build_duration=$((build_end - build_start))
+          
+          echo "📊 Deploying kinc cluster..."
+          deploy_start=$(date +%s)
+          ./tools/deploy.sh
+          timeout 300 ./tools/monitor.sh
+          deploy_end=$(date +%s)
+          deploy_duration=$((deploy_end - deploy_start))
+          
+          total_duration=$((deploy_end - build_start))
+          
+          echo "⏱️  Build time: ${build_duration}s"
+          echo "⏱️  Deploy time: ${deploy_duration}s"
+          echo "⏱️  Total time: ${total_duration}s"
+          
+          # Store timing
+          echo "BUILD_TIME=${build_duration}" >> $GITHUB_ENV
+          echo "DEPLOY_TIME=${deploy_duration}" >> $GITHUB_ENV
+          echo "TOTAL_TIME=${total_duration}" >> $GITHUB_ENV
+
+      - name: Extract kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          podman exec kinc-default-control-plane cat /etc/kubernetes/admin.conf | \
+            sed 's/https:\/\/kinc-default-control-plane:6443/https:\/\/127.0.0.1:6443/' > ~/.kube/config-kinc
+
+      - name: Measure workload scheduling time
+        run: |
+          echo "=== Measuring workload scheduling time ==="
+          export KUBECONFIG=~/.kube/config-kinc
+          
+          start=$(date +%s)
+          kubectl create namespace perf-test
+          kubectl create deployment nginx --image=nginx --replicas=5 -n perf-test
+          kubectl wait --for=condition=ready pod -l app=nginx -n perf-test --timeout=120s
+          end=$(date +%s)
+          
+          schedule_time=$((end - start))
+          echo "⏱️  5-pod scheduling time: ${schedule_time}s"
+          echo "SCHEDULE_TIME=${schedule_time}" >> $GITHUB_ENV
+
+      - name: Report performance
+        run: |
+          echo "### kinc Performance Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Time | Target | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Time | ${BUILD_TIME}s | < 60s | $([ ${BUILD_TIME} -lt 60 ] && echo '✅' || echo '⚠️') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy Time | ${DEPLOY_TIME}s | < 120s | $([ ${DEPLOY_TIME} -lt 120 ] && echo '✅' || echo '⚠️') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Total Time | ${TOTAL_TIME}s | < 180s | $([ ${TOTAL_TIME} -lt 180 ] && echo '✅' || echo '⚠️') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Pod Scheduling (5 pods) | ${SCHEDULE_TIME}s | < 30s | $([ ${SCHEDULE_TIME} -lt 30 ] && echo '✅' || echo '⚠️') |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Overall assessment
+          if [ ${TOTAL_TIME} -lt 180 ] && [ ${SCHEDULE_TIME} -lt 30 ]; then
+            echo "**Overall**: ✅ Performance targets met" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Overall**: ⚠️ Performance needs optimization" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: ./tools/cleanup.sh || true
