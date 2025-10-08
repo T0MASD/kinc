@@ -41,7 +41,8 @@ jobs:
       - name: Build kinc image
         run: |
           echo "=== Building kinc container image ==="
-          ./tools/build.sh
+          bash ./tools/build.sh
+        shell: bash
         env:
           CACHE_BUST: ${{ github.run_number }}
 
@@ -49,16 +50,18 @@ jobs:
       - name: Deploy kinc cluster
         run: |
           echo "=== Deploying kinc cluster ==="
-          ./tools/deploy.sh
+          bash ./tools/deploy.sh
+        shell: bash
 
       # Monitor: Wait for cluster ready
       - name: Monitor cluster initialization
         run: |
           echo "=== Monitoring cluster initialization ==="
-          timeout 300 ./tools/monitor.sh || {
+          timeout 300 bash ./tools/monitor.sh || {
             echo "❌ Cluster initialization timeout"
             exit 1
           }
+        shell: bash
 
       # Extract: Get kubeconfig for validation
       - name: Extract kubeconfig
@@ -172,10 +175,11 @@ jobs:
           echo "=== Running kinc test suite ==="
           export KUBECONFIG=~/.kube/config-kinc
           if [ -f ./tools/test.sh ]; then
-            ./tools/test.sh
+            bash ./tools/test.sh
           else
             echo "ℹ️  No test suite found, skipping"
           fi
+        shell: bash
 
       # Monitor: Resource usage
       - name: Monitor resource usage
@@ -234,7 +238,8 @@ jobs:
         if: always()
         run: |
           echo "=== Cleaning up kinc cluster ==="
-          ./tools/cleanup.sh || true
+          bash ./tools/cleanup.sh || true
+        shell: bash
 
   test-multi-cluster:
     runs-on: ubuntu-latest
@@ -248,20 +253,23 @@ jobs:
         run: echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
 
       - name: Build kinc image
-        run: ./tools/build.sh
+        run: bash ./tools/build.sh
+        shell: bash
 
       # Deploy multiple clusters concurrently
       - name: Deploy dev cluster
         run: |
           echo "=== Deploying dev cluster ==="
-          CLUSTER_NAME=dev ./tools/deploy.sh
-          timeout 300 CLUSTER_NAME=dev ./tools/monitor.sh
+          CLUSTER_NAME=dev bash ./tools/deploy.sh
+          timeout 300 CLUSTER_NAME=dev bash ./tools/monitor.sh
+        shell: bash
 
       - name: Deploy staging cluster
         run: |
           echo "=== Deploying staging cluster ==="
-          CLUSTER_NAME=staging ./tools/deploy.sh
-          timeout 300 CLUSTER_NAME=staging ./tools/monitor.sh
+          CLUSTER_NAME=staging bash ./tools/deploy.sh
+          timeout 300 CLUSTER_NAME=staging bash ./tools/monitor.sh
+        shell: bash
 
       - name: Extract kubeconfigs
         run: |
@@ -330,8 +338,9 @@ jobs:
       - name: Cleanup all clusters
         if: always()
         run: |
-          CLUSTER_NAME=dev ./tools/cleanup.sh || true
-          CLUSTER_NAME=staging ./tools/cleanup.sh || true
+          CLUSTER_NAME=dev bash ./tools/cleanup.sh || true
+          CLUSTER_NAME=staging bash ./tools/cleanup.sh || true
+        shell: bash
 
   test-performance:
     runs-on: ubuntu-latest
@@ -351,14 +360,14 @@ jobs:
           
           echo "📊 Building kinc image..."
           build_start=$(date +%s)
-          ./tools/build.sh
+          bash ./tools/build.sh
           build_end=$(date +%s)
           build_duration=$((build_end - build_start))
           
           echo "📊 Deploying kinc cluster..."
           deploy_start=$(date +%s)
-          ./tools/deploy.sh
-          timeout 300 ./tools/monitor.sh
+          bash ./tools/deploy.sh
+          timeout 300 bash ./tools/monitor.sh
           deploy_end=$(date +%s)
           deploy_duration=$((deploy_end - deploy_start))
           
@@ -372,6 +381,7 @@ jobs:
           echo "BUILD_TIME=${build_duration}" >> $GITHUB_ENV
           echo "DEPLOY_TIME=${deploy_duration}" >> $GITHUB_ENV
           echo "TOTAL_TIME=${total_duration}" >> $GITHUB_ENV
+        shell: bash
 
       - name: Extract kubeconfig
         run: |
@@ -415,4 +425,5 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: ./tools/cleanup.sh || true
+        run: bash ./tools/cleanup.sh || true
+        shell: bash
