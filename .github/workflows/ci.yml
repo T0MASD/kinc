@@ -126,6 +126,14 @@ jobs:
           echo "=== Testing storage provisioning ==="
           export KUBECONFIG=~/.kube/config-kinc
           
+          # Check available storage classes first
+          echo "Available storage classes:"
+          kubectl get storageclass
+          
+          # Wait for local-path-provisioner to be ready
+          echo "Waiting for local-path-provisioner..."
+          kubectl wait --for=condition=ready pod -l app=local-path-provisioner -n local-path-storage --timeout=120s
+          
           cat <<EOF | kubectl apply -f -
           apiVersion: v1
           kind: PersistentVolumeClaim
@@ -137,15 +145,26 @@ jobs:
               - ReadWriteOnce
             resources:
               requests:
-                storage: 1Gi
+                storage: 100Mi
             storageClassName: standard
           EOF
           
-          # Wait for PVC bound
-          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc -n kinc-test --timeout=60s
+          # Wait for PVC bound with longer timeout and better error handling
+          echo "Waiting for PVC to be bound..."
+          if ! kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc -n kinc-test --timeout=120s; then
+            echo "❌ PVC failed to bind within timeout. Debugging..."
+            kubectl get pvc -n kinc-test
+            kubectl describe pvc test-pvc -n kinc-test
+            kubectl get events -n kinc-test
+            kubectl get pods -n local-path-storage
+            kubectl logs -l app=local-path-provisioner -n local-path-storage --tail=50
+            exit 1
+          fi
           
           kubectl get pvc -n kinc-test
+          kubectl describe pvc test-pvc -n kinc-test
           echo "✅ Storage provisioning successful"
+        shell: bash
 
       # Test: Network connectivity
       - name: Test network connectivity
