@@ -24,9 +24,15 @@ print_phase() {
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
-# Phase 0: Build
-print_phase "PHASE 0: BUILD"
-CLUSTER_NAME=${CLUSTER_NAME} ./tools/build.sh
+# Phase 0: Build (skip if using registry image)
+if [[ -z "${KINC_IMAGE:-}" ]]; then
+    print_phase "PHASE 0: BUILD"
+    CLUSTER_NAME=${CLUSTER_NAME} ./tools/build.sh
+else
+    print_phase "PHASE 0: USING REGISTRY IMAGE"
+    echo "📥 Using registry image: ${KINC_IMAGE}"
+    echo "   Skipping local build phase"
+fi
 
 # Phase 1: Cleanup
 print_phase "PHASE 1: CLEANUP"

@@ -10,7 +10,17 @@ cd "$SCRIPT_DIR"
 # Configuration: Cluster name and port management
 CLUSTER_NAME="${CLUSTER_NAME:-default}"
 FORCE_PORT="${FORCE_PORT:-}"  # Allow manual port override
-IMAGE_NAME="localhost/kinc/node:v1.33.5-${CLUSTER_NAME}"
+
+# Image configuration - support both local builds and registry images
+# Set KINC_IMAGE to use pre-built registry image, e.g.:
+# KINC_IMAGE=ghcr.io/t0masd/kinc:v1.33.5 ./tools/deploy.sh
+if [[ -n "${KINC_IMAGE:-}" ]]; then
+    IMAGE_NAME="${KINC_IMAGE}"
+    USE_REGISTRY_IMAGE=true
+else
+    IMAGE_NAME="localhost/kinc/node:v1.33.5-${CLUSTER_NAME}"
+    USE_REGISTRY_IMAGE=false
+fi
 
 echo "📁 Working directory: $SCRIPT_DIR"
 echo "🏷️  Cluster name: $CLUSTER_NAME"
@@ -139,15 +149,38 @@ sudo chown $(id -u):$(id -g) "$VOLUME_PATH/kubeadm.conf"
 rm -f /tmp/kubeadm-${CLUSTER_NAME}.conf
 echo "✅ Cluster configuration volume prepared"
 
-# Step 4: Update container file with image name
+# Step 4: Ensure image is available
 echo
-echo "🔧 Step 4: Updating image in container file"
+echo "🔧 Step 4: Ensuring image is available"
+if [[ "$USE_REGISTRY_IMAGE" == "true" ]]; then
+    echo "📥 Pulling registry image: $IMAGE_NAME"
+    if ! podman pull "$IMAGE_NAME"; then
+        echo "❌ Failed to pull registry image: $IMAGE_NAME"
+        echo "   Make sure the image exists and you have access to it"
+        echo "   Try: podman pull $IMAGE_NAME"
+        exit 1
+    fi
+    echo "✅ Registry image pulled successfully"
+else
+    echo "🏗️ Using local build image: $IMAGE_NAME"
+    # Check if local image exists
+    if ! podman images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}$"; then
+        echo "❌ Local image not found: $IMAGE_NAME"
+        echo "   Please run: CLUSTER_NAME=${CLUSTER_NAME} ./tools/build.sh"
+        exit 1
+    fi
+    echo "✅ Local image found"
+fi
+
+# Step 5: Update container file with image name
+echo
+echo "🔧 Step 5: Updating image in container file"
 sed -i "s|Image=.*|Image=$IMAGE_NAME|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 echo "✅ Image updated"
 
-# Step 5: Start services
+# Step 6: Start services
 echo
-echo "🚀 Step 5: Starting user services"
+echo "🚀 Step 6: Starting user services"
 systemctl --user daemon-reload
 
 echo "Starting volume service..."
