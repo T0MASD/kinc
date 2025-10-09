@@ -1,0 +1,299 @@
+name: Build and Publish kinc Images
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g., v1.33.5)'
+        required: true
+        default: 'v1.33.5'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up build environment
+        run: |
+          echo "=== Setting up build environment ==="
+          
+          # Enable IP forwarding for container builds
+          echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+          
+          # Check Podman version
+          podman --version
+          
+          # Determine tag
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          
+          echo "Building tag: $TAG"
+          echo "BUILD_TAG=$TAG" >> $GITHUB_ENV
+          
+          # Extract Kubernetes version from tag (v1.33.5 -> 1.33.5)
+          K8S_VERSION=$(echo "$TAG" | sed 's/^v//')
+          echo "K8S_VERSION=$K8S_VERSION" >> $GITHUB_ENV
+          echo "Kubernetes version: $K8S_VERSION"
+
+      - name: Log in to Container Registry
+        run: |
+          echo "=== Logging in to ${{ env.REGISTRY }} ==="
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Build kinc node image
+        run: |
+          echo "=== Building kinc node image ==="
+          
+          cd build
+          
+          # Build the kinc node image with proper tags
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
+          LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          
+          echo "Building image: $IMAGE_TAG"
+          
+          # Build with cache busting and proper labels
+          podman build \
+            -f Containerfile \
+            -t "$IMAGE_TAG" \
+            -t "$LATEST_TAG" \
+            --build-arg CACHE_BUST="${{ github.run_number }}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=${{ env.BUILD_TAG }}" \
+            --label "org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --label "io.kinc.version=${{ env.K8S_VERSION }}" \
+            --label "io.kinc.kubernetes.version=${{ env.K8S_VERSION }}" \
+            .
+          
+          echo "✅ Build completed successfully"
+          
+          # Show image info
+          podman images | grep kinc
+
+      - name: Test built image
+        run: |
+          echo "=== Testing built image ==="
+          
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
+          
+          # Basic image inspection
+          echo "Image details:"
+          podman inspect "$IMAGE_TAG" --format '{{json .Config.Labels}}' | jq .
+          
+          # Test that the image can start (quick smoke test)
+          echo "Testing image startup..."
+          timeout 30 podman run --rm "$IMAGE_TAG" /bin/bash -c 'echo "Image test successful"' || {
+            echo "❌ Image test failed"
+            exit 1
+          }
+          
+          echo "✅ Image test passed"
+
+      - name: Push images to registry
+        run: |
+          echo "=== Pushing images to registry ==="
+          
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
+          LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          
+          # Push versioned tag
+          echo "Pushing $IMAGE_TAG..."
+          podman push "$IMAGE_TAG"
+          
+          # Push latest tag (only for non-pre-release versions)
+          if [[ "${{ env.BUILD_TAG }}" != *"-"* ]]; then
+            echo "Pushing $LATEST_TAG..."
+            podman push "$LATEST_TAG"
+          else
+            echo "Skipping latest tag for pre-release version"
+          fi
+          
+          echo "✅ Images pushed successfully"
+
+      - name: Generate image usage examples
+        run: |
+          echo "=== Image Usage Examples ==="
+          
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
+          
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## 🎉 kinc Image Published Successfully!
+          
+          **Image**: \`$IMAGE_TAG\`
+          **Kubernetes Version**: \`${{ env.K8S_VERSION }}\`
+          **Build**: \`${{ github.run_number }}\`
+          
+          ### 📋 Usage Examples
+          
+          #### Basic Usage
+          \`\`\`bash
+          # Pull the image
+          podman pull $IMAGE_TAG
+          
+          # Start a kinc cluster
+          podman run -d --name kinc-cluster \\
+            --privileged \\
+            -p 6443:6443 \\
+            $IMAGE_TAG
+          
+          # Wait for cluster ready
+          timeout 300 bash -c 'until curl -k https://localhost:6443/healthz; do sleep 5; done'
+          
+          # Extract kubeconfig
+          podman cp kinc-cluster:/etc/kubernetes/admin.conf ~/.kube/config
+          sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
+          
+          # Use kubectl
+          kubectl get nodes
+          \`\`\`
+          
+          #### GitHub Actions Usage
+          \`\`\`yaml
+          - name: Setup kinc Kubernetes cluster
+            run: |
+              # Enable IP forwarding
+              echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+              
+              # Start kinc cluster
+              podman run -d --name kinc \\
+                --privileged \\
+                -p 6443:6443 \\
+                $IMAGE_TAG
+              
+              # Wait for ready and extract kubeconfig
+              timeout 300 bash -c 'until curl -k https://localhost:6443/healthz; do sleep 5; done'
+              mkdir -p ~/.kube
+              podman cp kinc:/etc/kubernetes/admin.conf ~/.kube/config
+              sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
+              
+              # Verify cluster
+              kubectl get nodes
+          
+          - name: Cleanup
+            if: always()
+            run: podman rm -f kinc || true
+          \`\`\`
+          
+          #### Multi-Cluster Usage
+          \`\`\`bash
+          # Start multiple clusters on different ports
+          podman run -d --name kinc-dev -p 6444:6443 --privileged $IMAGE_TAG
+          podman run -d --name kinc-staging -p 6445:6443 --privileged $IMAGE_TAG
+          
+          # Extract separate kubeconfigs
+          podman cp kinc-dev:/etc/kubernetes/admin.conf ~/.kube/config-dev
+          podman cp kinc-staging:/etc/kubernetes/admin.conf ~/.kube/config-staging
+          
+          # Update server URLs
+          sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6444|g' ~/.kube/config-dev
+          sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6445|g' ~/.kube/config-staging
+          \`\`\`
+          
+          ### 🔗 Links
+          - **Registry**: [ghcr.io/${{ github.repository }}](https://github.com/${{ github.repository }}/pkgs/container/kinc)
+          - **Source**: [github.com/${{ github.repository }}](https://github.com/${{ github.repository }})
+          - **Documentation**: [README.md](https://github.com/${{ github.repository }}/blob/main/README.md)
+          EOF
+
+      - name: Create release notes
+        if: github.event_name == 'push'
+        run: |
+          echo "=== Creating release notes ==="
+          
+          cat << EOF > release-notes.md
+          # kinc ${{ env.BUILD_TAG }}
+          
+          Container image for kinc Kubernetes ${{ env.K8S_VERSION }}
+          
+          ## 📦 Container Image
+          
+          \`\`\`bash
+          podman pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}
+          \`\`\`
+          
+          ## 🚀 Quick Start
+          
+          \`\`\`bash
+          # Start cluster
+          podman run -d --name kinc --privileged -p 6443:6443 \\
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}
+          
+          # Wait for ready
+          timeout 300 bash -c 'until curl -k https://localhost:6443/healthz; do sleep 5; done'
+          
+          # Get kubeconfig
+          podman cp kinc:/etc/kubernetes/admin.conf ~/.kube/config
+          sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
+          
+          # Use cluster
+          kubectl get nodes
+          \`\`\`
+          
+          ## 📋 What's Included
+          
+          - Kubernetes ${{ env.K8S_VERSION }}
+          - CRI-O container runtime
+          - CNI networking (kincnet)
+          - local-path-provisioner for storage
+          - CoreDNS for service discovery
+          - Rootless operation support
+          
+          ## 🔧 Build Info
+          
+          - **Build Number**: ${{ github.run_number }}
+          - **Commit**: ${{ github.sha }}
+          - **Built**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          EOF
+          
+          echo "Release notes created"
+
+  # Optional: Create GitHub release if this was triggered by a tag
+  create-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: kinc ${{ github.ref_name }}
+          body: |
+            # kinc ${{ github.ref_name }}
+            
+            🎉 **Container image available**: `ghcr.io/${{ github.repository }}:${{ github.ref_name }}`
+            
+            ## Quick Start
+            ```bash
+            podman run -d --name kinc --privileged -p 6443:6443 ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ```
+            
+            See the [usage examples](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for more details.
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
