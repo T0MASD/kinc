@@ -307,25 +307,36 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Create GitHub Release
-        uses: actions/create-release@v1
+        run: |
+          # Create release notes
+          cat << EOF > release-notes.md
+          # kinc ${{ github.ref_name }}
+          
+          🎉 **Container image available**: \`ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}\`
+          
+          ## Quick Start
+          \`\`\`bash
+          # Recommended: Use kinc tools for proper rootless setup
+          export KINC_IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          git clone https://github.com/t0masd/kinc.git && cd kinc
+          ./tools/deploy.sh
+          \`\`\`
+          
+          See the [usage examples](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for more details.
+          EOF
+          
+          # Create release using gh CLI
+          if [[ "${{ github.ref_name }}" == *"-"* ]]; then
+            # Pre-release
+            gh release create "${{ github.ref_name }}" \
+              --title "kinc ${{ github.ref_name }}" \
+              --notes-file release-notes.md \
+              --prerelease
+          else
+            # Regular release
+            gh release create "${{ github.ref_name }}" \
+              --title "kinc ${{ github.ref_name }}" \
+              --notes-file release-notes.md
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: kinc ${{ github.ref_name }}
-          body: |
-            # kinc ${{ github.ref_name }}
-            
-            🎉 **Container image available**: `ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}`
-            
-            ## Quick Start
-            ```bash
-            # Recommended: Use kinc tools for proper rootless setup
-            export KINC_IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
-            git clone https://github.com/t0masd/kinc.git && cd kinc
-            ./tools/deploy.sh
-            ```
-            
-            See the [usage examples](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for more details.
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
