@@ -102,14 +102,55 @@ jobs:
           echo "Image details:"
           podman inspect "$IMAGE_TAG" --format '{{json .Config.Labels}}' | jq .
           
-          # Test that the image can start (quick smoke test)
-          echo "Testing image startup..."
-          timeout 30 podman run --rm "$IMAGE_TAG" /bin/bash -c 'echo "Image test successful"' || {
-            echo "❌ Image test failed"
-            exit 1
-          }
+          # Test that the image can start systemd properly
+          echo "Testing kinc image startup (systemd entrypoint)..."
           
-          echo "✅ Image test passed"
+          # Start container in background with proper rootless capabilities
+          podman run -d --name kinc-test \
+            --cap-add=SYS_ADMIN --cap-add=SYS_RESOURCE --cap-add=NET_ADMIN \
+            --cap-add=SETPCAP --cap-add=NET_RAW --cap-add=SYS_PTRACE \
+            --cap-add=DAC_OVERRIDE --cap-add=CHOWN --cap-add=FOWNER \
+            --cap-add=FSETID --cap-add=KILL --cap-add=SETGID --cap-add=SETUID \
+            --cap-add=NET_BIND_SERVICE --cap-add=SYS_CHROOT --cap-add=SETFCAP \
+            --cap-add=DAC_READ_SEARCH --cap-add=AUDIT_WRITE \
+            --device /dev/fuse \
+            --tmpfs /tmp:rw,rprivate,nosuid,nodev,tmpcopyup \
+            --tmpfs /run:rw,rprivate,nosuid,nodev,tmpcopyup \
+            --tmpfs /run/lock:rw,rprivate,nosuid,nodev,tmpcopyup \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv6.conf.all.keep_addr_on_down=1 \
+            -p 6443:6443 \
+            "$IMAGE_TAG"
+          
+          # Wait for Kubernetes to initialize
+          echo "Waiting for Kubernetes API server to be ready..."
+          timeout 300 bash -c 'until curl -k -s https://127.0.0.1:6443/healthz >/dev/null 2>&1; do sleep 5; done'
+          
+          # Extract kubeconfig and test Kubernetes functionality
+          echo "Testing Kubernetes cluster functionality..."
+          mkdir -p ~/.kube
+          podman cp kinc-test:/etc/kubernetes/admin.conf ~/.kube/config-test
+          sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config-test
+          
+          # Test that Kubernetes is actually working
+          echo "Checking cluster nodes:"
+          KUBECONFIG=~/.kube/config-test kubectl get nodes -o wide
+          
+          echo "Checking system pods:"
+          KUBECONFIG=~/.kube/config-test kubectl get pods -A
+          
+          # Verify node is ready
+          if KUBECONFIG=~/.kube/config-test kubectl get nodes | grep -q "Ready"; then
+            echo "✅ Kubernetes cluster is functional"
+          else
+            echo "❌ Kubernetes cluster not ready"
+            exit 1
+          fi
+          
+          # Cleanup test container
+          podman rm -f kinc-test
+          
+          echo "✅ kinc image validation passed - Kubernetes cluster working!"
 
       - name: Push images to registry
         run: |
@@ -152,9 +193,20 @@ jobs:
           # Pull the image
           podman pull $IMAGE_TAG
           
-          # Start a kinc cluster
+          # Start a kinc cluster (rootless - no --privileged needed!)
           podman run -d --name kinc-cluster \\
-            --privileged \\
+            --cap-add=SYS_ADMIN --cap-add=SYS_RESOURCE --cap-add=NET_ADMIN \\
+            --cap-add=SETPCAP --cap-add=NET_RAW --cap-add=SYS_PTRACE \\
+            --cap-add=DAC_OVERRIDE --cap-add=CHOWN --cap-add=FOWNER \\
+            --cap-add=FSETID --cap-add=KILL --cap-add=SETGID --cap-add=SETUID \\
+            --cap-add=NET_BIND_SERVICE --cap-add=SYS_CHROOT --cap-add=SETFCAP \\
+            --cap-add=DAC_READ_SEARCH --cap-add=AUDIT_WRITE \\
+            --device /dev/fuse \\
+            --tmpfs /tmp:rw,rprivate,nosuid,nodev,tmpcopyup \\
+            --tmpfs /run:rw,rprivate,nosuid,nodev,tmpcopyup \\
+            --tmpfs /run/lock:rw,rprivate,nosuid,nodev,tmpcopyup \\
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \\
+            --sysctl net.ipv6.conf.all.keep_addr_on_down=1 \\
             -p 6443:6443 \\
             $IMAGE_TAG
           
@@ -169,18 +221,17 @@ jobs:
           kubectl get nodes
           \`\`\`
           
-          #### GitHub Actions Usage
+          #### GitHub Actions Usage (Recommended)
           \`\`\`yaml
           - name: Setup kinc Kubernetes cluster
             run: |
               # Enable IP forwarding
               echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
               
-              # Start kinc cluster
-              podman run -d --name kinc \\
-                --privileged \\
-                -p 6443:6443 \\
-                $IMAGE_TAG
+              # Use kinc tools for easier deployment (handles rootless config)
+              export KINC_IMAGE=$IMAGE_TAG
+              git clone https://github.com/t0masd/kinc.git /tmp/kinc
+              cd /tmp/kinc && ./tools/deploy.sh
               
               # Wait for ready and extract kubeconfig
               timeout 300 bash -c 'until curl -k https://localhost:6443/healthz; do sleep 5; done'
@@ -196,11 +247,14 @@ jobs:
             run: podman rm -f kinc || true
           \`\`\`
           
-          #### Multi-Cluster Usage
+          #### Multi-Cluster Usage (Recommended)
           \`\`\`bash
-          # Start multiple clusters on different ports
-          podman run -d --name kinc-dev -p 6444:6443 --privileged $IMAGE_TAG
-          podman run -d --name kinc-staging -p 6445:6443 --privileged $IMAGE_TAG
+          # Use kinc tools for multi-cluster (handles rootless config automatically)
+          export KINC_IMAGE=$IMAGE_TAG
+          
+          # Deploy multiple clusters
+          CLUSTER_NAME=dev ./tools/deploy.sh
+          CLUSTER_NAME=staging ./tools/deploy.sh
           
           # Extract separate kubeconfigs
           podman cp kinc-dev:/etc/kubernetes/admin.conf ~/.kube/config-dev
@@ -236,9 +290,10 @@ jobs:
           ## 🚀 Quick Start
           
           \`\`\`bash
-          # Start cluster
-          podman run -d --name kinc --privileged -p 6443:6443 \\
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}
+          # Recommended: Use kinc tools (handles rootless configuration)
+          export KINC_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}
+          git clone https://github.com/t0masd/kinc.git && cd kinc
+          ./tools/deploy.sh
           
           # Wait for ready
           timeout 300 bash -c 'until curl -k https://localhost:6443/healthz; do sleep 5; done'
@@ -295,7 +350,10 @@ jobs:
             
             ## Quick Start
             ```bash
-            podman run -d --name kinc --privileged -p 6443:6443 ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            # Recommended: Use kinc tools for proper rootless setup
+            export KINC_IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            git clone https://github.com/t0masd/kinc.git && cd kinc
+            ./tools/deploy.sh
             ```
             
             See the [usage examples](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for more details.
