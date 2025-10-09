@@ -70,14 +70,17 @@ jobs:
           # Build the kinc node image with proper tags
           IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
           LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          LOCAL_TEST_TAG="localhost/kinc/node:v1.33.5-test"
           
           echo "Building image: $IMAGE_TAG"
+          echo "Also tagging for local testing: $LOCAL_TEST_TAG"
           
           # Build with cache busting and proper labels
           podman build \
             -f Containerfile \
             -t "$IMAGE_TAG" \
             -t "$LATEST_TAG" \
+            -t "$LOCAL_TEST_TAG" \
             --build-arg CACHE_BUST="${{ github.run_number }}" \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
@@ -102,17 +105,14 @@ jobs:
           echo "Image details:"
           podman inspect "$IMAGE_TAG" --format '{{json .Config.Labels}}' | jq .
           
-          # Test the locally built image (not from registry yet)
+          # Test the locally built image using kinc tools
           echo "Testing locally built image with full kinc deployment..."
           
-          # Use local image name to avoid registry pull attempt
-          LOCAL_IMAGE_NAME="localhost/kinc/node:v1.33.5-test"
-          podman tag "$IMAGE_TAG" "$LOCAL_IMAGE_NAME"
-          
-          export KINC_IMAGE="$LOCAL_IMAGE_NAME"
+          # Use local build mode (don't set KINC_IMAGE)
+          # The image was already tagged as localhost/kinc/node:v1.33.5-test during build
           export CLUSTER_NAME="test"
           
-          echo "Using locally built image: $LOCAL_IMAGE_NAME (tagged from $IMAGE_TAG)"
+          echo "Using local build mode - deploy.sh will find localhost/kinc/node:v1.33.5-test"
           
           # Run full deployment (this tests everything: build, deploy, monitor, test)
           ./tools/full-deploy.sh
