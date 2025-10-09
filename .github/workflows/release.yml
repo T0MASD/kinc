@@ -108,11 +108,12 @@ jobs:
           # Test the locally built image using kinc tools
           echo "Testing locally built image with full kinc deployment..."
           
-          # Use local build mode (don't set KINC_IMAGE)
-          # The image was already tagged as localhost/kinc/node:v1.33.5-test during build
+          # Use the locally built image (skip build phase in full-deploy.sh)
+          export KINC_IMAGE="localhost/kinc/node:v1.33.5-test"
           export CLUSTER_NAME="test"
           
-          echo "Using local build mode - deploy.sh will find localhost/kinc/node:v1.33.5-test"
+          echo "Using locally built image: localhost/kinc/node:v1.33.5-test"
+          echo "This will skip the build phase in full-deploy.sh"
           
           # Run full deployment (this tests everything: build, deploy, monitor, test)
           ./tools/full-deploy.sh
