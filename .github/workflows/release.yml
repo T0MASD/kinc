@@ -102,10 +102,17 @@ jobs:
           echo "Image details:"
           podman inspect "$IMAGE_TAG" --format '{{json .Config.Labels}}' | jq .
           
-          # Test the image by running full-deploy.sh with it
-          echo "Testing image with full kinc deployment..."
-          export KINC_IMAGE="$IMAGE_TAG"
+          # Test the locally built image (not from registry yet)
+          echo "Testing locally built image with full kinc deployment..."
+          
+          # Use local image name to avoid registry pull attempt
+          LOCAL_IMAGE_NAME="localhost/kinc/node:v1.33.5-test"
+          podman tag "$IMAGE_TAG" "$LOCAL_IMAGE_NAME"
+          
+          export KINC_IMAGE="$LOCAL_IMAGE_NAME"
           export CLUSTER_NAME="test"
+          
+          echo "Using locally built image: $LOCAL_IMAGE_NAME (tagged from $IMAGE_TAG)"
           
           # Run full deployment (this tests everything: build, deploy, monitor, test)
           ./tools/full-deploy.sh
