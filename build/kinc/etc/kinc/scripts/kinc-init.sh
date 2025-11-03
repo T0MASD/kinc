@@ -1,120 +1,265 @@
 #!/bin/bash
 set -euo pipefail
 
-echo "=== kinc Kind-Free Initialization Starting ==="
+# Enhanced logging function
+# Logs to stderr to avoid interfering with function return values captured via command substitution
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >&2
+}
+
+log "=== kinc Kind-Free Initialization Starting ==="
+
+# Configuration validation and fallback logic (Phase 1: Infrastructure ready, not yet active)
+validate_configuration() {
+    local config_path="$1"
+    
+    if [[ ! -f "$config_path" ]]; then
+        log "❌ Configuration file not found: $config_path"
+        return 1
+    fi
+    
+    # Basic YAML validation
+    if ! command -v yq >/dev/null 2>&1; then
+        log "⚠️  yq not available, skipping advanced config validation"
+        return 0
+    fi
+    
+    if ! yq eval '.' "$config_path" >/dev/null 2>&1; then
+        log "❌ Invalid YAML in configuration: $config_path"
+        return 1
+    fi
+    
+    log "✅ Configuration validated: $config_path"
+    return 0
+}
+
+# Phase 2: Baked-in config with mounted override
+# Priority: Mounted config > Baked-in config
+setup_configuration() {
+    local mounted_config="/etc/kinc/config/kubeadm.conf"
+    local baked_config="/etc/kinc/kubeadm.conf"
+    
+    if [[ -f "$mounted_config" ]]; then
+        # Mounted config takes priority (allows customization)
+        log "📋 Using mounted configuration: $mounted_config"
+        if validate_configuration "$mounted_config"; then
+            echo "$mounted_config"
+            return 0
+        else
+            log "❌ Mounted configuration validation failed"
+            exit 1
+        fi
+    elif [[ -f "$baked_config" ]]; then
+        # Fall back to baked-in config
+        log "📋 No mounted config found, using baked-in configuration"
+        log "📋 Copying baked-in config: $baked_config → $mounted_config"
+        cp "$baked_config" "$mounted_config"
+        if validate_configuration "$mounted_config"; then
+            log "✅ Baked-in configuration copied and validated"
+            echo "$mounted_config"
+            return 0
+        else
+            log "❌ Baked-in configuration validation failed"
+            exit 1
+        fi
+    else
+        log "❌ No configuration found (neither mounted nor baked-in)"
+        exit 1
+    fi
+}
 
 # Wait for basic systemd services (not full system-running state to avoid circular dependency)
-echo "Waiting for basic systemd services..."
+log "Waiting for basic systemd services..."
 sleep 5
 
+# Setup and validate configuration
+log "Setting up cluster configuration..."
+CONFIG_FILE=$(setup_configuration)
+log "✅ Configuration ready: $CONFIG_FILE"
+
 # Wait for CRI-O to be ready
-echo "Waiting for CRI-O to be ready..."
+log "Waiting for CRI-O to be ready..."
 while ! systemctl is-active crio.service >/dev/null 2>&1; do
-    echo "Waiting for CRI-O service..."
+    log "Waiting for CRI-O service..."
     sleep 2
 done
 
 # Wait for CRI-O socket
-echo "Waiting for CRI-O socket..."
+log "Waiting for CRI-O socket..."
 while ! test -S /var/run/crio/crio.sock; do
-    echo "Waiting for CRI-O socket..."
+    log "Waiting for CRI-O socket..."
     sleep 2
 done
 
 # Test CRI-O connectivity
-echo "Testing CRI-O connectivity..."
-                                                crictl --runtime-endpoint unix:///var/run/crio/crio.sock version
+log "Testing CRI-O connectivity..."
+if crictl --runtime-endpoint unix:///var/run/crio/crio.sock version >/dev/null 2>&1; then
+    log "✅ CRI-O is ready and responsive"
+else
+    log "❌ CRI-O connectivity test failed"
+    exit 1
+fi
 
-# Get container IP address
+# Get container IP address (in pasta mode this will be the host IP)
+# Multiple clusters will share this IP but use different bindPorts
 CONTAINER_IP=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
-echo "Detected container IP: $CONTAINER_IP"
+log "Detected container IP: $CONTAINER_IP"
+
+# Validate IP address format
+if [[ ! "$CONTAINER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    log "❌ Invalid container IP detected: $CONTAINER_IP"
+    exit 1
+fi
 
 # Template the kubeadm config with the actual container IP
-sed "s/CONTAINER_IP_PLACEHOLDER/$CONTAINER_IP/g" /etc/kinc/config/kubeadm.conf > /tmp/kubeadm-final.conf
+log "Templating kubeadm configuration with container IP..."
+sed "s/CONTAINER_IP_PLACEHOLDER/$CONTAINER_IP/g" "$CONFIG_FILE" > /tmp/kubeadm-final.conf
+
+# Validate the final configuration
+if validate_configuration "/tmp/kubeadm-final.conf"; then
+    log "✅ Final kubeadm configuration validated"
+else
+    log "❌ Final kubeadm configuration validation failed"
+    exit 1
+fi
 
 # Initialize Kubernetes cluster
-echo "Initializing Kubernetes cluster with kubeadm..."
-kubeadm init --config=/tmp/kubeadm-final.conf --skip-phases=preflight
+log "Initializing Kubernetes cluster with kubeadm..."
+if kubeadm init --config=/tmp/kubeadm-final.conf --skip-phases=preflight; then
+    log "✅ Kubernetes cluster initialized successfully"
+else
+    log "❌ Kubernetes cluster initialization failed"
+    exit 1
+fi
 
 # Kubelet configuration is now correctly generated by kubeadm from kubeadm.conf
-echo "✅ Kubelet configured for rootless operation via kubeadm config"
+log "✅ Kubelet configured for rootless operation via kubeadm config"
 
 # Patch kube-proxy to remove privileged flag for rootless operation
-echo "Patching kube-proxy DaemonSet to remove privileged flag..."
-kubectl --kubeconfig=/etc/kubernetes/admin.conf patch daemonset kube-proxy -n kube-system --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/securityContext/privileged", "value": false}]'
-echo "✅ kube-proxy patched for rootless operation"
+log "Patching kube-proxy DaemonSet to remove privileged flag..."
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf patch daemonset kube-proxy -n kube-system --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/securityContext/privileged", "value": false}]'; then
+    log "✅ kube-proxy patched for rootless operation"
+else
+    log "❌ Failed to patch kube-proxy for rootless operation"
+    exit 1
+fi
 
 # Wait for API server to be fully ready before installing any manifests
-echo "Waiting for API server to be ready..."
+log "Waiting for API server to be ready..."
+timeout_counter=0
+max_timeout=60
 while ! kubectl --kubeconfig=/etc/kubernetes/admin.conf get --raw=/healthz >/dev/null 2>&1; do
-    echo "Waiting for API server to respond..."
+    log "Waiting for API server to respond... (${timeout_counter}s/${max_timeout}s)"
     sleep 2
+    timeout_counter=$((timeout_counter + 2))
+    if [[ $timeout_counter -ge $max_timeout ]]; then
+        log "❌ API server failed to become ready within ${max_timeout} seconds"
+        exit 1
+    fi
 done
 
 # Additional check: ensure API server can handle requests properly
-echo "Verifying API server functionality..."
-kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes >/dev/null 2>&1 || {
-    echo "API server not fully ready, waiting..."
+log "Verifying API server functionality..."
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes >/dev/null 2>&1; then
+    log "✅ API server is ready and responsive"
+else
+    log "API server not fully ready, waiting additional 5 seconds..."
     sleep 5
-    kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes >/dev/null 2>&1
-}
-
-echo "✅ API server is ready and responsive"
+    if kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes >/dev/null 2>&1; then
+        log "✅ API server is now ready and responsive"
+    else
+        log "❌ API server functionality verification failed"
+        exit 1
+    fi
+fi
 
 # Install CNI (using kinc's default CNI with proper templating)
-echo "Installing CNI..."
-if [ -f /kinc/manifests/default-cni.yaml ]; then
+log "Installing CNI..."
+if [[ -f /kinc/manifests/default-cni.yaml ]]; then
     # Template the CNI manifest with our pod subnet (matching kubeadm config)
+    log "Templating CNI manifest with pod subnet..."
     sed 's/{{ \.PodSubnet }}/10.244.0.0\/16/g' /kinc/manifests/default-cni.yaml > /tmp/cni-manifest.yaml
-    kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /tmp/cni-manifest.yaml
-    echo "✅ CNI installed successfully"
+    
+    if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /tmp/cni-manifest.yaml; then
+        log "✅ CNI installed successfully"
+    else
+        log "❌ Failed to install CNI"
+        exit 1
+    fi
 else
-    echo "❌ CNI manifest not found at /kinc/manifests/default-cni.yaml"
+    log "❌ CNI manifest not found at /kinc/manifests/default-cni.yaml"
+    exit 1
 fi
 
 # Wait for CNI to be ready before proceeding
-echo "Waiting for CNI pods to be ready..."
-kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pods -l k8s-app=kincnet -n kube-system --timeout=120s || {
-    echo "⚠️  CNI pods not ready yet, but continuing..."
-}
+log "Waiting for CNI pods to be ready..."
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pods -l k8s-app=kincnet -n kube-system --timeout=120s; then
+    log "✅ CNI pods are ready"
+else
+    log "⚠️  CNI pods not ready yet, but continuing..."
+fi
 
 # Wait for nodes to be ready first
-echo "Waiting for node to be ready..."
-kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=300s
+log "Waiting for node to be ready..."
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=300s; then
+    log "✅ All nodes are ready"
+else
+    log "❌ Nodes failed to become ready within timeout"
+    exit 1
+fi
 
 # Wait for control plane pods to be fully ready and stable
-echo "Waiting for control plane to be completely stable..."
-kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pod -l component=etcd -n kube-system --timeout=120s
-kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pod -l component=kube-apiserver -n kube-system --timeout=120s
-kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pod -l component=kube-controller-manager -n kube-system --timeout=120s
-kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pod -l component=kube-scheduler -n kube-system --timeout=120s
+log "Waiting for control plane to be completely stable..."
+components=("etcd" "kube-apiserver" "kube-controller-manager" "kube-scheduler")
+for component in "${components[@]}"; do
+    log "Waiting for $component to be ready..."
+    if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pod -l component="$component" -n kube-system --timeout=120s; then
+        log "✅ $component is ready"
+    else
+        log "❌ $component failed to become ready within timeout"
+        exit 1
+    fi
+done
 
 # Additional stability check - ensure all control plane components are stable
-echo "Verifying control plane stability..."
+log "Verifying control plane stability..."
 sleep 5
 
 # Remove control plane taint so storage provisioner can be scheduled
-kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- || true
+log "Removing control plane taint to allow workload scheduling..."
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- 2>/dev/null; then
+    log "✅ Control plane taint removed"
+else
+    log "ℹ️  Control plane taint already removed or not present"
+fi
 
 # Now install storage class with fully stable control plane
-echo "Installing storage class..."
-if [ -f /kinc/manifests/default-storage.yaml ]; then
-    kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /kinc/manifests/default-storage.yaml
-    echo "✅ Storage class installed successfully"
+log "Installing storage class..."
+if [[ -f /kinc/manifests/default-storage.yaml ]]; then
+    if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /kinc/manifests/default-storage.yaml; then
+        log "✅ Storage class installed successfully"
+    else
+        log "❌ Failed to install storage class"
+        exit 1
+    fi
 else
-    echo "❌ Storage manifest not found at /kinc/manifests/default-storage.yaml"
+    log "❌ Storage manifest not found at /kinc/manifests/default-storage.yaml"
+    exit 1
 fi
 
 # Wait for storage provisioner to be ready
-echo "Waiting for storage provisioner to be ready..."
-kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Available deployment/local-path-provisioner -n local-path-storage --timeout=120s || {
-    echo "⚠️  Storage provisioner not ready yet, but continuing..."
-}
+log "Waiting for storage provisioner to be ready..."
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Available deployment/local-path-provisioner -n local-path-storage --timeout=120s; then
+    log "✅ Storage provisioner is ready"
+else
+    log "⚠️  Storage provisioner not ready yet, but continuing..."
+fi
 
-echo "=== kinc Kind-Free Initialization Complete ==="
-echo "Cluster is ready!"
+log "=== kinc Kind-Free Initialization Complete ==="
+log "Cluster is ready!"
 
 # Signal that initialization is complete
 touch /var/lib/kinc-initialized
+log "✅ Initialization marker created at /var/lib/kinc-initialized"
 
-echo "=== Continuing with normal systemd operation ==="
+log "=== Continuing with normal systemd operation ==="

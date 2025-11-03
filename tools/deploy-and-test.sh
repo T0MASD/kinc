@@ -51,9 +51,10 @@ print_phase "PHASE 4: RUN TESTS"
 CLUSTER_NAME=${CLUSTER_NAME} ./tools/test.sh
 
 # Phase 5: Untag (optional cleanup)
-echo
-echo "🧹 Untagging image localhost/kinc/node:v1.33.5-${CLUSTER_NAME}"
-podman untag localhost/kinc/node:v1.33.5-${CLUSTER_NAME} 2>/dev/null || true
+# Disabled for Phase 1: Using shared image across all clusters
+# echo
+# echo "🧹 Untagging image localhost/kinc/node:v1.33.5-${CLUSTER_NAME}"
+# podman untag localhost/kinc/node:v1.33.5-${CLUSTER_NAME} 2>/dev/null || true
 
 echo
 echo -e "${GREEN}🎉 Full deployment completed successfully!${NC}"
