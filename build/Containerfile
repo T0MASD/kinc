@@ -73,6 +73,9 @@ COPY --chmod=0644 base/etc/sysctl.d/* /etc/sysctl.d/
 COPY --chmod=0644 base/etc/systemd/system/* /etc/systemd/system/
 COPY --chmod=0644 base/etc/systemd/system/kubelet.service.d/* /etc/systemd/system/kubelet.service.d/
 
+# Copy CNI configuration (pre-install kindnet config to avoid bootstrap issues)
+COPY --chmod=0644 base/etc/cni/net.d/10-kindnet.conflist /etc/cni/net.d/10-kindnet.conflist
+
 # Copy rootless crun wrapper for OOM score adjustment fix
 COPY --chmod=0755 base/usr/local/bin/crun-wrapper.sh /usr/local/bin/crun-wrapper.sh
 
