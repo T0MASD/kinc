@@ -220,27 +220,35 @@ jobs:
             --env container=podman \\
             $IMAGE_TAG
           
-          # Wait for API server to start (5-10 seconds)
-          timeout 300 bash -c 'until curl -k https://localhost:6443/healthz 2>/dev/null; do sleep 2; done'
+          # Wait for API server to be ready (returns HTTP 200)
+          timeout 300 bash -c 'until curl -k -s -o /dev/null -w "%{http_code}" https://localhost:6443/healthz 2>/dev/null | grep -q "200"; do sleep 2; done'
+          echo "✅ API server responding"
           
-          # Extract kubeconfig (kubectl will work immediately)
+          # Extract kubeconfig
+          mkdir -p ~/.kube
           podman cp kinc-cluster:/etc/kubernetes/admin.conf ~/.kube/config
           sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
           
-          # Check cluster (pods may still be initializing)
+          # Check cluster status
           kubectl get nodes
           kubectl get pods -A
           
           # Optional: Wait for all system pods to be fully ready (~40 seconds)
+          echo "⏳ Waiting for system pods..."
           kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s
+          
+          # Wait for storage provisioner (namespace and pods created after control plane)
+          timeout 60 bash -c 'until kubectl get namespace local-path-storage >/dev/null 2>&1; do sleep 2; done'
+          timeout 60 bash -c 'until kubectl get pods -n local-path-storage 2>/dev/null | grep -q local-path-provisioner; do sleep 2; done'
           kubectl wait --for=condition=Ready pods --all -n local-path-storage --timeout=60s
+          echo "✅ Cluster ready"
           
           # Cleanup
           podman rm -f kinc-cluster
           podman volume rm kinc-var-data
           \`\`\`
           
-          > **Note**: After the API server starts (~5-10s), you can immediately use kubectl. System pods will finish initializing in the background (~40s total). Use \`kubectl wait\` commands above to ensure all pods are Ready before deploying workloads.
+          > **Note**: The healthcheck waits for the API server to return HTTP 200 (~20 seconds on first run). The optional \`kubectl wait\` commands ensure all system pods are Ready before deploying workloads.
           
           > **⚠️ Performance Warning**: 
           > - **First run**: Initialization takes 2-5 minutes (downloads pause, CoreDNS, kube-proxy, etc.)
