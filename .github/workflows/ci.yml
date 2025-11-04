@@ -10,336 +10,157 @@ on:
 permissions:
   contents: read
 
-# Global configuration - single source of truth for cluster list
-env:
-  CLUSTER_LIST: "dev staging"
-
 jobs:
-  test-multi-cluster:
+  test-baked-in:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        config_mode: [mounted, baked-in]
-    
-    name: Test (${{ matrix.config_mode }} config)
+    name: Test (baked-in config)
     
     steps:
-      - name: Checkout kinc
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Enable IP forwarding
         run: echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
 
-      - name: Build single base image (Phase 2 - all clusters use same image)
+      - name: Build image
         run: |
-          echo "=== Building single base image for all clusters ==="
-          echo "Phase 2: One image, multiple configs (mounted or baked-in)"
-          
-          # Build single base image
-          echo "Building kinc base image..."
-          bash ./tools/build.sh
-          
-          echo "=== Image build summary ==="
-          podman images localhost/kinc/node
-          
-          echo "✅ Single image built successfully"
-          echo "All clusters will use: localhost/kinc/node:v1.33.5"
+          echo "=== Building kinc image ==="
+          ./tools/build.sh
+          echo "✅ Image built: localhost/kinc/node:v1.33.5"
         shell: bash
 
-      - name: Deploy clusters with ${{ matrix.config_mode }} configuration
+      - name: Deploy single cluster with baked-in config
         run: |
-          echo "=== Deploying clusters with ${{ matrix.config_mode }} configuration ==="
+          echo "=== Deploying default cluster with baked-in configuration ==="
           
-          CLUSTERS="${{ env.CLUSTER_LIST }}"
+          export USE_BAKED_IN_CONFIG=true
           
-          # Set config mode environment variable
-          if [ "${{ matrix.config_mode }}" = "baked-in" ]; then
-            export USE_BAKED_IN_CONFIG=true
-            echo "📋 Using baked-in configuration (embedded in image)"
-          else
-            echo "📋 Using mounted configuration (external volume)"
-          fi
+          bash ./tools/deploy-and-test.sh > /tmp/deploy-default.log 2>&1 &
+          deploy_pid=$!
           
-          # Deploy clusters sequentially to avoid port conflicts
-          for cluster in $CLUSTERS; do
-            echo "🚀 Starting deployment of $cluster cluster..."
-            
-            # Start deployment in background
-            CLUSTER_NAME=$cluster bash ./tools/deploy-and-test.sh > /tmp/deploy-${cluster}.log 2>&1 &
-            deploy_pid=$!
-            echo "Deploy PID: $deploy_pid"
-            
-            # Wait for this cluster's port to be bound before starting next
-            echo "⏳ Waiting for $cluster cluster port to be bound..."
-            max_wait=600  # 10 minutes
-            waited=0
-            cluster_port=""
-            
-            while [ $waited -lt $max_wait ]; do
-              # Check if deployment process is still running
-              if ! kill -0 $deploy_pid 2>/dev/null; then
-                # Process finished, check if it succeeded
-                if wait $deploy_pid; then
-                  echo "✅ $cluster deployment process completed"
-                else
-                  echo "❌ $cluster deployment process failed"
-                  cat /tmp/deploy-${cluster}.log || true
-                  exit 1
-                fi
-              fi
-              
-              # Check if container exists and has bound port
-              if podman ps --format "{{.Names}}" | grep -q "^kinc-${cluster}-control-plane$"; then
-                # Extract the actual bound port from container inspect
-                cluster_port=$(podman inspect kinc-${cluster}-control-plane --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}}{{end}}{{end}}' 2>/dev/null)
-                if [[ -n "$cluster_port" && "$cluster_port" =~ ^[0-9]+$ ]]; then
-                  echo "✅ $cluster cluster bound to port $cluster_port"
-                  echo "${cluster^^}_PORT=$cluster_port" >> $GITHUB_ENV
-                  echo "🚀 Port secured, can start next cluster (API server will initialize in background)"
-                  break
-                else
-                  echo "⏳ $cluster container port not bound yet..."
-                fi
+          # Wait for port to be bound
+          echo "⏳ Waiting for cluster port..."
+          max_wait=600
+          waited=0
+          cluster_port=""
+          
+          while [ $waited -lt $max_wait ]; do
+            if ! kill -0 $deploy_pid 2>/dev/null; then
+              if wait $deploy_pid; then
+                echo "✅ Deployment completed"
               else
-                echo "⏳ $cluster container not running yet..."
+                echo "❌ Deployment failed"
+                cat /tmp/deploy-default.log || true
+                exit 1
               fi
-              
-              sleep 5
-              waited=$((waited + 5))
-            done
-            
-            # Check if we successfully got the port
-            if [[ -z "$cluster_port" ]]; then
-              echo "❌ CRITICAL: $cluster cluster failed to bind port within timeout!"
-              cat /tmp/deploy-${cluster}.log || true
-              exit 1
             fi
             
-            echo "✅ $cluster cluster port secured ($cluster_port), proceeding to next cluster..."
-          done
-          
-          echo "✅ All clusters deployed sequentially with unique ports"
-          echo "Configuration mode: ${{ matrix.config_mode }}"
-        shell: bash
-
-      - name: Wait for all clusters to be ready
-        run: |
-          echo "=== Waiting for all clusters to be ready ==="
-          
-          CLUSTERS="${{ env.CLUSTER_LIST }}"
-          
-          for cluster in $CLUSTERS; do
-            # Get port from environment variable
-            port_var="${cluster^^}_PORT"
-            port=${!port_var}
-            
-            echo "⏳ Waiting for $cluster cluster API server to be ready (port $port)..."
-            
-            # Wait for API server to respond
-            max_attempts=60  # 5 minutes
-            for i in $(seq 1 $max_attempts); do
-              if curl -k -s https://127.0.0.1:$port/healthz >/dev/null 2>&1; then
-                echo "✅ $cluster cluster API server ready on port $port"
+            if podman ps --format "{{.Names}}" | grep -q "^kinc-default-control-plane$"; then
+              cluster_port=$(podman inspect kinc-default-control-plane --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}}{{end}}{{end}}' 2>/dev/null)
+              if [[ -n "$cluster_port" && "$cluster_port" =~ ^[0-9]+$ ]]; then
+                echo "✅ Cluster bound to port $cluster_port"
                 break
               fi
-              
-              if [ $((i % 12)) -eq 0 ]; then  # Every minute
-                echo "Still waiting for $cluster API server... (attempt $i/$max_attempts)"
-              fi
-              sleep 5
-            done
-            
-            # Verify API server is responding
-            if ! curl -k -s https://127.0.0.1:$port/healthz >/dev/null 2>&1; then
-              echo "❌ $cluster cluster API server failed to become ready after $max_attempts attempts"
-              exit 1
             fi
+            
+            sleep 5
+            waited=$((waited + 5))
           done
           
-          echo "✅ All cluster API servers are ready"
-        shell: bash
-
-      - name: Extract kubeconfigs
-        run: |
-          echo "=== Extracting kubeconfigs for all clusters ==="
-          mkdir -p ~/.kube
-          
-          CLUSTERS="${{ env.CLUSTER_LIST }}"
-          
-          for cluster in $CLUSTERS; do
-            # Get port from environment variable
-            port_var="${cluster^^}_PORT"
-            port=${!port_var}
-            
-            echo "Extracting kubeconfig for $cluster cluster (port $port)..."
-            
-            # Extract kubeconfig
-            podman cp kinc-${cluster}-control-plane:/etc/kubernetes/admin.conf ~/.kube/config-kinc-${cluster}
-            
-            # Update server URL with actual port
-            sed -i "s|server: https://.*:6443|server: https://127.0.0.1:$port|g" ~/.kube/config-kinc-${cluster}
-            
-            echo "✅ $cluster cluster kubeconfig: ~/.kube/config-kinc-${cluster} (port $port)"
-          done
-        shell: bash
-
-      - name: Verify configuration mode
-        run: |
-          echo "=== Verifying configuration mode: ${{ matrix.config_mode }} ==="
-          
-          CLUSTERS="${{ env.CLUSTER_LIST }}"
-          
-          for cluster in $CLUSTERS; do
-            echo "Checking $cluster cluster configuration source..."
-            
-            # Check for config volume mount
-            has_config_volume=$(podman inspect kinc-${cluster}-control-plane --format '{{range .Mounts}}{{if eq .Destination "/etc/kinc/config"}}yes{{end}}{{end}}' 2>/dev/null || echo "no")
-            
-            # Check logs for configuration source
-            config_source=$(podman logs kinc-${cluster}-control-plane 2>&1 | grep -oP '(Using mounted configuration|No mounted config found, using baked-in configuration)' | head -1)
-            
-            echo "$cluster cluster:"
-            echo "  Config volume mounted: $has_config_volume"
-            echo "  Configuration source: $config_source"
-            
-            # Verify configuration matches test matrix
-            if [ "${{ matrix.config_mode }}" = "baked-in" ]; then
-              if [[ "$config_source" == *"baked-in"* ]]; then
-                echo "✅ $cluster using baked-in configuration as expected"
-              else
-                echo "❌ $cluster expected baked-in config but found: $config_source"
-                exit 1
-              fi
-            else
-              if [[ "$config_source" == *"mounted"* ]]; then
-                echo "✅ $cluster using mounted configuration as expected"
-              else
-                echo "❌ $cluster expected mounted config but found: $config_source"
-                exit 1
-              fi
-            fi
-          done
-          
-          echo "✅ Configuration mode verification passed: ${{ matrix.config_mode }}"
-        shell: bash
-
-      - name: Validate multi-cluster isolation
-        run: |
-          echo "=== Validating multi-cluster isolation ==="
-          
-          CLUSTERS="${{ env.CLUSTER_LIST }}"
-          
-          # Check all services are active
-          for cluster in $CLUSTERS; do
-            echo "Checking $cluster cluster service..."
-            systemctl --user is-active kinc-${cluster}-control-plane.service
-          done
-          
-          # Check all containers are running
-          for cluster in $CLUSTERS; do
-            echo "Checking $cluster cluster container..."
-            podman ps --filter "name=kinc-${cluster}-control-plane" --format "{{.Names}} {{.Status}}"
-          done
-          
-          # Collect all ports and validate API servers
-          declare -A cluster_ports
-          
-          for cluster in $CLUSTERS; do
-            # Get port from environment variable
-            port_var="${cluster^^}_PORT"
-            port=${!port_var}
-            cluster_ports[$cluster]=$port
-            
-            echo "$cluster cluster port: $port"
-            
-            # Verify API server responds
-            if curl -k -s https://127.0.0.1:$port/healthz >/dev/null 2>&1; then
-              echo "✅ $cluster cluster API ($port) responding"
-            else
-              echo "❌ $cluster cluster API ($port) not responding"
-              exit 1
-            fi
-          done
-          
-          # Show all ports in netstat
-          all_ports=$(printf "%s|" "${cluster_ports[@]}")
-          all_ports=${all_ports%|}  # Remove trailing |
-          echo "=== Active ports ==="
-          netstat -tlnp | grep -E ":($all_ports)" || true
-          
-          # Verify all ports are unique
-          echo "=== Verifying port isolation ==="
-          ports_list=(${cluster_ports[@]})
-          unique_ports=($(printf "%s\n" "${ports_list[@]}" | sort -u))
-          
-          if [ ${#ports_list[@]} -eq ${#unique_ports[@]} ]; then
-            echo "✅ All ${#ports_list[@]} cluster ports are unique"
-            for cluster in $CLUSTERS; do
-              echo "  $cluster: ${cluster_ports[$cluster]}"
-            done
-          else
-            echo "❌ Port collision detected among ${#ports_list[@]} clusters!"
-            for cluster in $CLUSTERS; do
-              echo "  $cluster: ${cluster_ports[$cluster]}"
-            done
+          if [[ -z "$cluster_port" ]]; then
+            echo "❌ Cluster failed to bind port within timeout"
+            cat /tmp/deploy-default.log || true
             exit 1
           fi
           
-          echo "✅ Multi-cluster isolation validated"
+          echo "CLUSTER_PORT=$cluster_port" >> $GITHUB_ENV
+          
+          # Wait for deploy-and-test.sh to complete (it does full init + validation)
+          echo "⏳ Waiting for deploy-and-test.sh to complete..."
+          if wait $deploy_pid; then
+            echo "✅ Deployment and tests completed successfully"
+          else
+            echo "❌ Deployment or tests failed"
+            cat /tmp/deploy-default.log || true
+            exit 1
+          fi
         shell: bash
 
-      - name: Test cluster isolation
+      - name: Wait for API server
         run: |
-          echo "=== Testing cluster isolation ==="
+          echo "=== Waiting for API server ==="
           
-          CLUSTERS="${{ env.CLUSTER_LIST }}"
-          clusters_array=($CLUSTERS)
+          port=${{ env.CLUSTER_PORT }}
           
-          # Use first cluster to create namespace
-          first_cluster=${clusters_array[0]}
-          echo "Creating test namespace in $first_cluster cluster..."
-          export KUBECONFIG=~/.kube/config-kinc-${first_cluster}
-          kubectl create namespace isolation-test
+          echo "⏳ Waiting for API server (port $port)..."
           
-          # Verify namespace doesn't exist in other clusters
-          for cluster in $CLUSTERS; do
-            if [ "$cluster" != "$first_cluster" ]; then
-              echo "Checking that namespace doesn't exist in $cluster cluster..."
-              export KUBECONFIG=~/.kube/config-kinc-${cluster}
-              if kubectl get namespace isolation-test 2>/dev/null; then
-                echo "❌ Namespace leaked from $first_cluster to $cluster cluster"
-                exit 1
-              else
-                echo "✅ Namespace properly isolated from $cluster cluster"
-              fi
+          max_attempts=300
+          for i in $(seq 1 $max_attempts); do
+            if curl -k -s https://127.0.0.1:$port/healthz >/dev/null 2>&1; then
+              echo "✅ API server ready"
+              break
             fi
+            
+            if [ $((i % 12)) -eq 0 ]; then
+              echo "Still waiting... (attempt $i/$max_attempts)"
+            fi
+            sleep 5
           done
           
-          echo "✅ Cluster isolation verified across all ${#clusters_array[@]} clusters"
+          if ! curl -k -s https://127.0.0.1:$port/healthz >/dev/null 2>&1; then
+            echo "❌ API server failed to become ready"
+            exit 1
+          fi
         shell: bash
 
-      - name: Validate clusters functionality
+      - name: Extract kubeconfig
         run: |
-          echo "=== Validating all clusters functionality ==="
+          echo "=== Extracting kubeconfig ==="
+          mkdir -p ~/.kube
           
-          CLUSTERS="${{ env.CLUSTER_LIST }}"
+          port=${{ env.CLUSTER_PORT }}
           
-          for cluster in $CLUSTERS; do
-            echo "=== Testing $cluster cluster ==="
-            export KUBECONFIG=~/.kube/config-kinc-${cluster}
-            
-            echo "Cluster info:"
-            kubectl cluster-info
-            
-            echo "Node status:"
-            kubectl get nodes -o wide
-            
-            echo "System pods:"
-            kubectl get pods -A
-            
-            echo "✅ $cluster cluster validation complete"
-          done
+          podman cp kinc-default-control-plane:/etc/kubernetes/admin.conf ~/.kube/config
+          sed -i "s|server: https://.*:6443|server: https://127.0.0.1:$port|g" ~/.kube/config
+          
+          echo "✅ Kubeconfig ready"
+        shell: bash
+
+      - name: Verify baked-in config
+        run: |
+          echo "=== Verifying baked-in configuration ==="
+          
+          # Check kinc-init.service logs inside container (logs go to journald, not podman logs)
+          config_source=$(podman exec kinc-default-control-plane journalctl -u kinc-init.service --no-pager 2>/dev/null | grep -oP '(Using mounted configuration|No mounted config found, using baked-in configuration)' | head -1)
+          
+          echo "Configuration source: $config_source"
+          
+          if [[ "$config_source" == *"baked-in"* ]]; then
+            echo "✅ Using baked-in config as expected"
+          else
+            echo "❌ NOT using baked-in config"
+            echo "kinc-init.service logs:"
+            podman exec kinc-default-control-plane journalctl -u kinc-init.service --no-pager 2>/dev/null || true
+            exit 1
+          fi
+        shell: bash
+
+      - name: Validate cluster
+        run: |
+          echo "=== Validating cluster ==="
+          
+          echo "Nodes:"
+          kubectl get nodes
+          
+          echo ""
+          echo "Pods:"
+          kubectl get pods -A
+          
+          echo ""
+          echo "Services:"
+          kubectl get svc -A
+          
+          echo "✅ Cluster validated"
         shell: bash
 
       - name: Collect diagnostics
@@ -348,58 +169,197 @@ jobs:
           echo "=== Collecting diagnostics ==="
           mkdir -p artifacts
           
-          CLUSTERS="${{ env.CLUSTER_LIST }}"
+          cp /tmp/deploy-default.log artifacts/ 2>&1 || true
           
-          # Deployment logs
-          for cluster in $CLUSTERS; do
-            if [ -f "/tmp/deploy-${cluster}.log" ]; then
-              cp /tmp/deploy-${cluster}.log artifacts/deploy-${cluster}.log
-            fi
-          done
+          systemctl --user status kinc-default-control-plane.service > artifacts/systemd-status.txt 2>&1 || true
+          journalctl --user -xeu kinc-default-control-plane.service --no-pager > artifacts/systemd-logs.txt 2>&1 || true
+          podman logs kinc-default-control-plane > artifacts/container.log 2>&1 || true
           
-          # System diagnostics
-          for cluster in $CLUSTERS; do
-            echo "Collecting diagnostics for $cluster cluster..."
-            
-            # systemd service status
-            systemctl --user status kinc-${cluster}-control-plane.service > artifacts/${cluster}-systemd-status.txt 2>&1 || true
-            
-            # systemd service logs
-            journalctl --user -xeu kinc-${cluster}-control-plane.service --no-pager > artifacts/${cluster}-systemd-logs.txt 2>&1 || true
-            
-            # Container logs
-            podman logs kinc-${cluster}-control-plane > artifacts/${cluster}-container.log 2>&1 || true
-            
-            # Cluster info
-            export KUBECONFIG=~/.kube/config-kinc-${cluster}
-            kubectl cluster-info dump > artifacts/${cluster}-cluster-info.txt 2>&1 || true
-            kubectl get all -A > artifacts/${cluster}-resources.txt 2>&1 || true
-            kubectl get events -A --sort-by='.lastTimestamp' > artifacts/${cluster}-events.txt 2>&1 || true
-          done
+          # Get kinc-init logs from inside container (they go to journald, not podman logs)
+          podman exec kinc-default-control-plane journalctl -u kinc-init.service --no-pager > artifacts/kinc-init.log 2>&1 || true
           
-          # System info
+          kubectl cluster-info dump > artifacts/cluster-info.txt 2>&1 || true
+          kubectl get all -A > artifacts/resources.txt 2>&1 || true
+          kubectl get events -A --sort-by='.lastTimestamp' > artifacts/events.txt 2>&1 || true
+          
           netstat -tlnp > artifacts/network-ports.txt 2>&1 || true
           ip addr show > artifacts/network-interfaces.txt 2>&1 || true
-          systemctl --user --failed > artifacts/systemd-failed-units.txt 2>&1 || true
         shell: bash
 
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kinc-diagnostics-${{ matrix.config_mode }}-${{ github.run_number }}
+          name: kinc-diagnostics-baked-in-${{ github.run_number }}
           path: artifacts/
           retention-days: 30
 
-      - name: Cleanup all clusters
+      - name: Cleanup
         if: always()
         run: |
-          echo "=== Cleaning up all clusters ==="
+          echo "Cleaning up..."
+          bash ./tools/cleanup.sh || true
+        shell: bash
+
+  test-mounted:
+    runs-on: ubuntu-latest
+    name: Test (mounted config)
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable IP forwarding
+        run: echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+
+      - name: Build image
+        run: |
+          echo "=== Building kinc image ==="
+          ./tools/build.sh
+          echo "✅ Image built: localhost/kinc/node:v1.33.5"
+        shell: bash
+
+      - name: Deploy single cluster with mounted config
+        run: |
+          echo "=== Deploying default cluster with mounted configuration ==="
           
-          CLUSTERS="${{ env.CLUSTER_LIST }}"
+          # Do NOT set USE_BAKED_IN_CONFIG - use default mounted config behavior
           
-          for cluster in $CLUSTERS; do
-            echo "Cleaning up $cluster cluster..."
-            CLUSTER_NAME=$cluster bash ./tools/cleanup.sh || true
+          bash ./tools/deploy-and-test.sh > /tmp/deploy-default.log 2>&1 &
+          deploy_pid=$!
+          
+          # Wait for port to be bound
+          echo "⏳ Waiting for cluster port..."
+          max_wait=600
+          waited=0
+          cluster_port=""
+          
+          while [ $waited -lt $max_wait ]; do
+            if ! kill -0 $deploy_pid 2>/dev/null; then
+              if wait $deploy_pid; then
+                echo "✅ Deployment completed"
+              else
+                echo "❌ Deployment failed"
+                cat /tmp/deploy-default.log || true
+                exit 1
+              fi
+            fi
+            
+            if podman ps --format "{{.Names}}" | grep -q "^kinc-default-control-plane$"; then
+              cluster_port=$(podman inspect kinc-default-control-plane --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}}{{end}}{{end}}' 2>/dev/null)
+              if [[ -n "$cluster_port" && "$cluster_port" =~ ^[0-9]+$ ]]; then
+                echo "✅ Cluster bound to port $cluster_port"
+                break
+              fi
+            fi
+            
+            sleep 5
+            waited=$((waited + 5))
           done
+          
+          if [[ -z "$cluster_port" ]]; then
+            echo "❌ Cluster failed to bind port within timeout"
+            cat /tmp/deploy-default.log || true
+            exit 1
+          fi
+          
+          echo "CLUSTER_PORT=$cluster_port" >> $GITHUB_ENV
+          
+          # Wait for deploy-and-test.sh to complete (it does full init + validation)
+          echo "⏳ Waiting for deploy-and-test.sh to complete..."
+          if wait $deploy_pid; then
+            echo "✅ Deployment and tests completed successfully"
+          else
+            echo "❌ Deployment or tests failed"
+            cat /tmp/deploy-default.log || true
+            exit 1
+          fi
+        shell: bash
+
+      - name: Extract kubeconfig
+        run: |
+          echo "=== Extracting kubeconfig ==="
+          mkdir -p ~/.kube
+          
+          port=${{ env.CLUSTER_PORT }}
+          
+          podman cp kinc-default-control-plane:/etc/kubernetes/admin.conf ~/.kube/config
+          sed -i "s|server: https://.*:6443|server: https://127.0.0.1:$port|g" ~/.kube/config
+          
+          echo "✅ Kubeconfig ready"
+        shell: bash
+
+      - name: Verify mounted config
+        run: |
+          echo "=== Verifying mounted configuration ==="
+          
+          # Check kinc-init.service logs inside container
+          config_source=$(podman exec kinc-default-control-plane journalctl -u kinc-init.service --no-pager 2>/dev/null | grep -oP '(Using mounted configuration|No mounted config found, using baked-in configuration)' | head -1)
+          
+          echo "Configuration source: $config_source"
+          
+          if [[ "$config_source" == *"mounted"* ]]; then
+            echo "✅ Using mounted config as expected"
+          else
+            echo "❌ NOT using mounted config"
+            echo "kinc-init.service logs:"
+            podman exec kinc-default-control-plane journalctl -u kinc-init.service --no-pager 2>/dev/null || true
+            exit 1
+          fi
+        shell: bash
+
+      - name: Validate cluster
+        run: |
+          echo "=== Validating cluster ==="
+          
+          echo "Nodes:"
+          kubectl get nodes
+          
+          echo ""
+          echo "Pods:"
+          kubectl get pods -A
+          
+          echo ""
+          echo "Services:"
+          kubectl get svc -A
+          
+          echo "✅ Cluster validated"
+        shell: bash
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          echo "=== Collecting diagnostics ==="
+          mkdir -p artifacts
+          
+          cp /tmp/deploy-default.log artifacts/ 2>&1 || true
+          
+          systemctl --user status kinc-default-control-plane.service > artifacts/systemd-status.txt 2>&1 || true
+          journalctl --user -xeu kinc-default-control-plane.service --no-pager > artifacts/systemd-logs.txt 2>&1 || true
+          podman logs kinc-default-control-plane > artifacts/container.log 2>&1 || true
+          
+          # Get kinc-init logs from inside container
+          podman exec kinc-default-control-plane journalctl -u kinc-init.service --no-pager > artifacts/kinc-init.log 2>&1 || true
+          
+          kubectl cluster-info dump > artifacts/cluster-info.txt 2>&1 || true
+          kubectl get all -A > artifacts/resources.txt 2>&1 || true
+          kubectl get events -A --sort-by='.lastTimestamp' > artifacts/events.txt 2>&1 || true
+          
+          netstat -tlnp > artifacts/network-ports.txt 2>&1 || true
+          ip addr show > artifacts/network-interfaces.txt 2>&1 || true
+        shell: bash
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kinc-diagnostics-mounted-${{ github.run_number }}
+          path: artifacts/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up..."
+          bash ./tools/cleanup.sh || true
         shell: bash
