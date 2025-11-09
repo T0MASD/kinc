@@ -21,6 +21,41 @@ echo "Using image: $KINC_IMAGE"
 echo ""
 
 # ============================================================================
+# Prerequisites: System Configuration Check
+# ============================================================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Prerequisites: System Configuration Check"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Check IP forwarding
+if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
+  echo "❌ IP forwarding disabled - required for Kubernetes networking"
+  exit 1
+fi
+echo "✅ IP forwarding: enabled"
+
+# Check inotify limits
+max_watches=$(cat /proc/sys/fs/inotify/max_user_watches)
+max_instances=$(cat /proc/sys/fs/inotify/max_user_instances)
+if [ "$max_watches" -lt 524288 ] || [ "$max_instances" -lt 512 ]; then
+  echo "⚠️  Inotify limits: watches=$max_watches, instances=$max_instances (recommend: 524288, 512)"
+else
+  echo "✅ Inotify limits: sufficient for 5+ clusters"
+fi
+
+# Check failed services
+failed=$(systemctl --user list-units --state=failed --no-pager --no-legend 2>/dev/null | wc -l)
+if [ $failed -gt 0 ]; then
+  echo "⚠️  Found $failed failed user service(s) - review before testing"
+else
+  echo "✅ System health: no failed services"
+fi
+
+echo "✅ Prerequisites check complete"
+echo ""
+
+# ============================================================================
 # T1: deploy.sh with baked-in config
 # ============================================================================
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -47,6 +82,23 @@ echo ""
 for i in 01 02 03 04 05; do
   echo "Deploying cluster${i}..."
   CLUSTER_NAME=cluster${i} ./tools/deploy.sh
+  
+  # Wait for service to be stable (systemd-driven, no arbitrary sleeps)
+  echo "Verifying cluster${i} service stability..."
+  until systemctl --user is-active --quiet kinc-cluster${i}-control-plane.service; do
+    sleep 2
+  done
+  
+  # Brief stability check
+  sleep 2
+  if systemctl --user is-failed --quiet kinc-cluster${i}-control-plane.service; then
+    echo "❌ Service kinc-cluster${i}-control-plane.service has failed!"
+    systemctl --user status kinc-cluster${i}-control-plane.service --no-pager
+    exit 1
+  fi
+  
+  echo "✅ cluster${i} deployed and stable"
+  echo ""
 done
 echo "✅ T2 complete: 5 clusters with mounted config"
 echo ""
@@ -93,14 +145,63 @@ podman run -d --name kinc-direct-podman \
   --env container=podman \
   "$KINC_IMAGE"
 
-echo "Waiting for API server (5-10 seconds)..."
-timeout 120 bash -c 'until curl -k https://localhost:6450/healthz 2>/dev/null; do sleep 2; done'
-echo "✅ API server ready"
+echo "Waiting for cluster initialization..."
+timeout 300 bash -c 'until podman exec kinc-direct-podman test -f /var/lib/kinc-initialized 2>/dev/null; do sleep 2; done'
+echo "✅ Cluster initialized"
 
-echo "Waiting for full initialization (~40 seconds)..."
-sleep 40
+echo "Waiting for API server to be ready (returns HTTP 200)..."
+timeout 300 bash -c 'until curl -k -s -o /dev/null -w "%{http_code}" https://localhost:6450/healthz 2>/dev/null | grep -q "200"; do sleep 2; done'
+echo "✅ API server responding"
+
+echo "Waiting for system pods..."
+kubectl --kubeconfig=<(podman exec kinc-direct-podman cat /etc/kubernetes/admin.conf | sed 's|server: https://.*:6443|server: https://127.0.0.1:6450|g') \
+  wait --for=condition=Ready pods --all -n kube-system --timeout=300s
+
+echo "Waiting for storage provisioner..."
+# Wait for namespace to exist first (avoids "no matching resources" error)
+timeout 60 bash -c 'until kubectl --kubeconfig=<(podman exec kinc-direct-podman cat /etc/kubernetes/admin.conf | sed "s|server: https://.*:6443|server: https://127.0.0.1:6450|g") get namespace local-path-storage >/dev/null 2>&1; do sleep 2; done'
+# Wait for pods to be created
+timeout 60 bash -c 'until kubectl --kubeconfig=<(podman exec kinc-direct-podman cat /etc/kubernetes/admin.conf | sed "s|server: https://.*:6443|server: https://127.0.0.1:6450|g") get pods -n local-path-storage 2>/dev/null | grep -q local-path-provisioner; do sleep 2; done'
+# Now wait for pods to be ready
+kubectl --kubeconfig=<(podman exec kinc-direct-podman cat /etc/kubernetes/admin.conf | sed 's|server: https://.*:6443|server: https://127.0.0.1:6450|g') \
+  wait --for=condition=Ready pods --all -n local-path-storage --timeout=60s
 
 echo "✅ T3 complete: direct-podman cluster (baked-in config)"
+echo ""
+
+# ============================================================================
+# Verification: Multi-Service Architecture
+# ============================================================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Verification: Multi-Service Architecture"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Check default cluster (baked-in config) as sample
+echo "Checking default cluster multi-service architecture..."
+verification_failed=false
+for service in kinc-preflight.service kubeadm-init.service kinc-postinit.service; do
+  if podman exec kinc-default-control-plane systemctl is-active --quiet $service 2>/dev/null; then
+    echo "  ✅ $service: active"
+  else
+    echo "  ❌ $service: not active"
+    verification_failed=true
+  fi
+done
+
+if podman exec kinc-default-control-plane test -f /var/lib/kinc-initialized 2>/dev/null; then
+  echo "  ✅ Initialization marker: present"
+else
+  echo "  ❌ Initialization marker: missing"
+  verification_failed=true
+fi
+
+if [ "$verification_failed" = true ]; then
+  echo "❌ Multi-service architecture verification failed"
+  exit 1
+fi
+
+echo "✅ Multi-service architecture verified"
 echo ""
 
 # ============================================================================
@@ -111,13 +212,27 @@ echo "║                    Deployment Complete - 7 Clusters                   
 echo "╚════════════════════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Cluster Inventory:"
-echo "  • default         (deploy.sh + baked-in)   - Port 6443"
-echo "  • cluster01       (deploy.sh + mounted)    - Port 6444"
-echo "  • cluster02       (deploy.sh + mounted)    - Port 6445"
-echo "  • cluster03       (deploy.sh + mounted)    - Port 6446"
-echo "  • cluster04       (deploy.sh + mounted)    - Port 6447"
-echo "  • cluster05       (deploy.sh + mounted)    - Port 6448"
-echo "  • kinc-direct-podman (podman run + baked-in) - Port 6450"
+podman ps --filter "name=kinc" --format "{{.Names}}\t{{.Status}}\t{{.Ports}}" | while IFS=$'\t' read -r name status ports; do
+  # Skip empty lines
+  if [ -z "$name" ]; then
+    continue
+  fi
+  
+  # Extract port from format: 127.0.0.1:6443->6443/tcp
+  port=$(echo "$ports" | grep -oE '127\.0\.0\.1:[0-9]+' | cut -d: -f2 || echo "unknown")
+  
+  # Determine method
+  if echo "$name" | grep -q "direct-podman"; then
+    method="(podman run + baked-in)"
+  elif [ "$name" = "kinc-default-control-plane" ]; then
+    method="(deploy.sh + baked-in) "
+  else
+    method="(deploy.sh + mounted)  "
+  fi
+  
+  # Format: adjust spacing based on name length
+  printf "  • %-30s %s - Port %s\n" "$name" "$method" "$port"
+done
 echo ""
 
 # Check if we should skip cleanup (for debugging)

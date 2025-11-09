@@ -18,9 +18,50 @@ IMAGE_NAME="localhost/kinc/node:v1.33.5"
 echo "📁 Working directory: $SCRIPT_DIR"
 echo "🏷️  Cluster name: $CLUSTER_NAME"
 echo "🏷️  Using image: $IMAGE_NAME"
+echo ""
 
-# Port allocation function - sequential allocation based on existing clusters
-# Counts running/starting kinc containers and allocates next available port
+# ===========================================================================
+# Step 0: System Prerequisites Check
+# ===========================================================================
+echo "🔍 Step 0: System Prerequisites Check"
+echo "───────────────────────────────────"
+
+# Check 1: IP Forwarding (REQUIRED)
+ip_forward=$(cat /proc/sys/net/ipv4/ip_forward)
+if [ "$ip_forward" != "1" ]; then
+  echo "❌ IP forwarding DISABLED"
+  echo "   Required for Kubernetes pod networking!"
+  echo "   Enable with: sudo sysctl -w net.ipv4.ip_forward=1"
+  exit 1
+fi
+echo "✅ IP forwarding enabled"
+
+# Check 2: Inotify limits (warn only)
+max_user_watches=$(cat /proc/sys/fs/inotify/max_user_watches)
+max_user_instances=$(cat /proc/sys/fs/inotify/max_user_instances)
+if [ "$max_user_watches" -lt 524288 ] || [ "$max_user_instances" -lt 512 ]; then
+  echo "⚠️  Inotify limits below recommended (may affect multi-cluster stability)"
+  echo "   Current: watches=$max_user_watches, instances=$max_user_instances"
+  echo "   Recommended: watches=524288, instances=512"
+else
+  echo "✅ Inotify limits sufficient"
+fi
+
+# Check 3: Failed services (warn only)
+failed=$(systemctl --user list-units --state=failed --no-pager --no-legend 2>/dev/null | wc -l)
+if [ $failed -gt 0 ]; then
+  echo "⚠️  Found $failed failed user service(s) - may indicate previous cluster issues"
+else
+  echo "✅ No failed services"
+fi
+
+# Check 4: Podman
+echo "✅ Podman $(podman --version | awk '{print $NF}') available"
+echo ""
+
+# Port allocation function - sequential allocation (6443, 6444, 6445...)
+# This MUST be sequential because subnet IDs are derived from port's last 2 digits
+# Port 6443 → subnet 43, Port 6444 → subnet 44, etc.
 get_cluster_port() {
     local cluster_name=$1
     local base_port=6443
@@ -30,21 +71,18 @@ get_cluster_port() {
         return
     fi
     
-    # Wait briefly for any concurrent systemd operations to settle
-    sleep 0.5
-    
-    # Count existing kinc containers (running or starting)
-    local existing_count=$(podman ps -a --filter "name=kinc-*-control-plane" --format "{{.Names}}" | wc -l)
-    
-    # Get all currently allocated ports to avoid conflicts
-    local used_ports=$(podman ps -a --filter "name=kinc-*" --format "{{.Ports}}" 2>/dev/null | \
-                      grep -o '127\.0\.0\.1:[0-9]*' | \
+    # Get all currently used ports from running/stopped containers
+    # Note: Podman's name filter doesn't support wildcards, so use "kinc" and filter with grep
+    local used_ports=$(podman ps -a --filter "name=kinc" --format "{{.Names}}\t{{.Ports}}" 2>/dev/null | \
+                      grep 'control-plane' | \
+                      grep -oE '127\.0\.0\.1:[0-9]+->6443' | \
                       cut -d: -f2 | \
-                      sort -n)
+                      cut -d- -f1 | \
+                      sort -n | \
+                      uniq)
     
-    # Start from base_port + existing_count and find first unused port
-    local candidate_port=$((base_port + existing_count))
-    
+    # Find first available port starting from base_port
+    local candidate_port=$base_port
     while echo "$used_ports" | grep -q "^${candidate_port}$"; do
         candidate_port=$((candidate_port + 1))
     done
@@ -140,21 +178,30 @@ else
     # Create the config volume and copy kubeadm.conf into it
     systemctl --user daemon-reload
     systemctl --user start kinc-${CLUSTER_NAME}-config-volume.service
-    # Wait for volume to be created
-    sleep 2
+    
+    # Wait for volume to actually be created (systemd-driven, not arbitrary sleep)
+    echo "Waiting for config volume to be created..."
+    max_wait=30
+    waited=0
+    while ! podman volume inspect kinc-${CLUSTER_NAME}-config >/dev/null 2>&1; do
+        if [ $waited -ge $max_wait ]; then
+            echo "❌ Timeout waiting for config volume creation"
+            systemctl --user status kinc-${CLUSTER_NAME}-config-volume.service --no-pager
+            exit 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo "✅ Config volume created (${waited}s)"
 
     # Generate cluster-specific kubeadm.conf
-    # Important: In pasta networking:
-    # - Use 127.0.0.1 for controlPlaneEndpoint (hostname resolution doesn't work)
-    # - Use unique bindPort per cluster (all containers share same host IP)
+    # Important: bindPort must ALWAYS be 6443 (container-internal port)
+    # The host port (CLUSTER_PORT) is mapped via podman port forwarding
     VOLUME_PATH=$(podman volume inspect kinc-${CLUSTER_NAME}-config --format "{{.Mountpoint}}")
     sed -e "s/clusterName: kinc/clusterName: kinc-${CLUSTER_NAME}/g" \
         -e "s/kinc-control-plane/kinc-${CLUSTER_NAME}-control-plane/g" \
         -e "s|podSubnet: 10\.244\.0\.0/16|podSubnet: ${CLUSTER_POD_SUBNET}|g" \
         -e "s|serviceSubnet: 10\.96\.0\.0/16|serviceSubnet: ${CLUSTER_SERVICE_SUBNET}|g" \
-        -e "s|bindPort: 6443|bindPort: ${CLUSTER_PORT}|g" \
-        -e "s|controlPlaneEndpoint:.*|controlPlaneEndpoint: 127.0.0.1:${CLUSTER_PORT}|g" \
-        -e "s|apiServerEndpoint:.*|apiServerEndpoint: 127.0.0.1:${CLUSTER_PORT}|g" \
         runtime/config/kubeadm.conf > /tmp/kubeadm-${CLUSTER_NAME}.conf
 
     sudo cp /tmp/kubeadm-${CLUSTER_NAME}.conf "$VOLUME_PATH/kubeadm.conf"
@@ -175,11 +222,14 @@ if ! podman images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}
 fi
 echo "✅ Local image found"
 
-# Step 5: Update container file with image name
+# Step 5: Update container file with cluster-specific settings
 echo
-echo "🔧 Step 5: Updating image in container file"
+echo "🔧 Step 5: Updating container file with cluster-specific settings"
 sed -i "s|Image=.*|Image=$IMAGE_NAME|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
-echo "✅ Image updated"
+sed -i "s|PublishPort=.*|PublishPort=127.0.0.1:${CLUSTER_PORT}:6443/tcp|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+sed -i "s|ContainerName=.*|ContainerName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+sed -i "s|HostName=.*|HostName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+echo "✅ Container file updated"
 
 # Step 6: Start services
 echo
@@ -188,6 +238,21 @@ systemctl --user daemon-reload
 
 echo "Starting volume service..."
 systemctl --user start kinc-${CLUSTER_NAME}-var-data-volume.service
+
+# Wait for var-data volume to actually be created
+echo "Waiting for var-data volume to be created..."
+max_wait=30
+waited=0
+while ! podman volume inspect kinc-${CLUSTER_NAME}-var-data >/dev/null 2>&1; do
+    if [ $waited -ge $max_wait ]; then
+        echo "❌ Timeout waiting for var-data volume creation"
+        systemctl --user status kinc-${CLUSTER_NAME}-var-data-volume.service --no-pager
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+echo "✅ Var-data volume created (${waited}s)"
 
 echo "Starting control plane service..."
 if ! systemctl --user start kinc-${CLUSTER_NAME}-control-plane.service; then
@@ -209,18 +274,106 @@ fi
 
 echo "✅ Volume and container services started"
 
-# Step 7: Wait for cluster initialization to complete
+# Step 7: Wait for cluster initialization using systemd
 echo
-echo "⏳ Step 7: Waiting for cluster initialization"
-if "${SCRIPT_DIR}/tools/wait-for-init.sh" "${CLUSTER_NAME}"; then
-    echo "✅ Cluster initialization completed successfully!"
-else
-    echo "❌ Cluster initialization failed"
-    echo
-    echo "To check logs:"
-    echo "  podman exec kinc-${CLUSTER_NAME}-control-plane journalctl -u kinc-init.service --no-pager"
+echo "⏳ Step 7: Waiting for cluster initialization (systemd-driven)"
+
+# Wait for container service to be active and stable
+echo "Checking systemd service status..."
+max_wait=60
+waited=0
+while [ $waited -lt $max_wait ]; do
+    if systemctl --user is-active --quiet kinc-${CLUSTER_NAME}-control-plane.service; then
+        echo "✅ systemd service is active"
+        break
+    fi
+    if systemctl --user is-failed --quiet kinc-${CLUSTER_NAME}-control-plane.service; then
+        echo "❌ systemd service has failed"
+        systemctl --user status kinc-${CLUSTER_NAME}-control-plane.service --no-pager
+        exit 1
+    fi
+    echo "  Service not active yet (${waited}/${max_wait}s)..."
+    sleep 2
+    waited=$((waited + 2))
+done
+
+if [ $waited -ge $max_wait ]; then
+    echo "❌ Timeout waiting for systemd service to become active"
+    systemctl --user status kinc-${CLUSTER_NAME}-control-plane.service --no-pager
     exit 1
 fi
+
+# Wait for kinc-init.service inside container to complete
+echo "Waiting for kinc-init.service to complete..."
+max_wait=1500  # 25 minutes max for initialization
+waited=0
+while [ $waited -lt $max_wait ]; do
+    # Check if container is still running
+    if ! podman ps --filter "name=kinc-${CLUSTER_NAME}-control-plane" --format "{{.Names}}" | grep -q "kinc-${CLUSTER_NAME}-control-plane"; then
+        echo "❌ Container is not running"
+        systemctl --user status kinc-${CLUSTER_NAME}-control-plane.service --no-pager
+        exit 1
+    fi
+    
+    # Check if multi-service initialization has completed
+    if podman exec kinc-${CLUSTER_NAME}-control-plane test -f /var/lib/kinc-initialized 2>/dev/null; then
+        echo "✅ Cluster initialization completed (${waited}s)"
+        
+        # Verify multi-service architecture
+        echo ""
+        echo "🔍 Verifying Multi-Service Architecture"
+        echo "────────────────────────────────────────"
+        
+        services_ok=true
+        for service in kinc-preflight.service kubeadm-init.service kinc-postinit.service; do
+            if podman exec kinc-${CLUSTER_NAME}-control-plane systemctl is-active --quiet $service; then
+                echo "✅ $service: active"
+            else
+                echo "❌ $service: not active"
+                services_ok=false
+            fi
+        done
+        
+        if [ "$services_ok" = true ]; then
+            echo "✅ Multi-service architecture verified"
+        else
+            echo "⚠️  Warning: Some services not in expected state"
+        fi
+        
+        break
+    fi
+    
+    # Check if any initialization service has failed
+    if podman exec kinc-${CLUSTER_NAME}-control-plane systemctl is-failed --quiet kinc-preflight.service 2>/dev/null || \
+       podman exec kinc-${CLUSTER_NAME}-control-plane systemctl is-failed --quiet kubeadm-init.service 2>/dev/null || \
+       podman exec kinc-${CLUSTER_NAME}-control-plane systemctl is-failed --quiet kinc-postinit.service 2>/dev/null; then
+        echo "❌ One or more initialization services have failed"
+        echo ""
+        echo "Service status:"
+        podman exec kinc-${CLUSTER_NAME}-control-plane systemctl status kinc-preflight.service kubeadm-init.service kinc-postinit.service --no-pager || true
+        exit 1
+    fi
+    
+    if [ $((waited % 30)) -eq 0 ] && [ $waited -gt 0 ]; then
+        echo "  Still initializing... (${waited}/${max_wait}s)"
+    fi
+    
+    sleep 5
+    waited=$((waited + 5))
+done
+
+if [ $waited -ge $max_wait ]; then
+    echo "❌ Timeout waiting for cluster initialization"
+    echo
+    echo "Service status inside container:"
+    podman exec kinc-${CLUSTER_NAME}-control-plane systemctl status kinc-init.service --no-pager || true
+    echo
+    echo "Recent logs:"
+    podman exec kinc-${CLUSTER_NAME}-control-plane journalctl -u kinc-init.service --no-pager -n 50 || true
+    exit 1
+fi
+
+echo "✅ Cluster initialization completed successfully!"
 
 echo
 echo "✅ Deployment complete!"
