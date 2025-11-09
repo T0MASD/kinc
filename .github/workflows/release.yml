@@ -420,18 +420,21 @@ jobs:
       
       - name: Create GitHub Release
         run: |
+          # Set image name (repository in lowercase)
+          IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          
           # Create release notes
           cat << EOF > release-notes.md
           # kinc ${{ github.ref_name }}
           
-          🎉 **Container image available**: \`ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}\`
+          🎉 **Container image available**: \`ghcr.io/${IMAGE_NAME}:${{ github.ref_name }}\`
           
           ## Quick Start
           
           ### Standard Deployment (Mounted Configuration)
           \`\`\`bash
           # Recommended: Use kinc tools for proper rootless setup
-          export KINC_IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          export KINC_IMAGE=ghcr.io/${IMAGE_NAME}:${{ github.ref_name }}
           git clone https://github.com/t0masd/kinc.git && cd kinc
           ./tools/deploy.sh
           \`\`\`
@@ -439,7 +442,7 @@ jobs:
           ### Zero-Config Deployment (Baked-in Configuration)
           \`\`\`bash
           # Fastest deployment - uses embedded configuration
-          export KINC_IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          export KINC_IMAGE=ghcr.io/${IMAGE_NAME}:${{ github.ref_name }}
           export USE_BAKED_IN_CONFIG=true
           git clone https://github.com/t0masd/kinc.git && cd kinc
           ./tools/deploy.sh
