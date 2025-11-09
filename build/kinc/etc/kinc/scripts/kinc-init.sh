@@ -129,9 +129,16 @@ fi
 # Initialize Kubernetes cluster
 log "Initializing Kubernetes cluster with kubeadm..."
 kubeadm_start=$(date +%s)
-# Skip preflight and upload-config/kubelet (which requires node to be registered first)
-# The kubelet config will be applied automatically when the node registers
-if kubeadm init --config=/tmp/kubeadm-final.conf --skip-phases=preflight,upload-config/kubelet; then
+# Skip preflight, upload-config/kubelet, and show-join-command phases
+# - preflight: We handle checks ourselves
+# - upload-config/kubelet: Applied automatically when node registers
+# - show-join-command: Suppress verbose join instructions (single-node cluster)
+#
+# Filter out join command output (kubeadm still prints it even when phase is skipped)
+# Keep all other output showing component startup progress
+if kubeadm init --config=/tmp/kubeadm-final.conf --skip-phases=preflight,upload-config/kubelet,show-join-command 2>&1 | \
+   grep -Ev "(kubeadm join|discovery-token-ca-cert-hash|--control-plane|Then you can join|following as root:$|any number of worker nodes)" | \
+   cat; then
     kubeadm_end=$(date +%s)
     kubeadm_elapsed=$((kubeadm_end - kubeadm_start))
     log "✅ Kubernetes cluster initialized successfully (took ${kubeadm_elapsed}s)"

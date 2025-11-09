@@ -5,7 +5,7 @@ After=network-online.target kinc-var-data-volume.service kinc-config-volume.serv
 Wants=network-online.target kinc-var-data-volume.service kinc-config-volume.service
 
 [Container]
-Image=localhost/kinc/node:v1.33.5-fedora-crio-kincnet
+Image=localhost/kinc/node:v1.33.5
 ContainerName=kinc-control-plane
 HostName=kinc-control-plane
 
@@ -20,10 +20,12 @@ Tmpfs=/run/lock:rw,rprivate,nosuid,nodev,tmpcopyup
 # Volume mounts (rootless configuration)
 Volume=kinc-var-data:/var
 Volume=kinc-config:/etc/kinc/config:ro
+# Share host container storage to cache images across all clusters
 Volume=%h/.local/share/containers/storage:/root/.local/share/containers/storage:rw
 
 # Network configuration
-PublishPort=127.0.0.1:6443:6443/tcp
+# Port must be sequential (6443, 6444, 6445...) because subnet IDs are derived from last 2 digits
+PublishPort=127.0.0.1:CLUSTER_PORT:6443/tcp
 
 # Environment variables
 Environment=container=podman
