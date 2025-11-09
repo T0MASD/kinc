@@ -57,6 +57,15 @@ jobs:
           echo "KINC_PATCH=$KINC_PATCH" >> $GITHUB_ENV
           echo "kinc patch version: $KINC_PATCH"
           
+          # Extract version components for latest tags
+          # v1_33_5-0 -> v1_33_5 (patch level), v1_33 (minor level)
+          K8S_VERSION_UNDERSCORED=$(echo "$TAG" | sed 's/^v//' | cut -d'-' -f1)
+          K8S_MINOR_VERSION=$(echo "$K8S_VERSION_UNDERSCORED" | cut -d'_' -f1-2)
+          echo "K8S_VERSION_UNDERSCORED=$K8S_VERSION_UNDERSCORED" >> $GITHUB_ENV
+          echo "K8S_MINOR_VERSION=$K8S_MINOR_VERSION" >> $GITHUB_ENV
+          echo "Patch-level tag: v${K8S_VERSION_UNDERSCORED}"
+          echo "Minor-level tag: v${K8S_MINOR_VERSION}"
+          
           # Convert repository name to lowercase for container registry
           REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE_NAME=$REPO_LOWER" >> $GITHUB_ENV
@@ -75,16 +84,24 @@ jobs:
           
           # Build the kinc node image with proper tags
           IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
+          PATCH_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_VERSION_UNDERSCORED }}-latest"
+          MINOR_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_MINOR_VERSION }}-latest"
           LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           LOCAL_TEST_TAG="localhost/kinc/node:v${{ env.K8S_VERSION }}"
           
-          echo "Building image: $IMAGE_TAG"
-          echo "Also tagging for local testing: $LOCAL_TEST_TAG"
+          echo "Building image with tags:"
+          echo "  Specific: $IMAGE_TAG"
+          echo "  Patch latest: $PATCH_LATEST_TAG"
+          echo "  Minor latest: $MINOR_LATEST_TAG"
+          echo "  Overall latest: $LATEST_TAG"
+          echo "  Local test: $LOCAL_TEST_TAG"
           
           # Build with cache busting and proper labels
           podman build \
             -f Containerfile \
             -t "$IMAGE_TAG" \
+            -t "$PATCH_LATEST_TAG" \
+            -t "$MINOR_LATEST_TAG" \
             -t "$LATEST_TAG" \
             -t "$LOCAL_TEST_TAG" \
             --build-arg CACHE_BUST="${{ github.run_number }}" \
@@ -164,18 +181,28 @@ jobs:
           echo "=== Pushing images to registry ==="
           
           IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
+          PATCH_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_VERSION_UNDERSCORED }}-latest"
+          MINOR_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_MINOR_VERSION }}-latest"
           LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           
           # Push versioned tag
           echo "Pushing $IMAGE_TAG..."
           podman push "$IMAGE_TAG"
           
-          # Push latest tag (only for non-pre-release versions)
-          if [[ "${{ env.BUILD_TAG }}" != *"-"* ]]; then
+          # Determine if this is a pre-release (patch contains non-numeric characters)
+          if [[ "${{ env.KINC_PATCH }}" =~ [^0-9] ]]; then
+            echo "Pre-release detected (patch: ${{ env.KINC_PATCH }}), skipping latest tags"
+          else
+            echo "Stable release detected (patch: ${{ env.KINC_PATCH }}), pushing latest tags"
+            
+            echo "Pushing $PATCH_LATEST_TAG..."
+            podman push "$PATCH_LATEST_TAG"
+            
+            echo "Pushing $MINOR_LATEST_TAG..."
+            podman push "$MINOR_LATEST_TAG"
+            
             echo "Pushing $LATEST_TAG..."
             podman push "$LATEST_TAG"
-          else
-            echo "Skipping latest tag for pre-release version"
           fi
           
           echo "✅ Images pushed successfully"
@@ -186,12 +213,22 @@ jobs:
           
           IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
           
+          # Determine which tags were pushed
+          AVAILABLE_TAGS="\`$IMAGE_TAG\`"
+          if [[ ! "${{ env.KINC_PATCH }}" =~ [^0-9] ]]; then
+            AVAILABLE_TAGS="$AVAILABLE_TAGS<br>\`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_VERSION_UNDERSCORED }}-latest\` (patch-level latest)<br>\`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_MINOR_VERSION }}-latest\` (minor-level latest)<br>\`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\` (overall latest)"
+          fi
+          
           cat << EOF >> $GITHUB_STEP_SUMMARY
           ## 🎉 kinc Image Published Successfully!
           
-          **Image**: \`$IMAGE_TAG\`
-          **Kubernetes Version**: \`${{ env.K8S_VERSION }}\`
+          **Kubernetes Version**: \`${{ env.K8S_VERSION }}\`  
+          **kinc Patch**: \`${{ env.KINC_PATCH }}\`  
           **Build**: \`${{ github.run_number }}\`
+          
+          ### 🏷️ Available Tags
+          
+          $AVAILABLE_TAGS
           
           ### 📋 Usage Examples
           

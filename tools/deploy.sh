@@ -13,7 +13,8 @@ FORCE_PORT="${FORCE_PORT:-}"  # Allow manual port override
 
 # Image configuration - Single image for all clusters
 # All clusters use the same image with different mounted configs
-IMAGE_NAME="localhost/kinc/node:v1.33.5"
+# Allow KINC_IMAGE env var to override default
+IMAGE_NAME="${KINC_IMAGE:-localhost/kinc/node:v1.33.5}"
 
 echo "📁 Working directory: $SCRIPT_DIR"
 echo "🏷️  Cluster name: $CLUSTER_NAME"
@@ -214,10 +215,14 @@ fi
 echo
 echo "🔧 Step 4: Ensuring local image is available"
 echo "🏗️ Using local build image: $IMAGE_NAME"
-# Check if local image exists
-if ! podman images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}$"; then
+# Check if local image exists using podman image exists (more reliable than grep)
+if ! podman image exists "$IMAGE_NAME"; then
     echo "❌ Local image not found: $IMAGE_NAME"
-    echo "   Please run: CLUSTER_NAME=${CLUSTER_NAME} ./tools/build.sh"
+    echo ""
+    echo "Available kinc images:"
+    podman images | grep -E "kinc|REPOSITORY" || echo "  No kinc images found"
+    echo ""
+    echo "Please run: CLUSTER_NAME=${CLUSTER_NAME} ./tools/build.sh"
     exit 1
 fi
 echo "✅ Local image found"
