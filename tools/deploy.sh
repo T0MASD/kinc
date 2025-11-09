@@ -383,11 +383,17 @@ echo "✅ Cluster initialization completed successfully!"
 echo
 echo "✅ Deployment complete!"
 echo
-echo "🔍 To monitor cluster status:"
-echo "  CLUSTER_NAME=${CLUSTER_NAME} ./tools/monitor.sh"
+echo "📋 Next steps:"
 echo
-echo "🧪 To run tests:"
-echo "  CLUSTER_NAME=${CLUSTER_NAME} ./tools/test.sh"
+echo "  # Extract kubeconfig"
+echo "  mkdir -p ~/.kube"
+echo "  podman cp kinc-${CLUSTER_NAME}-control-plane:/etc/kubernetes/admin.conf ~/.kube/kinc-${CLUSTER_NAME}-config"
+echo "  sed -i 's|server: https://.*:6443|server: https://127.0.0.1:${CLUSTER_PORT}|g' ~/.kube/kinc-${CLUSTER_NAME}-config"
+echo
+echo "  # Use cluster"
+echo "  export KUBECONFIG=~/.kube/kinc-${CLUSTER_NAME}-config"
+echo "  kubectl get nodes"
+echo "  kubectl get pods -A"
 echo
 echo "🛑 To stop and cleanup:"
 echo "  CLUSTER_NAME=${CLUSTER_NAME} ./tools/cleanup.sh"
