@@ -76,7 +76,7 @@ jobs:
           # Build the kinc node image with proper tags
           IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
           LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-          LOCAL_TEST_TAG="localhost/kinc/node:v1.33.5-test"
+          LOCAL_TEST_TAG="localhost/kinc/node:v${{ env.K8S_VERSION }}"
           
           echo "Building image: $IMAGE_TAG"
           echo "Also tagging for local testing: $LOCAL_TEST_TAG"
