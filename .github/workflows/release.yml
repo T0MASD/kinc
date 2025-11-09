@@ -120,9 +120,9 @@ jobs:
           echo "Deploying test cluster..."
           ./tools/deploy.sh
           
-          # Wait for initialization
+          # Wait for initialization (already done by deploy.sh, but verify)
           echo "Waiting for cluster initialization..."
-          max_wait=300
+          max_wait=30
           waited=0
           while [ $waited -lt $max_wait ]; do
             if podman exec kinc-test-control-plane test -f /var/lib/kinc-initialized 2>/dev/null; then
@@ -133,9 +133,21 @@ jobs:
               echo "❌ Cluster initialization timeout"
               exit 1
             fi
-            sleep 5
-            waited=$((waited + 5))
+            sleep 2
+            waited=$((waited + 2))
           done
+          
+          # Extract kubeconfig
+          echo "Extracting kubeconfig..."
+          mkdir -p ~/.kube
+          podman cp kinc-test-control-plane:/etc/kubernetes/admin.conf ~/.kube/kinc-test-config
+          
+          # Get cluster port
+          cluster_port=$(podman inspect kinc-test-control-plane --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}}{{end}}{{end}}' 2>/dev/null)
+          echo "Cluster port: $cluster_port"
+          
+          # Update kubeconfig with correct server address
+          sed -i "s|server: https://.*:6443|server: https://127.0.0.1:$cluster_port|g" ~/.kube/kinc-test-config
           
           # Verify cluster is functional
           export KUBECONFIG=~/.kube/kinc-test-config
