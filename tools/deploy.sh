@@ -214,7 +214,11 @@ else
     # 🌟 SELINUX FIX ADDED: Corrects the label on the volume data.
     # This must run AFTER the copy/chown to ensure the file has the container context.
     echo "🔧 Restoring SELinux context on config volume path..."
-    sudo restorecon -R -v "$VOLUME_PATH"
+    if command -v restorecon >/dev/null 2>&1 && command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; then
+        sudo restorecon -R -v "$VOLUME_PATH"
+    else
+        echo "⚠️  SELinux not enabled or restorecon/getenforce not available; skipping context restore."
+    fi
 
     rm -f /tmp/kubeadm-${CLUSTER_NAME}.conf
     echo "✅ Cluster configuration volume prepared"
