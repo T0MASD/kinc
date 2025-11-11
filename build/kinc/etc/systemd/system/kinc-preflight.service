@@ -12,6 +12,9 @@ RemainAfterExit=yes
 TimeoutStartSec=120
 Restart=no
 
+# Pass environment variables from container to service
+PassEnvironment=KINC_ENABLE_FARO
+
 # Run preflight checks and setup
 ExecStart=/etc/kinc/scripts/kinc-preflight.sh
 

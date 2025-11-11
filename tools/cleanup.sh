@@ -35,16 +35,6 @@ echo "✅ Volumes removed"
 
 echo "Removing Quadlet files..."
 rm -f ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-*.*
-
-# Clean up any system-level quadlet files if they exist
-if sudo test -f /etc/containers/systemd/kinc-control-plane.container; then
-    echo "⚠️  Found system-level quadlet files, cleaning up..."
-    sudo systemctl stop kinc-control-plane.service kinc-var-data-volume.service 2>/dev/null || true
-    sudo podman rm -f kinc-control-plane 2>/dev/null || true
-    sudo rm -f /etc/containers/systemd/kinc-*.*
-    sudo systemctl daemon-reload
-    echo "✅ System-level quadlet files cleaned up"
-fi
 echo "✅ Quadlet files removed"
 
 echo "Reloading user systemd..."

@@ -33,6 +33,14 @@ jobs:
           # Enable IP forwarding for container builds
           echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
           
+          # Set inotify limits for cluster testing
+          echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches > /dev/null
+          echo 2048 | sudo tee /proc/sys/fs/inotify/max_user_instances > /dev/null
+          
+          # Set kernel keyring limits for cluster testing
+          echo 1000 | sudo tee /proc/sys/kernel/keys/maxkeys > /dev/null
+          echo 25000 | sudo tee /proc/sys/kernel/keys/maxbytes > /dev/null
+          
           # Check Podman version
           podman --version
           
@@ -132,6 +140,7 @@ jobs:
           echo "Testing locally built image with deployment..."
           
           export CLUSTER_NAME="test"
+          export KINC_ENABLE_FARO=true
           
           # Deploy cluster
           echo "Deploying test cluster..."
@@ -173,8 +182,45 @@ jobs:
           
           echo "✅ kinc image validation passed - deployment successful!"
           
+          # Extract Faro events
+          echo ""
+          echo "=== Extracting Faro Events ==="
+          
+          # Extract directly from data volume (no podman exec needed)
+          FARO_PATH="$HOME/.local/share/containers/storage/volumes/kinc-test-var-data/_data/lib/kinc/faro-events/logs"
+          
+          if [ -d "$FARO_PATH" ] && [ -n "$(ls -A $FARO_PATH/*.json 2>/dev/null)" ]; then
+            echo "✅ Faro events found in data volume"
+            
+            mkdir -p artifacts/faro
+            
+            # Copy events from volume
+            cp $FARO_PATH/*.json artifacts/faro/ 2>/dev/null || true
+            cp $FARO_PATH/*.log artifacts/faro/ 2>/dev/null || true
+            
+            # Count events
+            EVENT_COUNT=$(cat artifacts/faro/*.json 2>/dev/null | wc -l)
+            echo "✅ Captured $EVENT_COUNT events"
+            
+            # Show summary
+            echo ""
+            echo "Event Summary:"
+            cat artifacts/faro/*.json | jq -r '.gvr' | sort | uniq -c | sort -rn | head -10
+          else
+            echo "⚠️  Faro events not found - skipping extraction"
+          fi
+          
           # Cleanup
           CLUSTER_NAME=test ./tools/cleanup.sh || true
+
+      - name: Upload Faro events
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: faro-events-release-${{ env.BUILD_TAG }}
+          path: artifacts/faro/
+          retention-days: 90
+          if-no-files-found: ignore
 
       - name: Push images to registry
         run: |

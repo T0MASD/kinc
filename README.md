@@ -26,6 +26,7 @@
 - **Podman** (rootless)
 - **IP forwarding enabled**
 - **Sufficient inotify limits** (for multiple clusters)
+- **Sufficient kernel keyring limits** (for multiple clusters)
 
 ```bash
 # Enable IP forwarding (one-time setup)
@@ -37,7 +38,18 @@ sudo sysctl -p /etc/sysctl.d/99-kubernetes.conf
 
 # Increase inotify limits for multiple clusters
 sudo sysctl -w fs.inotify.max_user_watches=524288
-sudo sysctl -w fs.inotify.max_user_instances=512
+sudo sysctl -w fs.inotify.max_user_instances=2048
+
+# Increase kernel keyring limits (critical for multi-cluster)
+sudo sysctl -w kernel.keys.maxkeys=1000
+sudo sysctl -w kernel.keys.maxbytes=25000
+
+# Make all changes persistent
+echo 'fs.inotify.max_user_watches = 524288' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+echo 'fs.inotify.max_user_instances = 2048' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+echo 'kernel.keys.maxkeys = 1000' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+echo 'kernel.keys.maxbytes = 25000' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+sudo sysctl -p /etc/sysctl.d/99-kubernetes.conf
 ```
 
 ### Deploy a Cluster
@@ -185,14 +197,24 @@ CLUSTER_NAME=myapp ./tools/deploy.sh
 
 # Force specific port
 FORCE_PORT=6500 CLUSTER_NAME=special ./tools/deploy.sh
+
+# Bypass sysctl checks (not recommended)
+KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=myapp ./tools/deploy.sh
 ```
 
 **Features:**
-- System prerequisites validation (IP forwarding, inotify limits)
+- System prerequisites validation (IP forwarding, inotify limits, kernel keyring)
+- Smart multi-cluster detection: requires proper sysctls when other clusters exist
 - Automatic sequential port allocation
 - Subnet derivation from port
 - Systemd-driven initialization waits
 - Multi-service architecture verification
+
+**Environment Variables:**
+- `CLUSTER_NAME`: Cluster identifier (default: `default`)
+- `FORCE_PORT`: Override auto port allocation
+- `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.33.5`)
+- `KINC_SKIP_SYSCTL_CHECKS`: Bypass inotify/keyring checks (default: `false`)
 
 ### `cleanup.sh`
 Remove a kinc cluster and clean up all resources.
@@ -344,11 +366,33 @@ cat /proc/sys/net/ipv4/ip_forward
 sudo sysctl -w net.ipv4.ip_forward=1
 ```
 
-**Too many open files (multiple clusters):**
+**Deployment blocked due to sysctl limits:**
+
+The deploy script will exit if attempting multi-cluster deployment with insufficient limits:
 ```bash
-# Increase inotify limits
+❌ CRITICAL: Multi-cluster deployment requires proper inotify limits
+   Found 1 existing cluster(s)
+```
+
+**Fix:**
+```bash
+# Increase inotify and kernel keyring limits
 sudo sysctl -w fs.inotify.max_user_watches=524288
-sudo sysctl -w fs.inotify.max_user_instances=512
+sudo sysctl -w fs.inotify.max_user_instances=2048
+sudo sysctl -w kernel.keys.maxkeys=1000
+sudo sysctl -w kernel.keys.maxbytes=25000
+
+# Make persistent
+echo 'fs.inotify.max_user_watches = 524288' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+echo 'fs.inotify.max_user_instances = 2048' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+echo 'kernel.keys.maxkeys = 1000' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+echo 'kernel.keys.maxbytes = 25000' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+sudo sysctl -p /etc/sysctl.d/99-kubernetes.conf
+```
+
+**Or bypass (not recommended):**
+```bash
+KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=cluster02 ./tools/deploy.sh
 ```
 
 ---
@@ -365,7 +409,8 @@ sudo sysctl -w fs.inotify.max_user_instances=512
 ### Recommended for Multiple Clusters
 - **CPU:** 4+ cores
 - **RAM:** 4GB+ (2GB per cluster)
-- **Inotify limits:** 524288 watches, 512 instances
+- **Inotify limits:** 524288 watches, 2048 instances
+- **Kernel keyring limits:** 1000 maxkeys, 25000 maxbytes
 
 ---
 
