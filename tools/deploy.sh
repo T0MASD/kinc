@@ -37,18 +37,56 @@ if [ "$ip_forward" != "1" ]; then
 fi
 echo "✅ IP forwarding enabled"
 
-# Check 2: Inotify limits (warn only)
+# Check 2: Inotify limits
 max_user_watches=$(cat /proc/sys/fs/inotify/max_user_watches)
 max_user_instances=$(cat /proc/sys/fs/inotify/max_user_instances)
-if [ "$max_user_watches" -lt 524288 ] || [ "$max_user_instances" -lt 512 ]; then
-  echo "⚠️  Inotify limits below recommended (may affect multi-cluster stability)"
+# Count existing kinc clusters
+existing_clusters=$(podman ps --filter "name=kinc-" --format "{{.Names}}" 2>/dev/null | wc -l)
+
+if [ "$max_user_watches" -lt 524288 ] || [ "$max_user_instances" -lt 2048 ]; then
+  echo "⚠️  Inotify limits below recommended"
   echo "   Current: watches=$max_user_watches, instances=$max_user_instances"
-  echo "   Recommended: watches=524288, instances=512"
+  echo "   Recommended: watches=524288, instances=2048"
+  echo "   To fix: sudo sysctl -w fs.inotify.max_user_watches=524288"
+  echo "           sudo sysctl -w fs.inotify.max_user_instances=2048"
+  
+  # If multiple clusters already exist, require proper limits
+  if [ "$existing_clusters" -ge 1 ]; then
+    echo "❌ CRITICAL: Multi-cluster deployment requires proper inotify limits"
+    echo "   Found $existing_clusters existing cluster(s)"
+    echo "   Set KINC_SKIP_SYSCTL_CHECKS=true to bypass (not recommended)"
+    [ "${KINC_SKIP_SYSCTL_CHECKS:-false}" != "true" ] && exit 1
+  else
+    echo "   Single cluster may work, but failures likely with multiple clusters"
+  fi
 else
   echo "✅ Inotify limits sufficient"
 fi
 
-# Check 3: Failed services (warn only)
+# Check 3: Kernel keyring limits
+maxkeys=$(cat /proc/sys/kernel/keys/maxkeys 2>/dev/null || echo "1000")
+maxbytes=$(cat /proc/sys/kernel/keys/maxbytes 2>/dev/null || echo "25000")
+if [ "$maxkeys" -lt 1000 ] || [ "$maxbytes" -lt 25000 ]; then
+  echo "⚠️  Kernel keyring limits below recommended"
+  echo "   Current: maxkeys=$maxkeys, maxbytes=$maxbytes"
+  echo "   Recommended: maxkeys=1000, maxbytes=25000"
+  echo "   To fix: sudo sysctl -w kernel.keys.maxkeys=1000"
+  echo "           sudo sysctl -w kernel.keys.maxbytes=25000"
+  
+  # If multiple clusters already exist, require proper limits
+  if [ "$existing_clusters" -ge 1 ]; then
+    echo "❌ CRITICAL: Multi-cluster deployment requires proper kernel keyring limits"
+    echo "   Found $existing_clusters existing cluster(s)"
+    echo "   Set KINC_SKIP_SYSCTL_CHECKS=true to bypass (not recommended)"
+    [ "${KINC_SKIP_SYSCTL_CHECKS:-false}" != "true" ] && exit 1
+  else
+    echo "   Single cluster may work, but will limit total cluster count"
+  fi
+else
+  echo "✅ Kernel keyring limits sufficient"
+fi
+
+# Check 4: Failed services (warn only)
 failed=$(systemctl --user list-units --state=failed --no-pager --no-legend 2>/dev/null | wc -l)
 if [ $failed -gt 0 ]; then
   echo "⚠️  Found $failed failed user service(s) - may indicate previous cluster issues"
@@ -56,39 +94,47 @@ else
   echo "✅ No failed services"
 fi
 
-# Check 4: Podman
+# Check 5: Podman
 echo "✅ Podman $(podman --version | awk '{print $NF}') available"
 echo ""
 
 # Port allocation function - sequential allocation (6443, 6444, 6445...)
 # This MUST be sequential because subnet IDs are derived from port's last 2 digits
 # Port 6443 → subnet 43, Port 6444 → subnet 44, etc.
+# Uses flock for race-condition-free port allocation
 get_cluster_port() {
     local cluster_name=$1
     local base_port=6443
+    local lockfile="/tmp/kinc-port-allocation.lock"
     
     if [[ "$cluster_name" == "default" ]]; then
         echo $base_port
         return
     fi
     
-    # Get all currently used ports from running/stopped containers
-    # Note: Podman's name filter doesn't support wildcards, so use "kinc" and filter with grep
-    local used_ports=$(podman ps -a --filter "name=kinc" --format "{{.Names}}\t{{.Ports}}" 2>/dev/null | \
-                      grep 'control-plane' | \
-                      grep -oE '127\.0\.0\.1:[0-9]+->6443' | \
-                      cut -d: -f2 | \
-                      cut -d- -f1 | \
-                      sort -n | \
-                      uniq)
-    
-    # Find first available port starting from base_port
-    local candidate_port=$base_port
-    while echo "$used_ports" | grep -q "^${candidate_port}$"; do
-        candidate_port=$((candidate_port + 1))
-    done
-    
-    echo $candidate_port
+    # Acquire exclusive lock to prevent race conditions during rapid deployments
+    # Use flock with a file descriptor that works reliably across subshells
+    (
+        flock -x 9
+        
+        # Get all currently used ports from running/stopped containers
+        # Note: Podman's name filter doesn't support wildcards, so use "kinc" and filter with grep
+        local used_ports=$(podman ps -a --filter "name=kinc" --format "{{.Names}}\t{{.Ports}}" 2>/dev/null | \
+                          grep 'control-plane' | \
+                          grep -oE '127\.0\.0\.1:[0-9]+->6443' | \
+                          cut -d: -f2 | \
+                          cut -d- -f1 | \
+                          sort -n | \
+                          uniq)
+        
+        # Find first available port starting from base_port
+        local candidate_port=$base_port
+        while echo "$used_ports" | grep -q "^${candidate_port}$"; do
+            candidate_port=$((candidate_port + 1))
+        done
+        
+        echo $candidate_port
+    ) 9>"$lockfile"
 }
 
 # CIDR allocation functions - mapped from port last 2 digits
@@ -205,17 +251,14 @@ else
         -e "s|serviceSubnet: 10\.96\.0\.0/16|serviceSubnet: ${CLUSTER_SERVICE_SUBNET}|g" \
         runtime/config/kubeadm.conf > /tmp/kubeadm-${CLUSTER_NAME}.conf
 
-    # 1. Copy the file into the volume path (using root privileges temporarily)
-    sudo cp /tmp/kubeadm-${CLUSTER_NAME}.conf "$VOLUME_PATH/kubeadm.conf"
-    
-    # 2. Reset the file ownership back to the current user
-    sudo chown $(id -u):$(id -g) "$VOLUME_PATH/kubeadm.conf"
+    # Copy the file into the volume path (rootless Podman volume is user-owned)
+    cp /tmp/kubeadm-${CLUSTER_NAME}.conf "$VOLUME_PATH/kubeadm.conf"
 
-    # 🌟 SELINUX FIX ADDED: Corrects the label on the volume data.
-    # This must run AFTER the copy/chown to ensure the file has the container context.
+    # 🌟 SELINUX FIX: Restore SELinux context on the volume data.
+    # For rootless Podman, user can restore context on their own files.
     echo "🔧 Restoring SELinux context on config volume path..."
     if command -v restorecon >/dev/null 2>&1 && command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; then
-        sudo restorecon -R -v "$VOLUME_PATH"
+        restorecon -R -v "$VOLUME_PATH"
     else
         echo "⚠️  SELinux not enabled or restorecon/getenforce not available; skipping context restore."
     fi
@@ -260,6 +303,14 @@ sed -i "s|Image=.*|Image=$IMAGE_NAME|g" ~/.config/containers/systemd/kinc-${CLUS
 sed -i "s|PublishPort=.*|PublishPort=127.0.0.1:${CLUSTER_PORT}:6443/tcp|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 sed -i "s|ContainerName=.*|ContainerName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 sed -i "s|HostName=.*|HostName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+
+# Conditionally add Faro environment variable if requested
+if [[ "${KINC_ENABLE_FARO:-false}" == "true" ]]; then
+    echo "🔍 KINC_ENABLE_FARO=true detected - enabling Faro event capture"
+    # Add environment variable to Quadlet file (after existing Environment lines)
+    sed -i '/^Environment=KUBECONFIG/a Environment=KINC_ENABLE_FARO=true' ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+fi
+
 echo "✅ Container file updated"
 
 # Step 6: Start services
@@ -357,10 +408,13 @@ while [ $waited -lt $max_wait ]; do
         
         services_ok=true
         for service in kinc-preflight.service kubeadm-init.service kinc-postinit.service; do
-            if podman exec kinc-${CLUSTER_NAME}-control-plane systemctl is-active --quiet $service; then
+            status=$(podman exec kinc-${CLUSTER_NAME}-control-plane systemctl show -p ActiveState,SubState,Result --value $service | tr '\n' ' ')
+            if echo "$status" | grep -qE "(inactive|active) exited success"; then
+                echo "✅ $service: completed successfully"
+            elif echo "$status" | grep -q "active running"; then
                 echo "✅ $service: active"
             else
-                echo "❌ $service: not active"
+                echo "❌ $service: $status"
                 services_ok=false
             fi
         done
