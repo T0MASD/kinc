@@ -87,10 +87,10 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "T1: Deploying with deploy.sh (baked-in config)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "Deployment: See release.yml → Option 1"
+echo "Deployment: See release.yml - Option 1"
 echo ""
 
-USE_BAKED_IN_CONFIG=true CLUSTER_NAME=default ./tools/deploy.sh
+USE_BAKED_IN_CONFIG=true KINC_ENABLE_FARO=true CLUSTER_NAME=default ./tools/deploy.sh
 echo "✅ T1 complete: default cluster (baked-in config)"
 echo ""
 
@@ -101,12 +101,12 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "T2: Deploying with deploy.sh (mounted config - 5 clusters)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "Deployment: See release.yml → Option 1 (without USE_BAKED_IN_CONFIG)"
+echo "Deployment: See release.yml - Option 1 (without USE_BAKED_IN_CONFIG)"
 echo ""
 
 for i in 01 02 03 04 05; do
   echo "Deploying cluster${i}..."
-  CLUSTER_NAME=cluster${i} ./tools/deploy.sh
+  KINC_ENABLE_FARO=true CLUSTER_NAME=cluster${i} ./tools/deploy.sh
   
   # Wait for service to be stable (systemd-driven, no arbitrary sleeps)
   echo "Verifying cluster${i} service stability..."
@@ -135,7 +135,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "T3: Deploying with direct podman run (baked-in config)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "Deployment: See release.yml → Option 2"
+echo "Deployment: See release.yml - Option 2"
 echo ""
 
 # Clean any existing direct-podman cluster
@@ -168,14 +168,15 @@ podman run -d --name kinc-direct-podman \
   --sysctl net.netfilter.nf_conntrack_tcp_timeout_close_wait=3600 \
   -p 127.0.0.1:6450:6443/tcp \
   --env container=podman \
+  --env KINC_ENABLE_FARO=true \
   "$KINC_IMAGE"
 
 echo "Waiting for cluster initialization..."
 timeout 300 bash -c 'until podman exec kinc-direct-podman test -f /var/lib/kinc-initialized 2>/dev/null; do sleep 2; done'
 echo "✅ Cluster initialized"
 
-echo "Waiting for API server to be ready (returns HTTP 200)..."
-timeout 300 bash -c 'until curl -k -s -o /dev/null -w "%{http_code}" https://localhost:6450/healthz 2>/dev/null | grep -q "200"; do sleep 2; done'
+echo "Waiting for API server to be ready..."
+timeout 300 bash -c 'until podman exec kinc-direct-podman kubectl --kubeconfig=/etc/kubernetes/admin.conf get --raw /healthz >/dev/null 2>&1; do sleep 2; done'
 echo "✅ API server responding"
 
 echo "Waiting for system pods..."
@@ -227,6 +228,166 @@ if [ "$verification_failed" = true ]; then
 fi
 
 echo "✅ Multi-service architecture verified"
+echo ""
+
+# ============================================================================
+# Workload Validation: Storage & Networking
+# ============================================================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Workload Validation: Storage & Networking"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Test on default cluster (representative test)
+echo "Testing on default cluster..."
+echo ""
+
+# Get cluster port and prepare kubeconfig
+cluster_port=$(podman inspect kinc-default-control-plane --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}}{{end}}{{end}}' 2>/dev/null)
+mkdir -p ~/.kube
+podman cp kinc-default-control-plane:/etc/kubernetes/admin.conf ~/.kube/kinc-validation-config 2>/dev/null
+sed -i "s|server: https://.*:6443|server: https://127.0.0.1:$cluster_port|g" ~/.kube/kinc-validation-config
+export KUBECONFIG=~/.kube/kinc-validation-config
+
+# Install Gateway API CRDs
+echo "0️⃣  Installing Gateway API CRDs..."
+if kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml >/dev/null 2>&1; then
+  echo "✅ Gateway API CRDs installed (v1.4.1)"
+  gateway_available=true
+  
+  # Verify cluster-scoped GatewayClass is available (right after CRD installation)
+  echo "1️⃣  Verifying GatewayClass CRD (cluster-scoped)..."
+  if kubectl get crd gatewayclasses.gateway.networking.k8s.io >/dev/null 2>&1; then
+    echo "✅ GatewayClass CRD is available"
+  else
+    echo "⚠️  GatewayClass CRD not found"
+    gateway_available=false
+  fi
+else
+  echo "⚠️  Gateway API CRDs installation failed (will continue without Gateway resources)"
+  gateway_available=false
+fi
+echo ""
+
+# Deploy test workload
+echo "2️⃣  Deploying test workload (PVC + Pod + Service + Gateway/HTTPRoute)..."
+deploy_output=$(kubectl apply -f runtime/manifests/test-workload.yaml 2>&1) || true
+echo "$deploy_output" | grep -E "(created|configured|unchanged)" || true
+if echo "$deploy_output" | grep -q "no matches for kind"; then
+  echo "⚠️  Gateway API CRDs not installed (optional - will skip Gateway validation)"
+fi
+echo "✅ Core workload deployed"
+echo ""
+
+# Verify Gateway API resources were created (namespaced: Gateway and HTTPRoute)
+echo "3️⃣  Verifying Gateway and HTTPRoute (namespaced)..."
+gateway_created=false
+httproute_created=false
+if [ "$gateway_available" = true ]; then
+  # Check if Gateway resource was created (note: won't be Accepted without a controller)
+  if kubectl get gateway test-gateway >/dev/null 2>&1; then
+    echo "✅ Gateway resource created (no controller to accept it)"
+    gateway_created=true
+  else
+    echo "⚠️  Gateway resource not found"
+  fi
+  
+  # Check HTTPRoute exists
+  if kubectl get httproute test-route >/dev/null 2>&1; then
+    echo "✅ HTTPRoute resource created"
+    httproute_created=true
+  else
+    echo "⚠️  HTTPRoute resource not found"
+  fi
+else
+  echo "⚠️  Gateway API CRDs not available (skipped)"
+fi
+echo ""
+
+# Wait for PVC to be bound
+echo "4️⃣  Waiting for PVC to be bound (local-path-provisioner)..."
+if kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc --timeout=60s >/dev/null 2>&1; then
+  pvc_size=$(kubectl get pvc test-pvc -o jsonpath='{.spec.resources.requests.storage}')
+  pvc_status=$(kubectl get pvc test-pvc -o jsonpath='{.status.phase}')
+  echo "✅ PVC bound: $pvc_size ($pvc_status)"
+else
+  echo "❌ Timeout waiting for PVC to bind"
+  kubectl get pvc test-pvc
+  kubectl describe pvc test-pvc
+  exit 1
+fi
+echo ""
+
+# Wait for pod to be ready (readiness probe verifies node-info.json exists and is served)
+echo "5️⃣  Waiting for test pod to be ready..."
+if kubectl wait --for=condition=Ready pod/test-pod --timeout=300s >/dev/null 2>&1; then
+  echo "✅ Pod ready (init container completed, node data collected via kubectl, HTTP server serving)"
+else
+  echo "❌ Pod failed to become ready"
+  kubectl get pod test-pod
+  kubectl logs test-pod -c generate-data 2>&1 | tail -10
+  kubectl describe pod test-pod | tail -20
+  exit 1
+fi
+echo ""
+
+# Fetch and parse node data via HTTP service
+echo "6️⃣  Fetching node data from HTTP service..."
+service_ip=$(kubectl get svc test-service -o jsonpath='{.spec.clusterIP}')
+echo "Service ClusterIP: $service_ip"
+
+# Fetch JSON from HTTP server via Service networking (using curl in a test pod)
+echo "Testing HTTP download via Service..."
+kubectl run curl-test --image=curlimages/curl:latest --rm -i --restart=Never --quiet -- \
+  curl -s http://${service_ip}:80/node-info.json > /tmp/node-info.json 2>/dev/null
+if [ -f /tmp/node-info.json ] && [ -s /tmp/node-info.json ]; then
+  runtime=$(jq -r '.status.nodeInfo.containerRuntimeVersion' /tmp/node-info.json 2>/dev/null || echo "unknown")
+  kubelet_version=$(jq -r '.status.nodeInfo.kubeletVersion' /tmp/node-info.json 2>/dev/null || echo "unknown")
+  node_name=$(jq -r '.metadata.name' /tmp/node-info.json 2>/dev/null || echo "unknown")
+  os_image=$(jq -r '.status.nodeInfo.osImage' /tmp/node-info.json 2>/dev/null || echo "unknown")
+  kernel=$(jq -r '.status.nodeInfo.kernelVersion' /tmp/node-info.json 2>/dev/null || echo "unknown")
+  
+  echo "  Node: $node_name"
+  echo "  Container Runtime: $runtime"
+  echo "  Kubelet: $kubelet_version"
+  echo "  OS: $os_image"
+  echo "  Kernel: $kernel"
+  echo "✅ Node data collected and parsed successfully"
+else
+  echo "❌ Failed to retrieve node JSON from HTTP server"
+  exit 1
+fi
+echo ""
+
+# Cleanup test workload
+echo "7️⃣  Cleaning up test workload..."
+kubectl delete -f runtime/manifests/test-workload.yaml --wait=false >/dev/null 2>&1
+rm -f /tmp/node-info.json
+echo "✅ Test workload cleaned up"
+echo ""
+
+echo "✅ Storage & Networking validation complete"
+echo ""
+echo "📝 Validation Results:"
+echo "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Storage:"
+echo "    • PVC: $pvc_size ($pvc_status)"
+echo "  Network:"
+echo "    • Service ClusterIP: $service_ip"
+echo "  Node Info:"
+echo "    • Name: $node_name"
+echo "    • Runtime: $runtime"
+echo "    • Kubelet: $kubelet_version"
+echo "    • OS: $os_image"
+echo "    • Kernel: $kernel"
+if [ "$gateway_available" = true ]; then
+echo "  Gateway API:"
+echo "    • GatewayClass CRD: ✅ installed"
+echo "    • Gateway resource: $([ "$gateway_created" = true ] && echo "✅ created" || echo "❌ failed")"
+echo "    • HTTPRoute resource: $([ "$httproute_created" = true ] && echo "✅ created" || echo "❌ failed")"
+echo "    • Note: No controller installed (resources won't be Accepted)"
+fi
+echo "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
 # ============================================================================

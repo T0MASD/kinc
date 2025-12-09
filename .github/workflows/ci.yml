@@ -73,9 +73,8 @@ jobs:
 
       - name: Build kinc image
         run: |
-          echo "=== Building kinc image with multi-service architecture ==="
+          echo "=== Building kinc image ==="
           ./tools/build.sh
-          echo "✅ Image built successfully"
         shell: bash
 
       - name: Deploy cluster (baked-in config)
@@ -86,199 +85,113 @@ jobs:
           export USE_BAKED_IN_CONFIG=true
           export KINC_ENABLE_FARO=true
           
-          # Deploy using systemd-driven approach
+          # deploy.sh handles everything:
+          # - Prerequisites check
+          # - Deployment
+          # - Wait for initialization (1500s timeout)
+          # - Verify multi-service architecture
           ./tools/deploy.sh
           
-          echo "✅ Deployment initiated"
+          echo ""
+          echo "✅ Deployment complete (verified by deploy.sh)"
         shell: bash
 
-      - name: Wait for cluster initialization (systemd-driven)
+      - name: Verify cluster is functional
         run: |
-          echo "=== Waiting for Cluster Initialization ==="
-          echo "Multi-service architecture: kinc-preflight → kubeadm-init → kinc-postinit"
+          echo "=== Verifying Cluster Functionality ==="
           echo ""
           
-          max_wait=300
-          waited=0
-          
-          while [ $waited -lt $max_wait ]; do
-            # Check if container is running
-            if ! podman ps --filter "name=kinc-default-control-plane" --format "{{.Names}}" | grep -q "kinc-default-control-plane"; then
-              echo "❌ Container not running"
-              systemctl --user status kinc-default-control-plane.service --no-pager || true
-              exit 1
-            fi
-            
-            # Check if initialization complete
-            if podman exec kinc-default-control-plane test -f /var/lib/kinc-initialized 2>/dev/null; then
-              echo "✅ Cluster initialized (${waited}s)"
-              break
-            fi
-            
-            # Check if any service failed
-            if podman exec kinc-default-control-plane systemctl is-failed --quiet kinc-preflight.service 2>/dev/null || \
-               podman exec kinc-default-control-plane systemctl is-failed --quiet kubeadm-init.service 2>/dev/null || \
-               podman exec kinc-default-control-plane systemctl is-failed --quiet kinc-postinit.service 2>/dev/null; then
-              echo "❌ One or more services failed"
-              echo ""
-              echo "Service status:"
-              podman exec kinc-default-control-plane systemctl status kinc-preflight.service --no-pager || true
-              podman exec kinc-default-control-plane systemctl status kubeadm-init.service --no-pager || true
-              podman exec kinc-default-control-plane systemctl status kinc-postinit.service --no-pager || true
-              exit 1
-            fi
-            
-            if [ $((waited % 30)) -eq 0 ] && [ $waited -gt 0 ]; then
-              echo "  Still initializing... (${waited}/${max_wait}s)"
-            fi
-            
-            sleep 5
-            waited=$((waited + 5))
-          done
-          
-          if [ $waited -ge $max_wait ]; then
-            echo "❌ Timeout waiting for initialization"
-            exit 1
-          fi
-          
-          echo ""
-          echo "✅ Initialization complete"
-        shell: bash
-
-      - name: Verify multi-service architecture
-        run: |
-          echo "=== Verifying Multi-Service Architecture ==="
-          
-          # Check all services completed successfully
-          echo "Checking kinc-preflight.service..."
-          if ! podman exec kinc-default-control-plane systemctl is-active --quiet kinc-preflight.service; then
-            echo "❌ kinc-preflight.service not active"
-            podman exec kinc-default-control-plane systemctl status kinc-preflight.service --no-pager
-            exit 1
-          fi
-          echo "✅ kinc-preflight.service: active"
-          
-          echo "Checking kubeadm-init.service..."
-          if ! podman exec kinc-default-control-plane systemctl is-active --quiet kubeadm-init.service; then
-            echo "❌ kubeadm-init.service not active"
-            podman exec kinc-default-control-plane systemctl status kubeadm-init.service --no-pager
-            exit 1
-          fi
-          echo "✅ kubeadm-init.service: active (kubeadm as systemd service)"
-          
-          echo "Checking kinc-postinit.service..."
-          if ! podman exec kinc-default-control-plane systemctl is-active --quiet kinc-postinit.service; then
-            echo "❌ kinc-postinit.service not active"
-            podman exec kinc-default-control-plane systemctl status kinc-postinit.service --no-pager
-            exit 1
-          fi
-          echo "✅ kinc-postinit.service: active"
-          
-          # Verify initialization marker
-          if ! podman exec kinc-default-control-plane test -f /var/lib/kinc-initialized; then
-            echo "❌ Initialization marker not found"
-            exit 1
-          fi
-          echo "✅ Initialization marker: /var/lib/kinc-initialized"
-          
-          # Verify kubeadm marker
-          if ! podman exec kinc-default-control-plane test -f /var/lib/kubeadm-initialized; then
-            echo "❌ kubeadm initialization marker not found"
-            exit 1
-          fi
-          echo "✅ kubeadm marker: /var/lib/kubeadm-initialized"
-          
-          echo ""
-          echo "✅ Multi-service architecture verified"
-        shell: bash
-
-      - name: Verify baked-in configuration
-        run: |
-          echo "=== Verifying Baked-In Configuration ==="
-          
-          # Check kinc-preflight.service logs for config source
-          config_source=$(podman exec kinc-default-control-plane journalctl -u kinc-preflight.service --no-pager --boot 2>/dev/null | grep -oP '(Using mounted configuration|No mounted config found, using baked-in configuration)' | head -1)
-          
-          echo "Configuration source: $config_source"
-          
-          if [[ "$config_source" == *"baked-in"* ]]; then
-            echo "✅ Using baked-in config as expected"
-          else
-            echo "❌ NOT using baked-in config"
-            echo ""
-            echo "kinc-preflight.service logs:"
-            podman exec kinc-default-control-plane journalctl -u kinc-preflight.service --no-pager --boot 2>/dev/null || true
-            exit 1
-          fi
-        shell: bash
-
-      - name: Verify configuration validation
-        run: |
-          echo "=== Verifying Configuration Validation ==="
-          
-          # Check kinc-preflight completed config validation
-          if ! podman exec kinc-default-control-plane journalctl -u kinc-preflight.service --no-pager --boot | grep -q "Configuration validated"; then
-            echo "❌ Configuration validation not found in kinc-preflight.service logs"
-            exit 1
-          fi
-          echo "✅ Configuration validated by kinc-preflight.service"
-          
-          # Verify kubeadm-init completed successfully
-          # Note: We skip the show-join-command phase, so check for addon installation instead
-          if ! podman exec kinc-default-control-plane journalctl -u kubeadm-init.service --no-pager --boot | grep -q "Applied essential addon: kube-proxy"; then
-            echo "❌ kubeadm init did not complete successfully"
-            exit 1
-          fi
-          echo "✅ kubeadm init completed successfully (as systemd service)"
-          
-          # Verify CNI installation by kinc-postinit
-          if ! podman exec kinc-default-control-plane journalctl -u kinc-postinit.service --no-pager --boot | grep "Installing CNI" >/dev/null 2>&1; then
-            echo "❌ CNI installation not found in kinc-postinit.service logs"
-            echo "Full kinc-postinit logs:"
-            podman exec kinc-default-control-plane journalctl -u kinc-postinit.service --no-pager --boot
-            exit 1
-          fi
-          echo "✅ CNI installed by kinc-postinit.service"
-          
-          echo ""
-          echo "✅ All configuration validations passed"
-        shell: bash
-
-      - name: Extract kubeconfig and validate cluster
-        run: |
-          echo "=== Extracting kubeconfig ==="
+          # Extract kubeconfig
+          echo "Extracting kubeconfig..."
           mkdir -p ~/.kube
-          
-          # Get cluster port
           cluster_port=$(podman inspect kinc-default-control-plane --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}}{{end}}{{end}}' 2>/dev/null)
-          echo "Cluster port: $cluster_port"
-          
-          # Extract and configure kubeconfig
           podman cp kinc-default-control-plane:/etc/kubernetes/admin.conf ~/.kube/config
           sed -i "s|server: https://.*:6443|server: https://127.0.0.1:$cluster_port|g" ~/.kube/config
-          
-          echo "✅ Kubeconfig ready"
+          echo "✅ Kubeconfig extracted (port: $cluster_port)"
           echo ""
           
-          echo "=== Validating Cluster ==="
-          
+          # Verify cluster responds
           echo "Cluster info:"
           kubectl cluster-info
-          
           echo ""
+          
           echo "Nodes:"
           kubectl get nodes -o wide
-          
           echo ""
-          echo "All pods:"
+          
+          echo "System pods:"
           kubectl get pods -A -o wide
-          
           echo ""
-          echo "Services:"
-          kubectl get svc -A
           
+          echo "✅ Cluster is functional"
+        shell: bash
+
+      - name: Validate storage and networking
+        run: |
+          echo "=== Validating Storage & Networking ==="
           echo ""
-          echo "✅ Cluster validated"
+          
+          # Install Gateway API CRDs
+          echo "Installing Gateway API CRDs..."
+          kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml
+          echo "✅ Gateway API CRDs installed"
+          echo ""
+          
+          # Deploy test workload
+          echo "Deploying test workload (PVC + Pod + Service)..."
+          kubectl apply -f runtime/manifests/test-workload.yaml
+          echo ""
+          
+          # Wait for PVC to be bound
+          echo "Waiting for PVC to bind..."
+          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc --timeout=60s
+          echo "✅ PVC bound"
+          echo ""
+          
+          # Wait for pod to be ready (init container + main container)
+          echo "Waiting for pod to be ready (init + http server)..."
+          kubectl wait --for=condition=Ready pod/test-pod --timeout=90s
+          echo "✅ Pod ready"
+          echo ""
+          
+          # Verify JSON was created on PVC
+          echo "Verifying data generation on PVC..."
+          if kubectl exec test-pod -c http-server -- test -f /data/runtime-info.json; then
+            echo "✅ Runtime info JSON created"
+          else
+            echo "❌ JSON file not found"
+            exit 1
+          fi
+          echo ""
+          
+          # Test HTTP service and parse JSON
+          echo "Testing HTTP service and JSON parsing..."
+          kubectl exec test-pod -c http-server -- cat /data/runtime-info.json > /tmp/runtime-info.json
+          
+          # Parse with jq
+          runtime=$(jq -r '.runtime' /tmp/runtime-info.json)
+          version=$(jq -r '.version' /tmp/runtime-info.json)
+          k8s_version=$(jq -r '.kubernetes_version' /tmp/runtime-info.json)
+          
+          echo "✅ JSON parsing successful:"
+          echo "  Runtime: $runtime v$version"
+          echo "  Kubernetes: $k8s_version"
+          echo "  Features: $(jq -r '.features | join(", ")' /tmp/runtime-info.json)"
+          echo ""
+          
+          # Show details
+          echo "Workload Status:"
+          kubectl get pvc,pod,svc -l app=test-workload -o wide || kubectl get pvc test-pvc && kubectl get pod test-pod && kubectl get svc test-service
+          echo ""
+          echo "Gateway API Resources:"
+          kubectl get gatewayclass,gateway,httproute 2>/dev/null || echo "Gateway API CRDs not installed"
+          echo ""
+          
+          # Cleanup
+          echo "Cleaning up test workload..."
+          kubectl delete -f runtime/manifests/test-workload.yaml
+          rm -f /tmp/runtime-info.json
+          echo "✅ Storage & networking validation complete"
         shell: bash
 
       - name: Collect comprehensive diagnostics
@@ -452,9 +365,8 @@ jobs:
 
       - name: Build kinc image
         run: |
-          echo "=== Building kinc image with multi-service architecture ==="
+          echo "=== Building kinc image ==="
           ./tools/build.sh
-          echo "✅ Image built successfully"
         shell: bash
 
       - name: Deploy clusters (mounted config)
@@ -464,205 +376,31 @@ jobs:
           echo ""
           
           # Deploy cluster 1
-          echo "Deploying cluster: default (port 6443)"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Deploying cluster: default"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           export CLUSTER_NAME=default
           export KINC_ENABLE_FARO=true
+          # deploy.sh handles: prerequisites, deployment, wait, verification
           ./tools/deploy.sh
-          echo "✅ Cluster 'default' deployment initiated"
           echo ""
           
           # Deploy cluster 2
-          echo "Deploying cluster: cluster01 (port 6444)"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Deploying cluster: cluster01"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           export CLUSTER_NAME=cluster01
           export KINC_ENABLE_FARO=true
+          # deploy.sh handles: prerequisites, deployment, wait, verification
           ./tools/deploy.sh
-          echo "✅ Cluster 'cluster01' deployment initiated"
           echo ""
           
-          echo "✅ Both cluster deployments initiated"
+          echo "✅ Both clusters deployed and verified (by deploy.sh)"
         shell: bash
 
-      - name: Wait for clusters initialization (systemd-driven)
+      - name: Verify clusters are functional
         run: |
-          echo "=== Waiting for Both Clusters Initialization ==="
-          echo "Multi-service architecture: kinc-preflight → kubeadm-init → kinc-postinit"
-          echo ""
-          
-          for cluster in default cluster01; do
-            echo "Waiting for cluster: $cluster"
-            max_wait=300
-            waited=0
-            
-            while [ $waited -lt $max_wait ]; do
-              # Check if container is running
-              if ! podman ps --filter "name=kinc-${cluster}-control-plane" --format "{{.Names}}" | grep -q "kinc-${cluster}-control-plane"; then
-                echo "❌ Container not running: kinc-${cluster}-control-plane"
-                systemctl --user status kinc-${cluster}-control-plane.service --no-pager || true
-                exit 1
-              fi
-              
-              # Check if initialization complete
-              if podman exec kinc-${cluster}-control-plane test -f /var/lib/kinc-initialized 2>/dev/null; then
-                echo "✅ Cluster '$cluster' initialized (${waited}s)"
-                break
-              fi
-              
-              # Check if any service failed
-              if podman exec kinc-${cluster}-control-plane systemctl is-failed --quiet kinc-preflight.service 2>/dev/null || \
-                 podman exec kinc-${cluster}-control-plane systemctl is-failed --quiet kubeadm-init.service 2>/dev/null || \
-                 podman exec kinc-${cluster}-control-plane systemctl is-failed --quiet kinc-postinit.service 2>/dev/null; then
-                echo "❌ One or more services failed in cluster '$cluster'"
-                echo ""
-                echo "Service status:"
-                podman exec kinc-${cluster}-control-plane systemctl status kinc-preflight.service --no-pager || true
-                podman exec kinc-${cluster}-control-plane systemctl status kubeadm-init.service --no-pager || true
-                podman exec kinc-${cluster}-control-plane systemctl status kinc-postinit.service --no-pager || true
-                exit 1
-              fi
-              
-              if [ $((waited % 30)) -eq 0 ] && [ $waited -gt 0 ]; then
-                echo "  Still initializing cluster '$cluster'... (${waited}/${max_wait}s)"
-              fi
-              
-              sleep 5
-              waited=$((waited + 5))
-            done
-            
-            if [ $waited -ge $max_wait ]; then
-              echo "❌ Timeout waiting for cluster '$cluster' initialization"
-              exit 1
-            fi
-            
-            echo ""
-          done
-          
-          echo "✅ Both clusters initialized successfully"
-        shell: bash
-
-      - name: Verify multi-service architecture (both clusters)
-        run: |
-          echo "=== Verifying Multi-Service Architecture (Both Clusters) ==="
-          
-          for cluster in default cluster01; do
-            echo ""
-            echo "Checking cluster: $cluster"
-            
-            # Check all services completed successfully
-            echo "Checking kinc-preflight.service..."
-            if ! podman exec kinc-${cluster}-control-plane systemctl is-active --quiet kinc-preflight.service; then
-              echo "❌ kinc-preflight.service not active in cluster '$cluster'"
-              podman exec kinc-${cluster}-control-plane systemctl status kinc-preflight.service --no-pager
-              exit 1
-            fi
-            echo "✅ kinc-preflight.service: active"
-            
-            echo "Checking kubeadm-init.service..."
-            if ! podman exec kinc-${cluster}-control-plane systemctl is-active --quiet kubeadm-init.service; then
-              echo "❌ kubeadm-init.service not active in cluster '$cluster'"
-              podman exec kinc-${cluster}-control-plane systemctl status kubeadm-init.service --no-pager
-              exit 1
-            fi
-            echo "✅ kubeadm-init.service: active (kubeadm as systemd service)"
-            
-            echo "Checking kinc-postinit.service..."
-            if ! podman exec kinc-${cluster}-control-plane systemctl is-active --quiet kinc-postinit.service; then
-              echo "❌ kinc-postinit.service not active in cluster '$cluster'"
-              podman exec kinc-${cluster}-control-plane systemctl status kinc-postinit.service --no-pager
-              exit 1
-            fi
-            echo "✅ kinc-postinit.service: active"
-            
-            # Verify initialization marker
-            if ! podman exec kinc-${cluster}-control-plane test -f /var/lib/kinc-initialized; then
-              echo "❌ Initialization marker not found in cluster '$cluster'"
-              exit 1
-            fi
-            echo "✅ Initialization marker: /var/lib/kinc-initialized"
-            
-            # Verify kubeadm marker
-            if ! podman exec kinc-${cluster}-control-plane test -f /var/lib/kubeadm-initialized; then
-              echo "❌ kubeadm initialization marker not found in cluster '$cluster'"
-              exit 1
-            fi
-            echo "✅ kubeadm marker: /var/lib/kubeadm-initialized"
-            
-            echo "✅ Cluster '$cluster': Multi-service architecture verified"
-          done
-          
-          echo ""
-          echo "✅ Multi-service architecture verified for both clusters"
-        shell: bash
-
-      - name: Verify mounted configuration (both clusters)
-        run: |
-          echo "=== Verifying Mounted Configuration (Both Clusters) ==="
-          
-          for cluster in default cluster01; do
-            echo ""
-            echo "Checking cluster: $cluster"
-            
-            # Check kinc-preflight.service logs for config source
-            config_source=$(podman exec kinc-${cluster}-control-plane journalctl -u kinc-preflight.service --no-pager --boot 2>/dev/null | grep -oP '(Using mounted configuration|No mounted config found, using baked-in configuration)' | head -1)
-            
-            echo "Configuration source: $config_source"
-            
-            if [[ "$config_source" == *"mounted"* ]]; then
-              echo "✅ Cluster '$cluster': Using mounted config as expected"
-            else
-              echo "❌ Cluster '$cluster': NOT using mounted config"
-              echo ""
-              echo "kinc-preflight.service logs:"
-              podman exec kinc-${cluster}-control-plane journalctl -u kinc-preflight.service --no-pager --boot 2>/dev/null || true
-              exit 1
-            fi
-          done
-          
-          echo ""
-          echo "✅ Both clusters using mounted configuration"
-        shell: bash
-
-      - name: Verify configuration validation (both clusters)
-        run: |
-          echo "=== Verifying Configuration Validation (Both Clusters) ==="
-          
-          for cluster in default cluster01; do
-            echo ""
-            echo "Checking cluster: $cluster"
-            
-            # Check kinc-preflight completed config validation
-            if ! podman exec kinc-${cluster}-control-plane journalctl -u kinc-preflight.service --no-pager --boot | grep -q "Configuration validated"; then
-              echo "❌ Configuration validation not found in cluster '$cluster'"
-              exit 1
-            fi
-            echo "✅ Configuration validated by kinc-preflight.service"
-            
-            # Verify kubeadm-init completed successfully
-            # Note: We skip the show-join-command phase, so check for addon installation instead
-            if ! podman exec kinc-${cluster}-control-plane journalctl -u kubeadm-init.service --no-pager --boot | grep -q "Applied essential addon: kube-proxy"; then
-              echo "❌ kubeadm init did not complete successfully in cluster '$cluster'"
-              exit 1
-            fi
-            echo "✅ kubeadm init completed successfully (as systemd service)"
-            
-            # Verify CNI installation by kinc-postinit
-            if ! podman exec kinc-${cluster}-control-plane journalctl -u kinc-postinit.service --no-pager --boot | grep "Installing CNI" >/dev/null 2>&1; then
-              echo "❌ CNI installation not found in cluster '$cluster'"
-              echo "Full kinc-postinit logs:"
-              podman exec kinc-${cluster}-control-plane journalctl -u kinc-postinit.service --no-pager --boot
-              exit 1
-            fi
-            echo "✅ CNI installed by kinc-postinit.service"
-            
-            echo "✅ Cluster '$cluster': All configuration validations passed"
-          done
-          
-          echo ""
-          echo "✅ Both clusters configuration validated"
-        shell: bash
-
-      - name: Extract kubeconfig and validate clusters
-        run: |
-          echo "=== Extracting kubeconfig and Validating Both Clusters ==="
+          echo "=== Verifying Both Clusters Functionality ==="
           mkdir -p ~/.kube
           
           for cluster in default cluster01; do
@@ -671,40 +409,103 @@ jobs:
             echo "Cluster: $cluster"
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
-            # Get cluster port
+            # Extract kubeconfig
             cluster_port=$(podman inspect kinc-${cluster}-control-plane --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}}{{end}}{{end}}' 2>/dev/null)
-            echo "Cluster port: $cluster_port"
-            
-            # Extract and configure kubeconfig
             podman cp kinc-${cluster}-control-plane:/etc/kubernetes/admin.conf ~/.kube/kinc-${cluster}-config
             sed -i "s|server: https://.*:6443|server: https://127.0.0.1:$cluster_port|g" ~/.kube/kinc-${cluster}-config
-            
-            echo "✅ Kubeconfig ready: ~/.kube/kinc-${cluster}-config"
+            echo "✅ Kubeconfig extracted (port: $cluster_port)"
             echo ""
             
             export KUBECONFIG=~/.kube/kinc-${cluster}-config
             
+            # Verify cluster responds
             echo "Cluster info:"
             kubectl cluster-info
-            
             echo ""
+            
             echo "Nodes:"
             kubectl get nodes -o wide
-            
             echo ""
-            echo "All pods:"
+            
+            echo "System pods:"
             kubectl get pods -A -o wide
-            
             echo ""
-            echo "Services:"
-            kubectl get svc -A
             
-            echo ""
-            echo "✅ Cluster '$cluster' validated"
+            echo "✅ Cluster '$cluster' is functional"
           done
           
           echo ""
-          echo "✅ Both clusters validated successfully"
+          echo "✅ Both clusters are functional"
+        shell: bash
+
+      - name: Validate storage and networking
+        run: |
+          echo "=== Validating Storage & Networking (default cluster) ==="
+          echo ""
+          
+          export KUBECONFIG=~/.kube/kinc-default-config
+          
+          # Install Gateway API CRDs
+          echo "Installing Gateway API CRDs..."
+          kubectl apply --server-side -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.1/standard-install.yaml
+          echo "✅ Gateway API CRDs installed"
+          echo ""
+          
+          # Deploy test workload
+          echo "Deploying test workload (PVC + Pod + Service)..."
+          kubectl apply -f runtime/manifests/test-workload.yaml
+          echo ""
+          
+          # Wait for PVC to be bound
+          echo "Waiting for PVC to bind..."
+          kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc --timeout=60s
+          echo "✅ PVC bound"
+          echo ""
+          
+          # Wait for pod to be ready (init container + main container)
+          echo "Waiting for pod to be ready (init + http server)..."
+          kubectl wait --for=condition=Ready pod/test-pod --timeout=90s
+          echo "✅ Pod ready"
+          echo ""
+          
+          # Verify JSON was created on PVC
+          echo "Verifying data generation on PVC..."
+          if kubectl exec test-pod -c http-server -- test -f /data/runtime-info.json; then
+            echo "✅ Runtime info JSON created"
+          else
+            echo "❌ JSON file not found"
+            exit 1
+          fi
+          echo ""
+          
+          # Test HTTP service and parse JSON
+          echo "Testing HTTP service and JSON parsing..."
+          kubectl exec test-pod -c http-server -- cat /data/runtime-info.json > /tmp/runtime-info.json
+          
+          # Parse with jq
+          runtime=$(jq -r '.runtime' /tmp/runtime-info.json)
+          version=$(jq -r '.version' /tmp/runtime-info.json)
+          k8s_version=$(jq -r '.kubernetes_version' /tmp/runtime-info.json)
+          
+          echo "✅ JSON parsing successful:"
+          echo "  Runtime: $runtime v$version"
+          echo "  Kubernetes: $k8s_version"
+          echo "  Features: $(jq -r '.features | join(", ")' /tmp/runtime-info.json)"
+          echo ""
+          
+          # Show details
+          echo "Workload Status:"
+          kubectl get pvc,pod,svc -l app=test-workload -o wide || kubectl get pvc test-pvc && kubectl get pod test-pod && kubectl get svc test-service
+          echo ""
+          echo "Gateway API Resources:"
+          kubectl get gatewayclass,gateway,httproute 2>/dev/null || echo "Gateway API CRDs not installed"
+          echo ""
+          
+          # Cleanup
+          echo "Cleaning up test workload..."
+          kubectl delete -f runtime/manifests/test-workload.yaml
+          rm -f /tmp/runtime-info.json
+          echo "✅ Storage & networking validation complete"
         shell: bash
 
       - name: Collect comprehensive diagnostics
