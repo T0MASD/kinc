@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build (e.g., v1_33_5-0)'
+        description: 'Tag to build (e.g., v1_34_2-0)'
         required: true
-        default: 'v1_33_5-0'
+        default: 'v1_34_2-0'
 
 permissions:
   contents: read
