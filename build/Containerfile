@@ -1,6 +1,6 @@
 # kinc Consolidated Kubernetes Node
 # Single-stage Dockerfile that combines base Fedora + CRI-O + kinc components
-FROM fedora:42
+FROM fedora:43
 
 # Set container metadata for systemd
 ENV container=docker
@@ -24,12 +24,12 @@ RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
       libseccomp pigz fuse-overlayfs \
       nfs-utils iscsi-initiator-utils \
       bash ca-certificates curl jq yq procps-ng which hostname \
-      cri-o1.33 crun \
+      cri-o1.34 crun \
       containernetworking-plugins \
       container-selinux \
-      kubernetes1.33 \
-      kubernetes1.33-kubeadm \
-      cri-tools1.33 \
+      kubernetes1.34 \
+      kubernetes1.34-kubeadm \
+      cri-tools1.34 \
     && dnf clean all
 
 # Configure systemd (separate layer for better caching)
@@ -152,7 +152,7 @@ STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT [ "/sbin/init" ]
 
 # Labels for metadata
-LABEL io.kinc.version="v1.33.5-rootless"
+LABEL io.kinc.version="v1.34.1-rootless"
 LABEL io.kinc.runtime="crio"
 LABEL io.kinc.init="baked-in"
 LABEL io.kinc.rootless="true"

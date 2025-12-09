@@ -14,7 +14,7 @@ FORCE_PORT="${FORCE_PORT:-}"  # Allow manual port override
 # Image configuration - Single image for all clusters
 # All clusters use the same image with different mounted configs
 # Allow KINC_IMAGE env var to override default
-IMAGE_NAME="${KINC_IMAGE:-localhost/kinc/node:v1.33.5}"
+IMAGE_NAME="${KINC_IMAGE:-localhost/kinc/node:v1.34.1}"
 
 echo "📁 Working directory: $SCRIPT_DIR"
 echo "🏷️  Cluster name: $CLUSTER_NAME"
