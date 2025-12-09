@@ -97,7 +97,7 @@ echo "✅ Validation complete - Baked-in configuration active!"
 # Show image size
 echo
 echo "📊 Image information:"
-podman images | grep "kinc/node.*v1.33.5"
+podman images | grep "kinc/node.*v1.34"
 
 echo
 echo "🚀 Next steps:"
