@@ -180,16 +180,18 @@ timeout 300 bash -c 'until podman exec kinc-direct-podman kubectl --kubeconfig=/
 echo "✅ API server responding"
 
 echo "Waiting for system pods..."
-kubectl --kubeconfig=<(podman exec kinc-direct-podman cat /etc/kubernetes/admin.conf | sed 's|server: https://.*:6443|server: https://127.0.0.1:6450|g') \
+# Execute kubectl from inside container to avoid Pasta port forwarding issues
+podman exec kinc-direct-podman kubectl --kubeconfig=/etc/kubernetes/admin.conf \
   wait --for=condition=Ready pods --all -n kube-system --timeout=300s
 
 echo "Waiting for storage provisioner..."
+# Execute kubectl from inside container to avoid Pasta port forwarding issues
 # Wait for namespace to exist first (avoids "no matching resources" error)
-timeout 60 bash -c 'until kubectl --kubeconfig=<(podman exec kinc-direct-podman cat /etc/kubernetes/admin.conf | sed "s|server: https://.*:6443|server: https://127.0.0.1:6450|g") get namespace local-path-storage >/dev/null 2>&1; do sleep 2; done'
+timeout 60 bash -c 'until podman exec kinc-direct-podman kubectl --kubeconfig=/etc/kubernetes/admin.conf get namespace local-path-storage >/dev/null 2>&1; do sleep 2; done'
 # Wait for pods to be created
-timeout 60 bash -c 'until kubectl --kubeconfig=<(podman exec kinc-direct-podman cat /etc/kubernetes/admin.conf | sed "s|server: https://.*:6443|server: https://127.0.0.1:6450|g") get pods -n local-path-storage 2>/dev/null | grep -q local-path-provisioner; do sleep 2; done'
+timeout 60 bash -c 'until podman exec kinc-direct-podman kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -n local-path-storage 2>/dev/null | grep -q local-path-provisioner; do sleep 2; done'
 # Now wait for pods to be ready
-kubectl --kubeconfig=<(podman exec kinc-direct-podman cat /etc/kubernetes/admin.conf | sed 's|server: https://.*:6443|server: https://127.0.0.1:6450|g') \
+podman exec kinc-direct-podman kubectl --kubeconfig=/etc/kubernetes/admin.conf \
   wait --for=condition=Ready pods --all -n local-path-storage --timeout=60s
 
 echo "✅ T3 complete: direct-podman cluster (baked-in config)"
