@@ -577,24 +577,33 @@ jobs:
           See the [workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for detailed usage examples.
           EOF
           
-          # Create release using gh CLI
-          # Extract patch version to determine if pre-release
-          PATCH_VERSION=$(echo "${{ github.ref_name }}" | cut -d'-' -f2)
-          
-          # If patch contains non-numeric characters (rc, beta, alpha, etc.), it's a pre-release
-          if [[ "$PATCH_VERSION" =~ [^0-9] ]]; then
-            # Pre-release (e.g., v1_33_5-rc0, v1_33_5-beta1)
-            echo "Creating pre-release for ${{ github.ref_name }}"
-            gh release create "${{ github.ref_name }}" \
-              --title "kinc ${{ github.ref_name }}" \
-              --notes-file release-notes.md \
-              --prerelease
-          else
-            # Regular release (e.g., v1_33_5-0, v1_33_5-1)
-            echo "Creating stable release for ${{ github.ref_name }}"
-            gh release create "${{ github.ref_name }}" \
-              --title "kinc ${{ github.ref_name }}" \
+          # Check if release already exists
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            echo "ℹ️  Release ${{ github.ref_name }} already exists"
+            echo "Updating release notes..."
+            gh release edit "${{ github.ref_name }}" \
               --notes-file release-notes.md
+            echo "✅ Release notes updated successfully"
+          else
+            # Extract patch version to determine if pre-release
+            PATCH_VERSION=$(echo "${{ github.ref_name }}" | cut -d'-' -f2)
+            
+            # If patch contains non-numeric characters (rc, beta, alpha, etc.), it's a pre-release
+            if [[ "$PATCH_VERSION" =~ [^0-9] ]]; then
+              # Pre-release (e.g., v1_33_5-rc0, v1_33_5-beta1)
+              echo "Creating pre-release for ${{ github.ref_name }}"
+              gh release create "${{ github.ref_name }}" \
+                --title "kinc ${{ github.ref_name }}" \
+                --notes-file release-notes.md \
+                --prerelease
+            else
+              # Regular release (e.g., v1_33_5-0, v1_33_5-1)
+              echo "Creating stable release for ${{ github.ref_name }}"
+              gh release create "${{ github.ref_name }}" \
+                --title "kinc ${{ github.ref_name }}" \
+                --notes-file release-notes.md
+            fi
+            echo "✅ Release created successfully"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
