@@ -16,7 +16,7 @@ echo "╚═══════════════════════�
 echo ""
 
 # Test configuration
-KINC_IMAGE="${KINC_IMAGE:-localhost/kinc/node:v1.33.5}"
+KINC_IMAGE="${KINC_IMAGE:-localhost/kinc/node:v1.34.2}"
 echo "Using image: $KINC_IMAGE"
 echo ""
 
@@ -28,30 +28,55 @@ echo "Prerequisites: System Configuration Check"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# Check IP forwarding
-if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
-  echo "❌ IP forwarding disabled - required for Kubernetes networking"
+# Check 1: IP Forwarding (REQUIRED)
+ip_forward=$(cat /proc/sys/net/ipv4/ip_forward)
+if [ "$ip_forward" != "1" ]; then
+  echo "❌ IP forwarding DISABLED"
+  echo "   Required for Kubernetes pod networking!"
+  echo "   Enable with: sudo sysctl -w net.ipv4.ip_forward=1"
+  echo "   To persist:  echo 'net.ipv4.ip_forward=1' | sudo tee -a /etc/sysctl.d/99-kinc.conf"
   exit 1
 fi
-echo "✅ IP forwarding: enabled"
+echo "✅ IP forwarding enabled"
 
-# Check inotify limits
+# Check 2: Inotify limits (REQUIRED for multi-cluster)
 max_watches=$(cat /proc/sys/fs/inotify/max_user_watches)
 max_instances=$(cat /proc/sys/fs/inotify/max_user_instances)
-if [ "$max_watches" -lt 524288 ] || [ "$max_instances" -lt 512 ]; then
-  echo "⚠️  Inotify limits: watches=$max_watches, instances=$max_instances (recommend: 524288, 512)"
+if [ "$max_watches" -lt 524288 ] || [ "$max_instances" -lt 2048 ]; then
+  echo "❌ Inotify limits below recommended"
+  echo "   Current: watches=$max_watches, instances=$max_instances"
+  echo "   Recommended: watches=524288, instances=2048"
+  echo "   Required for validation test (7 clusters)"
+  echo "   To fix: sudo sysctl -w fs.inotify.max_user_watches=524288"
+  echo "           sudo sysctl -w fs.inotify.max_user_instances=2048"
+  echo "   Set KINC_SKIP_SYSCTL_CHECKS=true to bypass (not recommended)"
+  [ "${KINC_SKIP_SYSCTL_CHECKS:-false}" != "true" ] && exit 1
+fi
+echo "✅ Inotify limits sufficient for 5+ clusters"
+
+# Check 3: Kernel keyring limits (RECOMMENDED)
+maxkeys=$(cat /proc/sys/kernel/keys/maxkeys 2>/dev/null || echo "1000")
+maxbytes=$(cat /proc/sys/kernel/keys/maxbytes 2>/dev/null || echo "25000")
+if [ "$maxkeys" -lt 1000 ] || [ "$maxbytes" -lt 25000 ]; then
+  echo "⚠️  Kernel keyring limits below recommended"
+  echo "   Current: maxkeys=$maxkeys, maxbytes=$maxbytes"
+  echo "   Recommended: maxkeys=1000, maxbytes=25000"
+  echo "   To fix: sudo sysctl -w kernel.keys.maxkeys=1000"
+  echo "           sudo sysctl -w kernel.keys.maxbytes=25000"
 else
-  echo "✅ Inotify limits: sufficient for 5+ clusters"
+  echo "✅ Kernel keyring limits sufficient"
 fi
 
-# Check failed services
+# Check 4: Failed services (WARNING only)
 failed=$(systemctl --user list-units --state=failed --no-pager --no-legend 2>/dev/null | wc -l)
 if [ $failed -gt 0 ]; then
   echo "⚠️  Found $failed failed user service(s) - review before testing"
+  echo "   Check with: systemctl --user list-units --state=failed"
 else
   echo "✅ System health: no failed services"
 fi
 
+echo ""
 echo "✅ Prerequisites check complete"
 echo ""
 
