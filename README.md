@@ -84,7 +84,7 @@ Each cluster gets:
 ### Deploy Default Cluster
 ```bash
 # Full deployment with monitoring and testing
-./tools/full-deploy.sh
+./tools/deploy-and-test.sh
 
 # Or step-by-step
 ./tools/build.sh
@@ -93,12 +93,26 @@ Each cluster gets:
 ./tools/test.sh
 ```
 
+### Deploy with Baked-in Configuration (Phase 2)
+Zero-configuration deployment using embedded defaults:
+```bash
+# Fastest deployment - no config volume needed
+USE_BAKED_IN_CONFIG=true ./tools/deploy.sh
+
+# Or with full deployment script
+USE_BAKED_IN_CONFIG=true ./tools/deploy-and-test.sh
+```
+
 ### Deploy Multiple Clusters
 ```bash
-# Deploy named clusters
-CLUSTER_NAME=dev ./tools/full-deploy.sh
-CLUSTER_NAME=staging ./tools/full-deploy.sh
-CLUSTER_NAME=prod ./tools/full-deploy.sh
+# Deploy named clusters with mounted configuration
+CLUSTER_NAME=dev ./tools/deploy-and-test.sh
+CLUSTER_NAME=staging ./tools/deploy-and-test.sh
+CLUSTER_NAME=prod ./tools/deploy-and-test.sh
+
+# Or with baked-in configuration (faster)
+USE_BAKED_IN_CONFIG=true CLUSTER_NAME=dev ./tools/deploy.sh
+USE_BAKED_IN_CONFIG=true CLUSTER_NAME=staging ./tools/deploy.sh
 
 # Clusters run concurrently on different ports
 # dev: https://127.0.0.1:6444
@@ -121,18 +135,62 @@ CLUSTER_NAME=dev ./tools/cleanup.sh
 - `CLUSTER_NAME`: Cluster identifier (default: "default")
 - `FORCE_PORT`: Override automatic port allocation
 - `CACHE_BUST`: Force package updates during build
+- `USE_BAKED_IN_CONFIG`: Use embedded config (default: false, mount external config)
+
+### Baked-in Configuration (Phase 2)
+
+kinc supports two configuration modes:
+
+#### 1. Mounted Configuration (Default)
+The standard deployment mode with external configuration:
+```bash
+# Deploy with mounted configuration (allows customization)
+./tools/deploy.sh
+CLUSTER_NAME=custom ./tools/deploy.sh
+```
+
+**Benefits:**
+- Full customization of cluster configuration
+- Easy configuration updates without rebuilding
+- Per-cluster specific settings
+
+#### 2. Baked-in Configuration
+Zero-configuration deployment using embedded defaults:
+```bash
+# Deploy with baked-in configuration (no config volume)
+USE_BAKED_IN_CONFIG=true ./tools/deploy.sh
+USE_BAKED_IN_CONFIG=true CLUSTER_NAME=minimal ./tools/deploy.sh
+```
+
+**Benefits:**
+- Fastest deployment (no config volume creation)
+- Minimal resource footprint
+- Ideal for testing and development
+- No external dependencies
+
+#### Configuration Priority
+When both modes are available:
+1. **Mounted Config** (Priority) - `/etc/kinc/config/kubeadm.conf`
+2. **Baked-in Config** (Fallback) - `/etc/kinc/kubeadm.conf`
+
+The initialization system automatically:
+- Checks for mounted configuration first
+- Falls back to baked-in configuration if mount is absent
+- Validates configuration before cluster initialization
+- Logs configuration source for transparency
 
 ### Quadlet Integration
 kinc uses Podman Quadlet for systemd integration:
 - **Volume Files**: `runtime/quadlet/*.volume` - Define persistent storage
 - **Container File**: `runtime/quadlet/kinc-control-plane.container` - Container specification
-- **Config Volume**: Runtime-mounted `kubeadm.conf` for cluster-specific configuration
+- **Config Volume**: Runtime-mounted `kubeadm.conf` for cluster-specific configuration (optional in Phase 2)
 
 ### Cluster Configuration
-Each cluster uses a dynamically generated `kubeadm.conf`:
+Each cluster uses a dynamically generated or baked-in `kubeadm.conf`:
 - Cluster-specific naming and endpoints
 - Dynamic CIDR allocation
 - Container IP address templating
+- Rootless-optimized settings (cgroupfs driver, 127.0.0.1 endpoints)
 
 ## Development Tools
 
@@ -176,22 +234,31 @@ CLUSTER_NAME=dev ./tools/test.sh
 /etc/kinc/
 ├── scripts/           # Initialization and setup scripts
 ├── patches/           # Kubernetes component patches
-└── config/           # Runtime-mounted cluster configuration
+├── kubeadm.conf      # Baked-in configuration (Phase 2)
+└── config/           # Runtime-mounted cluster configuration (optional)
 
 /kinc/manifests/      # Kubernetes manifests (CNI, storage, etc.)
 /var/lib/kubelet/     # Kubelet configuration
 ```
 
+**Phase 2 Configuration System:**
+- Baked-in config at `/etc/kinc/kubeadm.conf` (embedded in image)
+- Mounted config at `/etc/kinc/config/kubeadm.conf` (runtime override)
+- Smart fallback: mounted → baked-in
+- Validation and logging at initialization
+
 ### Service Dependencies
 ```
 kinc-control-plane.service
 ├── kinc-var-data-volume.service
-├── kinc-config-volume.service  
+├── kinc-config-volume.service (optional in Phase 2)
 └── Container Runtime
     ├── kinc-cgroup-setup.service
     ├── crio.service
     └── systemd (PID 1)
 ```
+
+**Note:** In Phase 2, the config volume dependency is optional when using baked-in configuration mode.
 
 ## Networking
 
@@ -215,9 +282,11 @@ kinc-control-plane.service
 - **Access Modes**: ReadWriteOnce (RWO)
 
 ### Volume Management
-- **Data Volume**: `/var` mount for kubelet, etcd, logs
-- **Config Volume**: `/etc/kinc/config` for cluster configuration
+- **Data Volume**: `/var` mount for kubelet, etcd, logs (required)
+- **Config Volume**: `/etc/kinc/config` for cluster configuration (optional in Phase 2)
 - **Container Storage**: Shared with host for image management
+
+**Phase 2 Enhancement:** Config volume can be omitted when using `USE_BAKED_IN_CONFIG=true`, reducing resource footprint and deployment time.
 
 ## Security
 

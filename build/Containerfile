@@ -82,6 +82,12 @@ COPY kinc/etc/systemd/system/kinc-cgroup-setup.service /etc/systemd/system/kinc-
 COPY --chmod=0755 kinc/etc/kinc/scripts/* /etc/kinc/scripts/
 COPY kinc/kinc/manifests/ /kinc/manifests/
 
+# Phase 2: Baked-in configuration with mounted config override
+# Baked-in config at /etc/kinc/kubeadm.conf (used when no mount provided)
+# Mounted config at /etc/kinc/config/kubeadm.conf (overrides baked-in if present)
+RUN mkdir -p /etc/kinc/config
+COPY --chmod=0644 kinc/etc/kinc/kubeadm.conf /etc/kinc/kubeadm.conf
+
 # Copy rootless kubelet configuration
 COPY --chmod=0644 base/var/lib/kubelet/config-rootless.yaml /var/lib/kubelet/config-rootless.yaml
 

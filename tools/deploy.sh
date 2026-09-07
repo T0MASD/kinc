@@ -11,14 +11,16 @@ cd "$SCRIPT_DIR"
 CLUSTER_NAME="${CLUSTER_NAME:-default}"
 FORCE_PORT="${FORCE_PORT:-}"  # Allow manual port override
 
-# Image configuration - local development only
-IMAGE_NAME="localhost/kinc/node:v1.33.5-${CLUSTER_NAME}"
+# Image configuration - Phase 1: Single image for all clusters
+# All clusters use the same image with different mounted configs
+IMAGE_NAME="localhost/kinc/node:v1.33.5"
 
 echo "📁 Working directory: $SCRIPT_DIR"
 echo "🏷️  Cluster name: $CLUSTER_NAME"
 echo "🏷️  Using image: $IMAGE_NAME"
 
-# Port allocation function - dynamic allocation based on environment inspection
+# Port allocation function - sequential allocation based on existing clusters
+# Counts running/starting kinc containers and allocates next available port
 get_cluster_port() {
     local cluster_name=$1
     local base_port=6443
@@ -28,21 +30,26 @@ get_cluster_port() {
         return
     fi
     
-    # Inspect existing kinc containers to find used ports
-    local existing_ports=$(podman ps --filter "name=kinc-*" --format "{{.Ports}}" | \
-                          grep -o '127\.0\.0\.1:[0-9]*' | \
-                          cut -d: -f2 | \
-                          sort -n)
+    # Wait briefly for any concurrent systemd operations to settle
+    sleep 0.5
     
-    # Find next available port starting from 6444
-    local next_port=6444
-    for port in $existing_ports; do
-        if [[ $port -ge $next_port ]]; then
-            next_port=$((port + 1))
-        fi
+    # Count existing kinc containers (running or starting)
+    local existing_count=$(podman ps -a --filter "name=kinc-*-control-plane" --format "{{.Names}}" | wc -l)
+    
+    # Get all currently allocated ports to avoid conflicts
+    local used_ports=$(podman ps -a --filter "name=kinc-*" --format "{{.Ports}}" 2>/dev/null | \
+                      grep -o '127\.0\.0\.1:[0-9]*' | \
+                      cut -d: -f2 | \
+                      sort -n)
+    
+    # Start from base_port + existing_count and find first unused port
+    local candidate_port=$((base_port + existing_count))
+    
+    while echo "$used_ports" | grep -q "^${candidate_port}$"; do
+        candidate_port=$((candidate_port + 1))
     done
     
-    echo $next_port
+    echo $candidate_port
 }
 
 # CIDR allocation functions - mapped from port last 2 digits
@@ -119,27 +126,42 @@ sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-co
 
 echo "✅ Quadlet files installed"
 
-# Step 3: Prepare cluster configuration volume
+# Step 3: Prepare cluster configuration volume (Phase 2: optional)
 echo
-echo "🔧 Step 3: Preparing cluster configuration volume"
-# Create the config volume and copy kubeadm.conf into it
-systemctl --user daemon-reload
-systemctl --user start kinc-${CLUSTER_NAME}-config-volume.service
-# Wait for volume to be created
-sleep 2
+if [[ "${USE_BAKED_IN_CONFIG:-}" == "true" ]]; then
+    echo "🔧 Step 3: Using baked-in configuration (skipping volume)"
+    echo "📋 Phase 2 mode: Cluster will use baked-in config from image"
+    # Remove config volume dependency from Quadlet file
+    sed -i '/kinc-config-volume.service/d' ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+    sed -i '/Volume=kinc-.*-config:/d' ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+    echo "✅ Baked-in configuration mode enabled"
+else
+    echo "🔧 Step 3: Preparing cluster configuration volume"
+    # Create the config volume and copy kubeadm.conf into it
+    systemctl --user daemon-reload
+    systemctl --user start kinc-${CLUSTER_NAME}-config-volume.service
+    # Wait for volume to be created
+    sleep 2
 
-# Generate cluster-specific kubeadm.conf
-VOLUME_PATH=$(podman volume inspect kinc-${CLUSTER_NAME}-config --format "{{.Mountpoint}}")
-sed -e "s/clusterName: kinc/clusterName: kinc-${CLUSTER_NAME}/g" \
-    -e "s/kinc-control-plane/kinc-${CLUSTER_NAME}-control-plane/g" \
-    -e "s|podSubnet: 10\.244\.0\.0/16|podSubnet: ${CLUSTER_POD_SUBNET}|g" \
-    -e "s|serviceSubnet: 10\.96\.0\.0/16|serviceSubnet: ${CLUSTER_SERVICE_SUBNET}|g" \
-    runtime/config/kubeadm.conf > /tmp/kubeadm-${CLUSTER_NAME}.conf
+    # Generate cluster-specific kubeadm.conf
+    # Important: In pasta networking:
+    # - Use 127.0.0.1 for controlPlaneEndpoint (hostname resolution doesn't work)
+    # - Use unique bindPort per cluster (all containers share same host IP)
+    VOLUME_PATH=$(podman volume inspect kinc-${CLUSTER_NAME}-config --format "{{.Mountpoint}}")
+    sed -e "s/clusterName: kinc/clusterName: kinc-${CLUSTER_NAME}/g" \
+        -e "s/kinc-control-plane/kinc-${CLUSTER_NAME}-control-plane/g" \
+        -e "s|podSubnet: 10\.244\.0\.0/16|podSubnet: ${CLUSTER_POD_SUBNET}|g" \
+        -e "s|serviceSubnet: 10\.96\.0\.0/16|serviceSubnet: ${CLUSTER_SERVICE_SUBNET}|g" \
+        -e "s|bindPort: 6443|bindPort: ${CLUSTER_PORT}|g" \
+        -e "s|controlPlaneEndpoint:.*|controlPlaneEndpoint: 127.0.0.1:${CLUSTER_PORT}|g" \
+        -e "s|apiServerEndpoint:.*|apiServerEndpoint: 127.0.0.1:${CLUSTER_PORT}|g" \
+        runtime/config/kubeadm.conf > /tmp/kubeadm-${CLUSTER_NAME}.conf
 
-sudo cp /tmp/kubeadm-${CLUSTER_NAME}.conf "$VOLUME_PATH/kubeadm.conf"
-sudo chown $(id -u):$(id -g) "$VOLUME_PATH/kubeadm.conf"
-rm -f /tmp/kubeadm-${CLUSTER_NAME}.conf
-echo "✅ Cluster configuration volume prepared"
+    sudo cp /tmp/kubeadm-${CLUSTER_NAME}.conf "$VOLUME_PATH/kubeadm.conf"
+    sudo chown $(id -u):$(id -g) "$VOLUME_PATH/kubeadm.conf"
+    rm -f /tmp/kubeadm-${CLUSTER_NAME}.conf
+    echo "✅ Cluster configuration volume prepared"
+fi
 
 # Step 4: Ensure image is available
 echo
@@ -187,19 +209,27 @@ fi
 
 echo "✅ Volume and container services started"
 
-# Step 5: Wait for cluster initialization
+# Step 7: Wait for cluster initialization to complete
 echo
-echo "✅ Services started successfully!"
+echo "⏳ Step 7: Waiting for cluster initialization"
+if "${SCRIPT_DIR}/tools/wait-for-init.sh" "${CLUSTER_NAME}"; then
+    echo "✅ Cluster initialization completed successfully!"
+else
+    echo "❌ Cluster initialization failed"
+    echo
+    echo "To check logs:"
+    echo "  podman exec kinc-${CLUSTER_NAME}-control-plane journalctl -u kinc-init.service --no-pager"
+    exit 1
+fi
+
 echo
-echo "🔍 To monitor cluster initialization:"
-echo "  ./tools/monitor.sh"
+echo "✅ Deployment complete!"
 echo
-echo "🧪 To run full deployment with monitoring:"
-echo "  ./tools/full-deploy.sh"
+echo "🔍 To monitor cluster status:"
+echo "  CLUSTER_NAME=${CLUSTER_NAME} ./tools/monitor.sh"
+echo
+echo "🧪 To run tests:"
+echo "  CLUSTER_NAME=${CLUSTER_NAME} ./tools/test.sh"
 echo
 echo "🛑 To stop and cleanup:"
-echo "  systemctl --user stop kinc-${CLUSTER_NAME}-control-plane.service kinc-${CLUSTER_NAME}-var-data-volume.service"
-echo "  podman rm -f kinc-${CLUSTER_NAME}-control-plane"
-echo "  podman volume rm kinc-${CLUSTER_NAME}-var-data"
-echo "  rm -f ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-*.*"
-echo "  systemctl --user daemon-reload"
+echo "  CLUSTER_NAME=${CLUSTER_NAME} ./tools/cleanup.sh"

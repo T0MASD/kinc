@@ -2,8 +2,8 @@
 Description=kinc Kubernetes Cluster Initialization
 After=crio.service
 Requires=crio.service
-# Require kubeadm.conf to be present before starting
-ConditionPathExists=/etc/kinc/config/kubeadm.conf
+# Phase 2: Config resolved by kinc-init.sh fallback logic
+# Supports both mounted config (priority) and baked-in config (fallback)
 
 [Service]
 Type=oneshot

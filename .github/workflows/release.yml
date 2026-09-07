@@ -115,7 +115,7 @@ jobs:
           echo "Deploy script will find: localhost/kinc/node:v1.33.5-test"
           
           # Run full deployment (this tests everything: build, deploy, monitor, test)
-          ./tools/full-deploy.sh
+          ./tools/deploy-and-test.sh
           
           echo "✅ kinc image validation passed - full deployment successful!"
           
@@ -217,7 +217,7 @@ jobs:
             run: podman rm -f kinc || true
           \`\`\`
           
-          #### Multi-Cluster Usage (Recommended)
+          #### Multi-Cluster Usage
           \`\`\`bash
           # Use kinc tools for multi-cluster (handles rootless config automatically)
           export KINC_IMAGE=$IMAGE_TAG
@@ -233,6 +233,26 @@ jobs:
           # Update server URLs
           sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6444|g' ~/.kube/config-dev
           sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6445|g' ~/.kube/config-staging
+          \`\`\`
+          
+          #### Phase 2: Zero-Config Deployment (Baked-in Configuration)
+          \`\`\`bash
+          # Fastest deployment - uses embedded configuration
+          export KINC_IMAGE=$IMAGE_TAG
+          export USE_BAKED_IN_CONFIG=true
+          
+          # Deploy with baked-in configuration (no config volume needed)
+          ./tools/deploy.sh
+          
+          # Or multiple clusters
+          USE_BAKED_IN_CONFIG=true CLUSTER_NAME=dev ./tools/deploy.sh
+          USE_BAKED_IN_CONFIG=true CLUSTER_NAME=test ./tools/deploy.sh
+          
+          # Benefits:
+          # - No external config volume required
+          # - Faster deployment
+          # - Minimal resource footprint
+          # - Ideal for testing and CI/CD
           \`\`\`
           
           ### 🔗 Links
@@ -284,6 +304,7 @@ jobs:
           - local-path-provisioner for storage
           - CoreDNS for service discovery
           - Rootless operation support
+          - **Phase 2**: Baked-in configuration (zero-config deployment option)
           
           ## 🔧 Build Info
           
@@ -315,9 +336,20 @@ jobs:
           🎉 **Container image available**: \`ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}\`
           
           ## Quick Start
+          
+          ### Standard Deployment (Mounted Configuration)
           \`\`\`bash
           # Recommended: Use kinc tools for proper rootless setup
           export KINC_IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          git clone https://github.com/t0masd/kinc.git && cd kinc
+          ./tools/deploy.sh
+          \`\`\`
+          
+          ### Phase 2: Zero-Config Deployment (Baked-in Configuration)
+          \`\`\`bash
+          # Fastest deployment - uses embedded configuration
+          export KINC_IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          export USE_BAKED_IN_CONFIG=true
           git clone https://github.com/t0masd/kinc.git && cd kinc
           ./tools/deploy.sh
           \`\`\`
