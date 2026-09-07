@@ -4,7 +4,7 @@ set -euo pipefail
 echo "🏗️ kinc Container Image Build"
 echo "============================="
 
-# Phase 1: Single image for all clusters (no cluster name in tag)
+# Single image for all clusters (no cluster name in tag)
 # Build once, deploy many times with different configs
 IMAGE_NAME="localhost/kinc/node:v1.33.5"
 
@@ -46,9 +46,9 @@ fi
 
 echo "✅ Image verified successfully!"
 
-# Phase 1 validation: Check that our configuration infrastructure is in place
+# Validation: Check that our configuration infrastructure is in place
 echo
-echo "🔍 Phase 1 validation: Checking configuration infrastructure..."
+echo "🔍 Validating Checking configuration infrastructure..."
 
 # Check that config directory exists
 if podman run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c "test -d /etc/kinc/config"; then
@@ -58,7 +58,7 @@ else
     exit 1
 fi
 
-# Check that baked-in configuration exists (Phase 2)
+# Check that baked-in configuration exists 
 if podman run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c "test -f /etc/kinc/kubeadm.conf"; then
     echo "✅ Baked-in configuration exists: /etc/kinc/kubeadm.conf"
 else
@@ -91,7 +91,7 @@ else
     exit 1
 fi
 
-echo "✅ Phase 2 validation complete - Baked-in configuration active!"
+echo "✅ Validation complete - Baked-in configuration active!"
 
 # Show image size
 echo
@@ -106,7 +106,7 @@ echo "  3. Test:           CLUSTER_NAME=default ./tools/test.sh"
 echo "  4. Clean:          CLUSTER_NAME=default ./tools/cleanup.sh"
 echo
 
-echo "💡 Phase 2 - Baked-in Config with Override:"
+echo "💡 Baked-in Config with Override:"
 echo "  - Build ONCE: ./tools/build.sh (includes default config)"
 echo "  - Deploy default: CLUSTER_NAME=<name> ./tools/deploy.sh"
 echo "  - Override config: Mount custom config volume (optional)"

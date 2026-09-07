@@ -158,13 +158,48 @@ jobs:
           
           ### 📋 Usage Examples
           
-          #### Basic Usage
-          \`\`\`bash
-          # Pull the image
-          podman pull $IMAGE_TAG
+          > **Note**: kinc requires **rootless Podman** (runs as regular user, not root).
           
-          # Start a kinc cluster (rootless - no --privileged needed!)
+          #### Option 1: Quick Start with Deployment Tools (Recommended)
+          \`\`\`bash
+          # Clone kinc repository
+          git clone https://github.com/t0masd/kinc.git && cd kinc
+          
+          # Enable IP forwarding (one-time setup)
+          echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+          
+          # Deploy using published image with baked-in config (zero-config)
+          export KINC_IMAGE=$IMAGE_TAG
+          export USE_BAKED_IN_CONFIG=true
+          ./tools/deploy.sh
+          # Note: deploy.sh waits for cluster to be fully ready
+          #   First run: 2-5 minutes (downloads container images)
+          #   Subsequent runs: ~40 seconds (cached images)
+          
+          # Extract kubeconfig
+          mkdir -p ~/.kube
+          podman cp kinc-default-control-plane:/etc/kubernetes/admin.conf ~/.kube/config
+          sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
+          
+          # Use cluster (fully ready)
+          kubectl get nodes
+          kubectl get pods -A
+          
+          # Cleanup
+          ./tools/cleanup.sh
+          \`\`\`
+          
+          > **Note**: First deployment takes 2-5 minutes (downloads pause, CoreDNS, kube-proxy, etc.). Subsequent deployments are ~40 seconds.
+          
+          #### Option 2: Direct Podman Run (Advanced)
+          \`\`\`bash
+          # Create volume for persistent data
+          podman volume create kinc-var-data
+          
+          # Start kinc cluster (rootless - must run as regular user, NOT root!)
           podman run -d --name kinc-cluster \\
+            --hostname kinc-control-plane \\
+            --cgroups=split \\
             --cap-add=SYS_ADMIN --cap-add=SYS_RESOURCE --cap-add=NET_ADMIN \\
             --cap-add=SETPCAP --cap-add=NET_RAW --cap-add=SYS_PTRACE \\
             --cap-add=DAC_OVERRIDE --cap-add=CHOWN --cap-add=FOWNER \\
@@ -175,38 +210,66 @@ jobs:
             --tmpfs /tmp:rw,rprivate,nosuid,nodev,tmpcopyup \\
             --tmpfs /run:rw,rprivate,nosuid,nodev,tmpcopyup \\
             --tmpfs /run/lock:rw,rprivate,nosuid,nodev,tmpcopyup \\
+            --volume kinc-var-data:/var:rw \\
+            --volume \\$HOME/.local/share/containers/storage:/root/.local/share/containers/storage:rw \\
             --sysctl net.ipv6.conf.all.disable_ipv6=0 \\
             --sysctl net.ipv6.conf.all.keep_addr_on_down=1 \\
-            -p 6443:6443 \\
+            --sysctl net.netfilter.nf_conntrack_tcp_timeout_established=86400 \\
+            --sysctl net.netfilter.nf_conntrack_tcp_timeout_close_wait=3600 \\
+            -p 127.0.0.1:6443:6443/tcp \\
+            --env container=podman \\
             $IMAGE_TAG
           
-          # Wait for cluster ready
-          timeout 300 bash -c 'until curl -k https://localhost:6443/healthz; do sleep 5; done'
+          # Wait for API server to start (5-10 seconds)
+          timeout 300 bash -c 'until curl -k https://localhost:6443/healthz 2>/dev/null; do sleep 2; done'
           
-          # Extract kubeconfig
+          # Extract kubeconfig (kubectl will work immediately)
           podman cp kinc-cluster:/etc/kubernetes/admin.conf ~/.kube/config
           sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
           
-          # Use kubectl
+          # Check cluster (pods may still be initializing)
           kubectl get nodes
+          kubectl get pods -A
+          
+          # Optional: Wait for all system pods to be fully ready (~40 seconds)
+          kubectl wait --for=condition=Ready pods --all -n kube-system --timeout=300s
+          kubectl wait --for=condition=Ready pods --all -n local-path-storage --timeout=60s
+          
+          # Cleanup
+          podman rm -f kinc-cluster
+          podman volume rm kinc-var-data
           \`\`\`
           
-          #### GitHub Actions Usage (Recommended)
+          > **Note**: After the API server starts (~5-10s), you can immediately use kubectl. System pods will finish initializing in the background (~40s total). Use \`kubectl wait\` commands above to ensure all pods are Ready before deploying workloads.
+          
+          > **⚠️ Performance Warning**: 
+          > - **First run**: Initialization takes 2-5 minutes (downloads pause, CoreDNS, kube-proxy, etc.)
+          > - **Subsequent runs** (with container storage mount): ~40 seconds (images cached)
+          > - **Without container storage mount**: Every run downloads images (2-5 minutes each time)
+          > - **Recommendation**: Always use \`--volume \\$HOME/.local/share/containers/storage\` for image caching
+          
+          **Key requirements**:
+          - \`--cgroups=split\`: Proper cgroup hierarchy for Kubernetes
+          - \`--volume kinc-var-data:/var\`: Persistent storage for etcd and kubelet
+          - \`--volume \\$HOME/.local/share/containers/storage\`: **Critical** - Shares image cache with host, enables ~40s init time
+          - Additional sysctls: Conntrack timeouts for stable networking
+          
+          #### GitHub Actions / CI Usage
           \`\`\`yaml
           - name: Setup kinc Kubernetes cluster
             run: |
               # Enable IP forwarding
               echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
               
-              # Use kinc tools for easier deployment (handles rootless config)
+              # Deploy kinc using deployment tools (handles rootless setup)
               export KINC_IMAGE=$IMAGE_TAG
+              export USE_BAKED_IN_CONFIG=true
               git clone https://github.com/t0masd/kinc.git /tmp/kinc
               cd /tmp/kinc && ./tools/deploy.sh
               
-              # Wait for ready and extract kubeconfig
-              timeout 300 bash -c 'until curl -k https://localhost:6443/healthz; do sleep 5; done'
+              # Extract kubeconfig
               mkdir -p ~/.kube
-              podman cp kinc:/etc/kubernetes/admin.conf ~/.kube/config
+              podman cp kinc-default-control-plane:/etc/kubernetes/admin.conf ~/.kube/config
               sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
               
               # Verify cluster
@@ -214,7 +277,7 @@ jobs:
           
           - name: Cleanup
             if: always()
-            run: podman rm -f kinc || true
+            run: cd /tmp/kinc && ./tools/cleanup.sh
           \`\`\`
           
           #### Multi-Cluster Usage
@@ -235,7 +298,7 @@ jobs:
           sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6445|g' ~/.kube/config-staging
           \`\`\`
           
-          #### Phase 2: Zero-Config Deployment (Baked-in Configuration)
+          #### Zero-Config Deployment (Baked-in Configuration)
           \`\`\`bash
           # Fastest deployment - uses embedded configuration
           export KINC_IMAGE=$IMAGE_TAG
@@ -304,7 +367,8 @@ jobs:
           - local-path-provisioner for storage
           - CoreDNS for service discovery
           - Rootless operation support
-          - **Phase 2**: Baked-in configuration (zero-config deployment option)
+          - Baked-in configuration (zero-config deployment option)
+          - Direct podman run support
           
           ## 🔧 Build Info
           
@@ -345,7 +409,7 @@ jobs:
           ./tools/deploy.sh
           \`\`\`
           
-          ### Phase 2: Zero-Config Deployment (Baked-in Configuration)
+          ### Zero-Config Deployment (Baked-in Configuration)
           \`\`\`bash
           # Fastest deployment - uses embedded configuration
           export KINC_IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:${{ github.ref_name }}

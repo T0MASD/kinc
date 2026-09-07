@@ -11,7 +11,7 @@ cd "$SCRIPT_DIR"
 CLUSTER_NAME="${CLUSTER_NAME:-default}"
 FORCE_PORT="${FORCE_PORT:-}"  # Allow manual port override
 
-# Image configuration - Phase 1: Single image for all clusters
+# Image configuration - Single image for all clusters
 # All clusters use the same image with different mounted configs
 IMAGE_NAME="localhost/kinc/node:v1.33.5"
 
@@ -126,11 +126,11 @@ sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-co
 
 echo "✅ Quadlet files installed"
 
-# Step 3: Prepare cluster configuration volume (Phase 2: optional)
+# Step 3: Prepare cluster configuration volume 
 echo
 if [[ "${USE_BAKED_IN_CONFIG:-}" == "true" ]]; then
     echo "🔧 Step 3: Using baked-in configuration (skipping volume)"
-    echo "📋 Phase 2 mode: Cluster will use baked-in config from image"
+    echo "📋 Baked-in config mode: Cluster will use baked-in config from image"
     # Remove config volume dependency from Quadlet file
     sed -i '/kinc-config-volume.service/d' ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
     sed -i '/Volume=kinc-.*-config:/d' ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
