@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage: ./wait-for-init.sh CLUSTER_NAME [TIMEOUT_SECONDS]
 
 CLUSTER_NAME="${1:-}"
-TIMEOUT="${2:-300}"  # Default 5 minutes (kubeadm needs 4+ min)
+TIMEOUT="${2:-1500}"  # Default 25 minutes (allows for worst-case kubectl wait timeouts in CI)
 
 if [[ -z "$CLUSTER_NAME" ]]; then
     echo "Usage: $0 CLUSTER_NAME [TIMEOUT_SECONDS]" >&2

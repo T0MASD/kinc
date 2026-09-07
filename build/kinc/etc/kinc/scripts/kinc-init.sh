@@ -7,6 +7,9 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >&2
 }
 
+# Start overall timing
+INIT_START_TIME=$(date +%s)
+
 log "=== kinc Kind-Free Initialization Starting ==="
 
 # Configuration validation and fallback logic 
@@ -125,12 +128,17 @@ fi
 
 # Initialize Kubernetes cluster
 log "Initializing Kubernetes cluster with kubeadm..."
+kubeadm_start=$(date +%s)
 # Skip preflight and upload-config/kubelet (which requires node to be registered first)
 # The kubelet config will be applied automatically when the node registers
 if kubeadm init --config=/tmp/kubeadm-final.conf --skip-phases=preflight,upload-config/kubelet; then
-    log "✅ Kubernetes cluster initialized successfully"
+    kubeadm_end=$(date +%s)
+    kubeadm_elapsed=$((kubeadm_end - kubeadm_start))
+    log "✅ Kubernetes cluster initialized successfully (took ${kubeadm_elapsed}s)"
 else
-    log "❌ Kubernetes cluster initialization failed"
+    kubeadm_end=$(date +%s)
+    kubeadm_elapsed=$((kubeadm_end - kubeadm_start))
+    log "❌ Kubernetes cluster initialization failed after ${kubeadm_elapsed}s"
     exit 1
 fi
 
@@ -218,18 +226,28 @@ fi
 
 # Wait for CNI to be ready before proceeding
 log "Waiting for CNI pods to be ready..."
-if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pods -l k8s-app=kincnet -n kube-system --timeout=120s; then
-    log "✅ CNI pods are ready"
+wait_start=$(date +%s)
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pods -l k8s-app=kincnet -n kube-system --timeout=180s; then
+    wait_end=$(date +%s)
+    wait_elapsed=$((wait_end - wait_start))
+    log "✅ CNI pods are ready (waited ${wait_elapsed}s)"
 else
-    log "⚠️  CNI pods not ready yet, but continuing..."
+    wait_end=$(date +%s)
+    wait_elapsed=$((wait_end - wait_start))
+    log "⚠️  CNI pods not ready yet after ${wait_elapsed}s, but continuing..."
 fi
 
 # Wait for nodes to be ready first
 log "Waiting for node to be ready..."
-if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=300s; then
-    log "✅ All nodes are ready"
+wait_start=$(date +%s)
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=240s; then
+    wait_end=$(date +%s)
+    wait_elapsed=$((wait_end - wait_start))
+    log "✅ All nodes are ready (waited ${wait_elapsed}s)"
 else
-    log "❌ Nodes failed to become ready within timeout"
+    wait_end=$(date +%s)
+    wait_elapsed=$((wait_end - wait_start))
+    log "❌ Nodes failed to become ready after ${wait_elapsed}s"
     exit 1
 fi
 
@@ -238,10 +256,15 @@ log "Waiting for control plane to be completely stable..."
 components=("etcd" "kube-apiserver" "kube-controller-manager" "kube-scheduler")
 for component in "${components[@]}"; do
     log "Waiting for $component to be ready..."
-    if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pod -l component="$component" -n kube-system --timeout=120s; then
-        log "✅ $component is ready"
+    wait_start=$(date +%s)
+    if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pod -l component="$component" -n kube-system --timeout=180s; then
+        wait_end=$(date +%s)
+        wait_elapsed=$((wait_end - wait_start))
+        log "✅ $component is ready (waited ${wait_elapsed}s)"
     else
-        log "❌ $component failed to become ready within timeout"
+        wait_end=$(date +%s)
+        wait_elapsed=$((wait_end - wait_start))
+        log "❌ $component failed to become ready after ${wait_elapsed}s"
         exit 1
     fi
 done
@@ -274,13 +297,28 @@ fi
 
 # Wait for storage provisioner to be ready
 log "Waiting for storage provisioner to be ready..."
-if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Available deployment/local-path-provisioner -n local-path-storage --timeout=120s; then
-    log "✅ Storage provisioner is ready"
+wait_start=$(date +%s)
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Available deployment/local-path-provisioner -n local-path-storage --timeout=180s; then
+    wait_end=$(date +%s)
+    wait_elapsed=$((wait_end - wait_start))
+    log "✅ Storage provisioner is ready (waited ${wait_elapsed}s)"
 else
-    log "⚠️  Storage provisioner not ready yet, but continuing..."
+    wait_end=$(date +%s)
+    wait_elapsed=$((wait_end - wait_start))
+    log "⚠️  Storage provisioner not ready after ${wait_elapsed}s, but continuing..."
 fi
 
 log "=== kinc Kind-Free Initialization Complete ==="
+
+# Calculate and log total initialization time
+INIT_END_TIME=$(date +%s)
+TOTAL_INIT_TIME=$((INIT_END_TIME - INIT_START_TIME))
+
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log "⏱️  INITIALIZATION TIMING SUMMARY"
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+log "   Total initialization time: ${TOTAL_INIT_TIME}s"
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "Cluster is ready!"
 
 # Signal that initialization is complete
