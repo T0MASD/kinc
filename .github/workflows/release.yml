@@ -211,7 +211,7 @@ jobs:
             --tmpfs /run:rw,rprivate,nosuid,nodev,tmpcopyup \\
             --tmpfs /run/lock:rw,rprivate,nosuid,nodev,tmpcopyup \\
             --volume kinc-var-data:/var:rw \\
-            --volume \\$HOME/.local/share/containers/storage:/root/.local/share/containers/storage:rw \\
+            --volume \$HOME/.local/share/containers/storage:/root/.local/share/containers/storage:rw \\
             --sysctl net.ipv6.conf.all.disable_ipv6=0 \\
             --sysctl net.ipv6.conf.all.keep_addr_on_down=1 \\
             --sysctl net.netfilter.nf_conntrack_tcp_timeout_established=86400 \\
@@ -246,12 +246,12 @@ jobs:
           > - **First run**: Initialization takes 2-5 minutes (downloads pause, CoreDNS, kube-proxy, etc.)
           > - **Subsequent runs** (with container storage mount): ~40 seconds (images cached)
           > - **Without container storage mount**: Every run downloads images (2-5 minutes each time)
-          > - **Recommendation**: Always use \`--volume \\$HOME/.local/share/containers/storage\` for image caching
+          > - **Recommendation**: Always use \`--volume \$HOME/.local/share/containers/storage\` for image caching
           
           **Key requirements**:
           - \`--cgroups=split\`: Proper cgroup hierarchy for Kubernetes
           - \`--volume kinc-var-data:/var\`: Persistent storage for etcd and kubelet
-          - \`--volume \\$HOME/.local/share/containers/storage\`: **Critical** - Shares image cache with host, enables ~40s init time
+          - \`--volume \$HOME/.local/share/containers/storage\`: **Critical** - Shares image cache with host, enables ~40s init time
           - Additional sysctls: Conntrack timeouts for stable networking
           
           #### GitHub Actions / CI Usage
