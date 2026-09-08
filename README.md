@@ -1,333 +1,408 @@
 # kinc - Kubernetes in Container
 
-**kinc** is a rootless, single-container Kubernetes distribution designed for development, testing, and edge deployments. It provides a complete Kubernetes cluster running entirely in userspace without requiring root privileges or complex multi-container orchestration.
+**Single-node rootless Kubernetes cluster running in a Podman container.**
 
-## Architecture Overview
+[![Build Status](https://github.com/T0MASD/kinc/actions/workflows/ci.yml/badge.svg)](https://github.com/T0MASD/kinc/actions/workflows/ci.yml)
+[![Release](https://github.com/T0MASD/kinc/actions/workflows/release.yml/badge.svg)](https://github.com/T0MASD/kinc/actions/workflows/release.yml)
 
-kinc packages a complete Kubernetes v1.33.5 cluster into a single container image, featuring:
+---
 
-- **Rootless Operation**: Runs entirely in userspace without root privileges
-- **Single Container**: All components (etcd, API server, kubelet, etc.) in one container
-- **Multi-Cluster Support**: Deploy multiple isolated clusters concurrently
-- **Podman Quadlet Integration**: Native systemd service management
-- **Dynamic Resource Allocation**: Automatic port and CIDR management
+## Features
 
-## Core Components
+- 🚀 **Fast:** Cluster ready in ~40 seconds (with cached images)
+- 🔒 **Rootless:** Runs as regular user, no root required
+- 📦 **Self-contained:** Everything in one container (systemd, CRI-O, kubeadm, kubectl)
+- 🔧 **Configurable:** Baked-in or mounted configuration
+- 🌐 **Isolated networking:** Sequential port allocation with subnet derivation
+- 📊 **Multi-cluster:** Run multiple clusters concurrently
+- ✅ **Production-grade:** Uses official Kubernetes tools (kubeadm, kubectl, CRI-O)
 
-### Container Runtime Stack
-- **Base OS**: Fedora 42
-- **Container Runtime**: CRI-O 1.33 with rootless configuration
-- **Low-Level Runtime**: crun with custom wrapper for rootless compatibility
-- **Init System**: systemd for service orchestration
-
-### Kubernetes Components
-- **Kubernetes**: v1.33.5 (kubeadm, kubelet, kubectl)
-- **CNI**: kincnet (custom bridge-based networking)
-- **Storage**: local-path-provisioner for dynamic PV provisioning
-- **DNS**: CoreDNS for service discovery
-
-### Rootless Enablement Technologies
-
-#### crun Wrapper
-kinc includes a sophisticated crun wrapper (`/usr/local/bin/crun-wrapper.sh`) that:
-- Removes `oomScoreAdj` settings that fail in rootless environments
-- Strips problematic user settings to avoid capset issues
-- Handles helper container capability restrictions
-- Uses jq for safe JSON manipulation of OCI specs
-
-#### Cgroup Management
-Automated cgroup v2 setup via `kinc-cgroup-setup.service`:
-- Enables necessary cgroup controllers (cpu, memory, pids, io)
-- Configures cgroup delegation for rootless operation
-- Handles systemd slice configuration
-
-#### Network Configuration
-- Custom CNI plugin (kincnet) optimized for rootless containers
-- Automatic IP forwarding validation and setup
-- Dynamic CIDR allocation to prevent cluster conflicts
-
-## Multi-Cluster Architecture
-
-### Sequential Resource Allocation
-kinc uses environment inspection for deterministic resource allocation:
-
-```bash
-# Port allocation based on existing clusters
-Port 6443 → Default cluster
-Port 6444 → First custom cluster  
-Port 6445 → Second custom cluster
-...
-```
-
-### CIDR Mapping
-Network subnets are derived from API server ports:
-```bash
-Port 6443 → Pod: 10.244.43.0/24, Service: 10.43.0.0/16
-Port 6444 → Pod: 10.244.44.0/24, Service: 10.44.0.0/16
-Port 6445 → Pod: 10.244.45.0/24, Service: 10.45.0.0/16
-```
-
-### Cluster Isolation
-Each cluster gets:
-- Unique container name: `kinc-{cluster-name}-control-plane`
-- Dedicated Podman volumes: `kinc-{cluster-name}-var-data`, `kinc-{cluster-name}-config`
-- Isolated systemd services: `kinc-{cluster-name}-control-plane.service`
-- Separate network namespaces with non-overlapping IP ranges
+---
 
 ## Quick Start
 
 ### Prerequisites
-- Podman 4.0+ with rootless configuration
-- systemd user services enabled
-- IP forwarding enabled: `echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward`
 
-### Deploy Default Cluster
+- **Podman** (rootless)
+- **IP forwarding enabled**
+- **Sufficient inotify limits** (for multiple clusters)
+
 ```bash
-# Full deployment with monitoring and testing
-./tools/deploy-and-test.sh
+# Enable IP forwarding (one-time setup)
+sudo sysctl -w net.ipv4.ip_forward=1
 
-# Or step-by-step
-./tools/build.sh
-./tools/deploy.sh
-./tools/monitor.sh
-./tools/test.sh
+# Make permanent
+echo 'net.ipv4.ip_forward = 1' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+sudo sysctl -p /etc/sysctl.d/99-kubernetes.conf
+
+# Increase inotify limits for multiple clusters
+sudo sysctl -w fs.inotify.max_user_watches=524288
+sudo sysctl -w fs.inotify.max_user_instances=512
 ```
 
-### Deploy with Baked-in Configuration (Phase 2)
-Zero-configuration deployment using embedded defaults:
+### Deploy a Cluster
+
 ```bash
-# Fastest deployment - no config volume needed
+# Build the image (one time)
+./tools/build.sh
+
+# Deploy with baked-in config (simplest)
 USE_BAKED_IN_CONFIG=true ./tools/deploy.sh
 
-# Or with full deployment script
-USE_BAKED_IN_CONFIG=true ./tools/deploy-and-test.sh
+# Extract kubeconfig
+mkdir -p ~/.kube
+podman cp kinc-default-control-plane:/etc/kubernetes/admin.conf ~/.kube/config
+sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
+
+# Use your cluster
+kubectl get nodes
+kubectl get pods -A
 ```
 
 ### Deploy Multiple Clusters
+
 ```bash
-# Deploy named clusters with mounted configuration
-CLUSTER_NAME=dev ./tools/deploy-and-test.sh
-CLUSTER_NAME=staging ./tools/deploy-and-test.sh
-CLUSTER_NAME=prod ./tools/deploy-and-test.sh
+# Deploy with mounted config (supports multiple clusters)
+CLUSTER_NAME=dev ./tools/deploy.sh
+CLUSTER_NAME=staging ./tools/deploy.sh
+CLUSTER_NAME=prod ./tools/deploy.sh
 
-# Or with baked-in configuration (faster)
-USE_BAKED_IN_CONFIG=true CLUSTER_NAME=dev ./tools/deploy.sh
-USE_BAKED_IN_CONFIG=true CLUSTER_NAME=staging ./tools/deploy.sh
-
-# Clusters run concurrently on different ports
-# dev: https://127.0.0.1:6444
-# staging: https://127.0.0.1:6445  
-# prod: https://127.0.0.1:6446
+# Clusters get sequential ports and isolated networks:
+# dev:     127.0.0.1:6443, subnet 10.244.43.0/24
+# staging: 127.0.0.1:6444, subnet 10.244.44.0/24
+# prod:    127.0.0.1:6445, subnet 10.244.45.0/24
 ```
 
 ### Cleanup
-```bash
-# Clean up specific cluster
-CLUSTER_NAME=dev ./tools/cleanup.sh
 
-# Clean up default cluster
-./tools/cleanup.sh
+```bash
+# Remove a cluster
+CLUSTER_NAME=default ./tools/cleanup.sh
+
+# Or with baked-in config
+USE_BAKED_IN_CONFIG=true CLUSTER_NAME=default ./tools/cleanup.sh
 ```
 
-## Configuration
+---
 
-### Environment Variables
-- `CLUSTER_NAME`: Cluster identifier (default: "default")
-- `FORCE_PORT`: Override automatic port allocation
-- `CACHE_BUST`: Force package updates during build
-- `USE_BAKED_IN_CONFIG`: Use embedded config (default: false, mount external config)
+## Architecture
 
-### Baked-in Configuration (Phase 2)
+### Multi-Service Initialization
 
-kinc supports two configuration modes:
+kinc uses a systemd-driven multi-service architecture for reliable initialization:
 
-#### 1. Mounted Configuration (Default)
-The standard deployment mode with external configuration:
+```
+Container Start
+    ↓
+┌─────────────────────────────────────┐
+│ kinc-preflight.service (oneshot)    │
+│ - Config validation (yq)            │
+│ - CRI-O readiness check             │
+│ - kubeadm.conf templating           │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│ kubeadm-init.service (oneshot)      │
+│ - kubeadm init (isolated)           │
+│ - No kubectl waits                  │
+│ - Clean systemd logs                │
+└─────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────┐
+│ kinc-postinit.service (oneshot)     │
+│ - CNI installation (kindnet)        │
+│ - Storage provisioner               │
+│ - kubectl wait for readiness        │
+└─────────────────────────────────────┘
+    ↓
+Initialization Complete
+Marker: /var/lib/kinc-initialized
+```
+
+### Port and Network Allocation
+
+Ports are allocated sequentially, and network subnets are derived from the port's last 2 digits:
+
+| Cluster | Host Port     | Pod Subnet       | Service Subnet |
+|---------|---------------|------------------|----------------|
+| default | 127.0.0.1:6443 | 10.244.43.0/24   | 10.43.0.0/16   |
+| cluster01 | 127.0.0.1:6444 | 10.244.44.0/24   | 10.44.0.0/16   |
+| cluster02 | 127.0.0.1:6445 | 10.244.45.0/24   | 10.45.0.0/16   |
+
+This ensures **non-overlapping networks** for concurrent clusters.
+
+---
+
+## Configuration Modes
+
+### Baked-In Config (Zero-Config)
+
+Use the default configuration embedded in the image:
+
 ```bash
-# Deploy with mounted configuration (allows customization)
-./tools/deploy.sh
+USE_BAKED_IN_CONFIG=true ./tools/deploy.sh
+```
+
+- No config volume mount
+- Single cluster only (can't customize cluster name in kubeadm.conf)
+- Fastest deployment
+
+### Mounted Config (Multi-Cluster)
+
+Mount custom configuration from `runtime/config/kubeadm.conf`:
+
+```bash
+CLUSTER_NAME=myapp ./tools/deploy.sh
+```
+
+- Config volume mounted to `/etc/kinc/config`
+- Supports multiple clusters with different names
+- Per-cluster network isolation
+
+---
+
+## Tools
+
+### `build.sh`
+Build the kinc container image.
+
+```bash
+./tools/build.sh
+
+# Force package updates
+CACHE_BUST=1 ./tools/build.sh
+```
+
+### `deploy.sh`
+Deploy a single kinc cluster using Quadlet (systemd integration).
+
+```bash
+# Baked-in config
+USE_BAKED_IN_CONFIG=true ./tools/deploy.sh
+
+# Mounted config with custom name
+CLUSTER_NAME=myapp ./tools/deploy.sh
+
+# Force specific port
+FORCE_PORT=6500 CLUSTER_NAME=special ./tools/deploy.sh
+```
+
+**Features:**
+- System prerequisites validation (IP forwarding, inotify limits)
+- Automatic sequential port allocation
+- Subnet derivation from port
+- Systemd-driven initialization waits
+- Multi-service architecture verification
+
+### `cleanup.sh`
+Remove a kinc cluster and clean up all resources.
+
+```bash
+CLUSTER_NAME=myapp ./tools/cleanup.sh
+```
+
+**What it does:**
+- Stops systemd services
+- Removes container
+- Removes volumes
+- Removes Quadlet files
+- Reloads systemd
+
+### `run-validation.sh`
+Run full validation suite (7 clusters):
+
+```bash
+./tools/run-validation.sh
+
+# Skip cleanup for manual inspection
+SKIP_CLEANUP=true ./tools/run-validation.sh
+```
+
+**Tests:**
+- T1: Baked-in config (deploy.sh)
+- T2: Mounted config - 5 concurrent clusters (deploy.sh)
+- T3: Direct podman run (baked-in config)
+- Multi-service architecture verification
+- Complete cleanup
+
+---
+
+## Advanced Usage
+
+### Direct Podman Run (No Quadlet)
+
+For environments without systemd or for quick testing:
+
+```bash
+# Create volume
+podman volume create kinc-var-data
+
+# Run cluster
+podman run -d --name kinc-cluster \
+  --hostname kinc-control-plane \
+  --cgroups=split \
+  --cap-add=SYS_ADMIN --cap-add=SYS_RESOURCE --cap-add=NET_ADMIN \
+  --cap-add=SETPCAP --cap-add=NET_RAW --cap-add=SYS_PTRACE \
+  --cap-add=DAC_OVERRIDE --cap-add=CHOWN --cap-add=FOWNER \
+  --cap-add=FSETID --cap-add=KILL --cap-add=SETGID --cap-add=SETUID \
+  --cap-add=NET_BIND_SERVICE --cap-add=SYS_CHROOT --cap-add=SETFCAP \
+  --cap-add=DAC_READ_SEARCH --cap-add=AUDIT_WRITE \
+  --device /dev/fuse \
+  --tmpfs /tmp:rw,rprivate,nosuid,nodev,tmpcopyup \
+  --tmpfs /run:rw,rprivate,nosuid,nodev,tmpcopyup \
+  --tmpfs /run/lock:rw,rprivate,nosuid,nodev,tmpcopyup \
+  --volume kinc-var-data:/var:rw \
+  --volume $HOME/.local/share/containers/storage:/root/.local/share/containers/storage:rw \
+  --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+  --sysctl net.ipv6.conf.all.keep_addr_on_down=1 \
+  --sysctl net.netfilter.nf_conntrack_tcp_timeout_established=86400 \
+  --sysctl net.netfilter.nf_conntrack_tcp_timeout_close_wait=3600 \
+  -p 127.0.0.1:6443:6443/tcp \
+  --env container=podman \
+  ghcr.io/t0masd/kinc:latest
+
+# Wait for cluster (~40 seconds)
+timeout 300 bash -c 'until podman exec kinc-cluster test -f /var/lib/kinc-initialized 2>/dev/null; do sleep 2; done'
+
+# Extract kubeconfig
+mkdir -p ~/.kube
+podman cp kinc-cluster:/etc/kubernetes/admin.conf ~/.kube/config
+sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
+
+# Verify
+kubectl get nodes
+```
+
+### Custom kubeadm Configuration
+
+Edit `runtime/config/kubeadm.conf` to customize:
+- Kubernetes version
+- Pod/Service subnets
+- API server arguments
+- Kubelet configuration
+- Feature gates
+
+Then deploy with mounted config:
+
+```bash
 CLUSTER_NAME=custom ./tools/deploy.sh
 ```
 
-**Benefits:**
-- Full customization of cluster configuration
-- Easy configuration updates without rebuilding
-- Per-cluster specific settings
-
-#### 2. Baked-in Configuration
-Zero-configuration deployment using embedded defaults:
-```bash
-# Deploy with baked-in configuration (no config volume)
-USE_BAKED_IN_CONFIG=true ./tools/deploy.sh
-USE_BAKED_IN_CONFIG=true CLUSTER_NAME=minimal ./tools/deploy.sh
-```
-
-**Benefits:**
-- Fastest deployment (no config volume creation)
-- Minimal resource footprint
-- Ideal for testing and development
-- No external dependencies
-
-#### Configuration Priority
-When both modes are available:
-1. **Mounted Config** (Priority) - `/etc/kinc/config/kubeadm.conf`
-2. **Baked-in Config** (Fallback) - `/etc/kinc/kubeadm.conf`
-
-The initialization system automatically:
-- Checks for mounted configuration first
-- Falls back to baked-in configuration if mount is absent
-- Validates configuration before cluster initialization
-- Logs configuration source for transparency
-
-### Quadlet Integration
-kinc uses Podman Quadlet for systemd integration:
-- **Volume Files**: `runtime/quadlet/*.volume` - Define persistent storage
-- **Container File**: `runtime/quadlet/kinc-control-plane.container` - Container specification
-- **Config Volume**: Runtime-mounted `kubeadm.conf` for cluster-specific configuration (optional in Phase 2)
-
-### Cluster Configuration
-Each cluster uses a dynamically generated or baked-in `kubeadm.conf`:
-- Cluster-specific naming and endpoints
-- Dynamic CIDR allocation
-- Container IP address templating
-- Rootless-optimized settings (cgroupfs driver, 127.0.0.1 endpoints)
-
-## Development Tools
-
-### Build System
-```bash
-# Build with custom cluster name
-CLUSTER_NAME=mytest ./tools/build.sh
-
-# Force package updates
-CACHE_BUST=2 ./tools/build.sh
-```
-
-### Monitoring
-```bash
-# Monitor cluster initialization (14 validation steps)
-CLUSTER_NAME=dev ./tools/monitor.sh
-
-# Watch cluster status
-podman exec kinc-dev-control-plane kubectl get pods -A --watch
-```
-
-### Testing
-```bash
-# Run comprehensive tests
-CLUSTER_NAME=dev ./tools/test.sh
-
-# Tests include: storage, networking, DNS, workload deployment
-```
-
-## Technical Details
-
-### Rootless Challenges Solved
-1. **OOM Score Adjustment**: crun wrapper removes problematic `oomScoreAdj` settings
-2. **Capability Management**: Dynamic capability stripping for helper containers
-3. **User Namespace Mapping**: Proper UID/GID handling in rootless environments
-4. **Cgroup Delegation**: Automated cgroup controller setup for systemd
-5. **Network Isolation**: CNI plugin optimized for rootless networking
-
-### Container Image Structure
-```
-/etc/kinc/
-├── scripts/           # Initialization and setup scripts
-├── patches/           # Kubernetes component patches
-├── kubeadm.conf      # Baked-in configuration (Phase 2)
-└── config/           # Runtime-mounted cluster configuration (optional)
-
-/kinc/manifests/      # Kubernetes manifests (CNI, storage, etc.)
-/var/lib/kubelet/     # Kubelet configuration
-```
-
-**Phase 2 Configuration System:**
-- Baked-in config at `/etc/kinc/kubeadm.conf` (embedded in image)
-- Mounted config at `/etc/kinc/config/kubeadm.conf` (runtime override)
-- Smart fallback: mounted → baked-in
-- Validation and logging at initialization
-
-### Service Dependencies
-```
-kinc-control-plane.service
-├── kinc-var-data-volume.service
-├── kinc-config-volume.service (optional in Phase 2)
-└── Container Runtime
-    ├── kinc-cgroup-setup.service
-    ├── crio.service
-    └── systemd (PID 1)
-```
-
-**Note:** In Phase 2, the config volume dependency is optional when using baked-in configuration mode.
-
-## Networking
-
-### CNI Plugin (kincnet)
-- Bridge-based networking with NAT
-- Automatic IP address management
-- DNS integration with CoreDNS
-- Support for NetworkPolicies
-
-### Port Management
-- API Server: Dynamic allocation starting from 6443
-- Service NodePorts: 30000-32767 (standard Kubernetes range)
-- Host Network: Isolated per cluster
-
-## Storage
-
-### Persistent Volumes
-- **Provisioner**: local-path-provisioner
-- **Storage Class**: `standard` (default)
-- **Backend**: Host filesystem via Podman volumes
-- **Access Modes**: ReadWriteOnce (RWO)
-
-### Volume Management
-- **Data Volume**: `/var` mount for kubelet, etcd, logs (required)
-- **Config Volume**: `/etc/kinc/config` for cluster configuration (optional in Phase 2)
-- **Container Storage**: Shared with host for image management
-
-**Phase 2 Enhancement:** Config volume can be omitted when using `USE_BAKED_IN_CONFIG=true`, reducing resource footprint and deployment time.
-
-## Security
-
-### Rootless Security Model
-- No root privileges required
-- User namespace isolation
-- Seccomp and AppArmor integration
-- Limited capability sets
-
-### Network Security
-- Isolated network namespaces per cluster
-- Configurable NetworkPolicies
-- No privileged network operations
+---
 
 ## Troubleshooting
 
-### Common Issues
-1. **IP Forwarding**: Ensure `net.ipv4.ip_forward=1`
-2. **Systemd Services**: Check `systemctl --user status kinc-*`
-3. **Container Logs**: Use `podman logs kinc-{cluster}-control-plane`
-4. **Resource Conflicts**: Verify unique ports with `podman ps`
+### Check Initialization Status
 
-### Debug Mode
 ```bash
-# Enable verbose logging
-export PODMAN_LOG_LEVEL=debug
+# View multi-service status
+podman exec kinc-default-control-plane systemctl status \
+  kinc-preflight.service \
+  kubeadm-init.service \
+  kinc-postinit.service
 
-# Check crun wrapper logs
-tail -f /tmp/crun-debug.log
-
-# Monitor systemd services
-journalctl --user -f -u kinc-*
+# Check initialization marker
+podman exec kinc-default-control-plane test -f /var/lib/kinc-initialized && echo "✅ Initialized" || echo "❌ Not initialized"
 ```
 
-## Contributing
+### View Logs
 
-kinc is designed for extensibility:
-- **CNI Plugins**: Add custom networking solutions
-- **Storage Providers**: Integrate additional storage backends  
-- **Monitoring**: Extend observability capabilities
-- **Multi-Architecture**: Support ARM64 and other platforms
+```bash
+# Preflight logs (config validation, CRI-O check)
+podman exec kinc-default-control-plane journalctl -u kinc-preflight.service
+
+# kubeadm init logs
+podman exec kinc-default-control-plane journalctl -u kubeadm-init.service
+
+# Postinit logs (CNI, storage, waits)
+podman exec kinc-default-control-plane journalctl -u kinc-postinit.service
+
+# CRI-O logs
+podman exec kinc-default-control-plane journalctl -u crio.service
+
+# Kubelet logs
+podman exec kinc-default-control-plane journalctl -u kubelet.service
+```
+
+### Common Issues
+
+**Port already in use:**
+```bash
+# Check what's using the port
+podman ps --filter "name=kinc" --format "table {{.Names}}\t{{.Ports}}"
+
+# Use a different cluster name or force a different port
+FORCE_PORT=6500 CLUSTER_NAME=myapp ./tools/deploy.sh
+```
+
+**IP forwarding disabled:**
+```bash
+# Check status
+cat /proc/sys/net/ipv4/ip_forward
+
+# Enable
+sudo sysctl -w net.ipv4.ip_forward=1
+```
+
+**Too many open files (multiple clusters):**
+```bash
+# Increase inotify limits
+sudo sysctl -w fs.inotify.max_user_watches=524288
+sudo sysctl -w fs.inotify.max_user_instances=512
+```
+
+---
+
+## System Requirements
+
+### Minimum
+- **CPU:** 2 cores
+- **RAM:** 2GB per cluster
+- **Disk:** 5GB per cluster
+- **Podman:** 4.0+
+- **Kernel:** 5.10+ (user namespaces, cgroups v2)
+
+### Recommended for Multiple Clusters
+- **CPU:** 4+ cores
+- **RAM:** 4GB+ (2GB per cluster)
+- **Inotify limits:** 524288 watches, 512 instances
+
+---
+
+## Components
+
+- **Kubernetes:** v1.33.5
+- **CRI-O:** v1.33.5
+- **kubeadm:** v1.33.5
+- **kubectl:** v1.33.5
+- **CNI:** kindnet (from Kubernetes KIND project)
+- **Storage:** local-path-provisioner
+- **Base:** Fedora 42
+
+---
+
+## Development
+
+### Build from Source
+
+```bash
+# Build image
+./tools/build.sh
+
+# Deploy for testing
+USE_BAKED_IN_CONFIG=true ./tools/deploy.sh
+
+# Run full validation suite
+./tools/run-validation.sh
+```
+
+### CI/CD
+
+kinc uses GitHub Actions:
+- **ci.yml:** Builds, deploys, and validates on every push
+- **release.yml:** Builds and publishes images on tags
+
+---
 
 ## License
 
@@ -335,4 +410,11 @@ THE SOFTWARE IS AI GENERATED AND PROVIDED “AS IS”, WITHOUT CLAIM OF COPYRIGH
 
 ---
 
-**kinc** - Kubernetes simplified, containerized, and democratized for rootless environments.
+## Credits
+
+- **KIND (Kubernetes IN Docker):** Inspiration and kindnet CNI
+- **kubeadm:** Cluster bootstrapping
+- **CRI-O:** Container runtime
+- **Podman:** Rootless containers
+- **systemd:** Service management
+
