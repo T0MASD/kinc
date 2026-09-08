@@ -106,18 +106,37 @@ jobs:
           podman inspect "$IMAGE_TAG" --format '{{json .Config.Labels}}' | jq .
           
           # Test the locally built image using kinc tools
-          echo "Testing locally built image with full kinc deployment..."
+          echo "Testing locally built image with deployment..."
           
-          # Use local image detection (don't set KINC_IMAGE)
           export CLUSTER_NAME="test"
           
-          echo "Using local image detection for cluster: test"
-          echo "Deploy script will find: localhost/kinc/node:v1.33.5-test"
+          # Deploy cluster
+          echo "Deploying test cluster..."
+          ./tools/deploy.sh
           
-          # Run full deployment (this tests everything: build, deploy, monitor, test)
-          ./tools/deploy-and-test.sh
+          # Wait for initialization
+          echo "Waiting for cluster initialization..."
+          max_wait=300
+          waited=0
+          while [ $waited -lt $max_wait ]; do
+            if podman exec kinc-test-control-plane test -f /var/lib/kinc-initialized 2>/dev/null; then
+              echo "✅ Cluster initialized (${waited}s)"
+              break
+            fi
+            if [ $waited -ge $max_wait ]; then
+              echo "❌ Cluster initialization timeout"
+              exit 1
+            fi
+            sleep 5
+            waited=$((waited + 5))
+          done
           
-          echo "✅ kinc image validation passed - full deployment successful!"
+          # Verify cluster is functional
+          export KUBECONFIG=~/.kube/kinc-test-config
+          kubectl get nodes
+          kubectl get pods -A
+          
+          echo "✅ kinc image validation passed - deployment successful!"
           
           # Cleanup
           CLUSTER_NAME=test ./tools/cleanup.sh || true

@@ -23,7 +23,7 @@ RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
       conntrack-tools nftables iptables-nft iproute ethtool util-linux kmod \
       libseccomp pigz fuse-overlayfs \
       nfs-utils iscsi-initiator-utils \
-      bash ca-certificates curl jq procps-ng which hostname \
+      bash ca-certificates curl jq yq procps-ng which hostname \
       cri-o1.33 crun \
       containernetworking-plugins \
       container-selinux \
@@ -80,8 +80,13 @@ COPY --chmod=0644 base/etc/cni/net.d/10-kindnet.conflist /etc/cni/net.d/10-kindn
 COPY --chmod=0755 base/usr/local/bin/crun-wrapper.sh /usr/local/bin/crun-wrapper.sh
 
 # Copy kinc-specific components
-COPY kinc/etc/systemd/system/kinc-init.service /etc/systemd/system/kinc-init.service
+# New: Multi-service architecture for better observability
+COPY kinc/etc/systemd/system/kinc-preflight.service /etc/systemd/system/kinc-preflight.service
+COPY kinc/etc/systemd/system/kubeadm-init.service /etc/systemd/system/kubeadm-init.service
+COPY kinc/etc/systemd/system/kinc-postinit.service /etc/systemd/system/kinc-postinit.service
 COPY kinc/etc/systemd/system/kinc-cgroup-setup.service /etc/systemd/system/kinc-cgroup-setup.service
+# Keep old kinc-init.service for backward compatibility (disabled by default)
+COPY kinc/etc/systemd/system/kinc-init.service /etc/systemd/system/kinc-init.service
 COPY --chmod=0755 kinc/etc/kinc/scripts/* /etc/kinc/scripts/
 COPY kinc/kinc/manifests/ /kinc/manifests/
 
@@ -105,10 +110,13 @@ RUN echo "Setting up crun wrapper for rootless operation ..." \
     && echo "crun wrapper installed"
 
 # Enable kinc services now that service files are copied
+# New: Multi-service architecture (preflight → kubeadm-init → postinit)
 RUN echo "Enabling kinc services ..." \
-    && systemctl enable kinc-init.service \
+    && systemctl enable kinc-preflight.service \
+    && systemctl enable kubeadm-init.service \
+    && systemctl enable kinc-postinit.service \
     && systemctl enable kinc-cgroup-setup.service \
-    && echo "kinc services enabled"
+    && echo "kinc services enabled (multi-service architecture)"
 
 # Set proper permissions for kinc manifests
 RUN chmod -R 755 /kinc/manifests/
@@ -124,7 +132,7 @@ RUN crio --version \
     && echo "CNI plugins installed via package:" \
     && ls -la /usr/libexec/cni/ \
     && echo "SystemD services enabled:" \
-    && systemctl list-unit-files | grep enabled | grep -E "(crio|kubelet|kinc-init|kinc-cgroup-setup)" \
+    && systemctl list-unit-files | grep enabled | grep -E "(crio|kubelet|kinc-preflight|kubeadm-init|kinc-postinit|kinc-cgroup-setup)" \
     && echo "Rootless configurations:" \
     && ls -la /etc/containers/storage.conf /etc/crio/crio.conf.d/04-rootless-storage.conf /etc/crio/crio.conf.d/05-rootless-cgroup.conf \
     && echo "✅ CRI-O container runtime configured with rootless support"
