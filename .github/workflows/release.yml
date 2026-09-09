@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build (e.g., v1.33.5)'
+        description: 'Tag to build (e.g., v1_33_5-0)'
         required: true
-        default: 'v1.33.5'
+        default: 'v1_33_5-0'
 
 permissions:
   contents: read
@@ -46,10 +46,16 @@ jobs:
           echo "Building tag: $TAG"
           echo "BUILD_TAG=$TAG" >> $GITHUB_ENV
           
-          # Extract Kubernetes version from tag (v1.33.5 -> 1.33.5)
-          K8S_VERSION=$(echo "$TAG" | sed 's/^v//')
+          # Parse tag format: v1_33_5-0
+          # Extract Kubernetes version (v1_33_5-0 -> 1.33.5)
+          K8S_VERSION=$(echo "$TAG" | sed 's/^v//' | cut -d'-' -f1 | tr '_' '.')
           echo "K8S_VERSION=$K8S_VERSION" >> $GITHUB_ENV
           echo "Kubernetes version: $K8S_VERSION"
+          
+          # Extract kinc patch version (v1_33_5-0 -> 0)
+          KINC_PATCH=$(echo "$TAG" | cut -d'-' -f2)
+          echo "KINC_PATCH=$KINC_PATCH" >> $GITHUB_ENV
+          echo "kinc patch version: $KINC_PATCH"
           
           # Convert repository name to lowercase for container registry
           REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
@@ -359,7 +365,7 @@ jobs:
           cat << EOF > release-notes.md
           # kinc ${{ env.BUILD_TAG }}
           
-          Container image for kinc Kubernetes ${{ env.K8S_VERSION }}
+          Kubernetes **${{ env.K8S_VERSION }}** • kinc patch **${{ env.KINC_PATCH }}**
           
           ## 📦 Container Image
           
@@ -423,9 +429,15 @@ jobs:
           # Set image name (repository in lowercase)
           IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           
+          # Parse tag to extract versions
+          K8S_VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//' | cut -d'-' -f1 | tr '_' '.')
+          KINC_PATCH=$(echo "${{ github.ref_name }}" | cut -d'-' -f2)
+          
           # Create release notes
           cat << EOF > release-notes.md
           # kinc ${{ github.ref_name }}
+          
+          Kubernetes **${K8S_VERSION}** • kinc patch **${KINC_PATCH}**
           
           🎉 **Container image available**: \`ghcr.io/${IMAGE_NAME}:${{ github.ref_name }}\`
           
@@ -452,14 +464,20 @@ jobs:
           EOF
           
           # Create release using gh CLI
-          if [[ "${{ github.ref_name }}" == *"-"* ]]; then
-            # Pre-release
+          # Extract patch version to determine if pre-release
+          PATCH_VERSION=$(echo "${{ github.ref_name }}" | cut -d'-' -f2)
+          
+          # If patch contains non-numeric characters (rc, beta, alpha, etc.), it's a pre-release
+          if [[ "$PATCH_VERSION" =~ [^0-9] ]]; then
+            # Pre-release (e.g., v1_33_5-rc0, v1_33_5-beta1)
+            echo "Creating pre-release for ${{ github.ref_name }}"
             gh release create "${{ github.ref_name }}" \
               --title "kinc ${{ github.ref_name }}" \
               --notes-file release-notes.md \
               --prerelease
           else
-            # Regular release
+            # Regular release (e.g., v1_33_5-0, v1_33_5-1)
+            echo "Creating stable release for ${{ github.ref_name }}"
             gh release create "${{ github.ref_name }}" \
               --title "kinc ${{ github.ref_name }}" \
               --notes-file release-notes.md
