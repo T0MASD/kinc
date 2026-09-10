@@ -215,7 +215,7 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=myapp ./tools/deploy.sh
 **Environment Variables:**
 - `CLUSTER_NAME`: Cluster identifier (default: `default`)
 - `FORCE_PORT`: Override auto port allocation
-- `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.33.5`)
+- `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.35.7`)
 - `KINC_SKIP_SYSCTL_CHECKS`: Bypass inotify/keyring checks (default: `false`)
 - `KINC_ENABLE_FARO`: Enable Faro event capture (default: `false`, CI: `true`)
 
@@ -467,13 +467,13 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=cluster02 ./tools/deploy.sh
 
 ## Components
 
-- **Kubernetes:** v1.33.5
-- **CRI-O:** v1.33.5
-- **kubeadm:** v1.33.5
-- **kubectl:** v1.33.5
+- **Kubernetes:** v1.35.7
+- **CRI-O:** v1.35.7
+- **kubeadm:** v1.35.7
+- **kubectl:** v1.35.7
 - **CNI:** kindnet (from Kubernetes KIND project)
 - **Storage:** local-path-provisioner
-- **Base:** Fedora 42
+- **Base:** Fedora 43
 
 ---
 
@@ -509,8 +509,8 @@ THE SOFTWARE IS AI GENERATED AND PROVIDED “AS IS”, WITHOUT CLAIM OF COPYRIGH
 ## Credits
 
 - **KIND (Kubernetes IN Docker):** Inspiration and kindnet CNI
-- **kubeadm:** Cluster bootstrapping
-- **CRI-O:** Container runtime
+- **kubeadm:** v1.35.7
+- **CRI-O:** v1.35.7
 - **Podman:** Rootless containers
 - **systemd:** Service management
 
