@@ -1,0 +1,238 @@
+---
+name: Bootstrap Event Matrix
+
+# Captures Faro bootstrap events from several published kinc releases in one
+# run, so the captures differ only by Kubernetes version.
+#
+# Every capture is a function of (kinc image, Faro version, runner). The kinc
+# images are immutable, the other two are not, so a comparison is only valid
+# when all three are held together. This job fixes Faro to one digest and puts
+# every version on one runner class in one run.
+#
+# Run it when cutting a release, to measure the new version alongside its
+# predecessors, or after a Faro change that affects capture, to re-derive the
+# whole set. It is deliberately manual: the inputs are immutable images, so
+# nothing invalidates a result on its own.
+on:
+  workflow_dispatch:
+    inputs:
+      kinc_tags:
+        description: 'Space-separated kinc tags to capture'
+        required: true
+        default: 'v1.34.2-1 v1.35.7-0 v1.36.4-0'
+      faro_image:
+        description: 'Faro operator image, pinned by digest'
+        required: true
+        default: 'ghcr.io/t0masd/faro-operator@sha256:1c136def13dfc9853367167c2beec7b8df736a8de3ce2471aa83418281f6cae8'
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Build matrix from tag list
+        id: build
+        run: |
+          TAGS="${{ github.event.inputs.kinc_tags }}"
+          JSON=$(printf '%s\n' $TAGS | jq -R . | jq -cs .)
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+          echo "Capturing: $TAGS"
+
+  capture:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up host for kinc
+        run: |
+          echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
+          echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches > /dev/null
+          echo 2048 | sudo tee /proc/sys/fs/inotify/max_user_instances > /dev/null
+          echo 1000 | sudo tee /proc/sys/kernel/keys/maxkeys > /dev/null
+          echo 25000 | sudo tee /proc/sys/kernel/keys/maxbytes > /dev/null
+          podman --version
+
+      - name: Pull kinc image
+        run: podman pull "ghcr.io/t0masd/kinc:${{ matrix.tag }}"
+
+      - name: Check the image carries Faro plumbing
+        run: |
+          IMG="ghcr.io/t0masd/kinc:${{ matrix.tag }}"
+          if ! podman run --rm --entrypoint /bin/sh "$IMG" \
+               -c 'test -f /etc/kinc/faro/faro-bootstrap.yaml'; then
+            echo "::error::${{ matrix.tag }} has no Faro static pod manifest."
+            echo "Releases before Faro integration cannot be captured this way."
+            exit 1
+          fi
+
+      - name: Stage the Faro config and a digest-pinned manifest
+        run: |
+          IMG="ghcr.io/t0masd/kinc:${{ matrix.tag }}"
+          mkdir -p override/faro
+
+          # Same config for every version, so coverage does not vary. Taken
+          # from the repo rather than the image, since older images bake a
+          # config whose cluster_resources key Faro's schema does not define.
+          cp build/kinc/etc/faro/config.yaml override/faro/config.yaml
+
+          # Take each image's own manifest, so per-version differences survive,
+          # and pin only the Faro image. Left at a floating tag, preflight would
+          # pull whatever Faro is current and the runs would stop being
+          # comparable.
+          podman run --rm --entrypoint /bin/cat "$IMG" \
+            /etc/kinc/faro/faro-bootstrap.yaml > override/faro-bootstrap.yaml
+          sed -i "s|image: ghcr.io/t0masd/faro-operator:.*|image: ${{ github.event.inputs.faro_image }}|" \
+            override/faro-bootstrap.yaml
+          grep -n 'image:' override/faro-bootstrap.yaml
+
+      - name: Warm the image store
+        run: |
+          IMG="ghcr.io/t0masd/kinc:${{ matrix.tag }}"
+          K8S=$(podman run --rm --entrypoint /usr/bin/kubeadm "$IMG" version -o short)
+          echo "Kubernetes $K8S"
+          echo "K8S_VERSION=$K8S" >> "$GITHUB_ENV"
+
+          # CRI-O inside the cluster uses this host store through a bind mount,
+          # so warming it here is what keeps kubeadm init inside its
+          # wait-control-plane timeout.
+          podman pull "${{ github.event.inputs.faro_image }}"
+          for i in $(podman run --rm --entrypoint /usr/bin/kubeadm "$IMG" \
+                       config images list --kubernetes-version "$K8S"); do
+            echo "pulling $i"
+            podman pull -q "$i" > /dev/null
+          done
+
+      - name: Deploy and capture
+        run: |
+          IMG="ghcr.io/t0masd/kinc:${{ matrix.tag }}"
+          podman volume create kinc-matrix-var > /dev/null
+
+          START=$(date +%s)
+          podman run -d --name kinc-matrix --hostname kinc-control-plane \
+            --cgroups=split \
+            --cap-add=SYS_ADMIN --cap-add=SYS_RESOURCE --cap-add=NET_ADMIN \
+            --cap-add=SETPCAP --cap-add=NET_RAW --cap-add=SYS_PTRACE \
+            --cap-add=DAC_OVERRIDE --cap-add=CHOWN --cap-add=FOWNER \
+            --cap-add=FSETID --cap-add=KILL --cap-add=SETGID --cap-add=SETUID \
+            --cap-add=NET_BIND_SERVICE --cap-add=SYS_CHROOT --cap-add=SETFCAP \
+            --cap-add=DAC_READ_SEARCH --cap-add=AUDIT_WRITE \
+            --device /dev/fuse \
+            --tmpfs /tmp:rw,rprivate,nosuid,nodev,tmpcopyup \
+            --tmpfs /run:rw,rprivate,nosuid,nodev,tmpcopyup \
+            --tmpfs /run/lock:rw,rprivate,nosuid,nodev,tmpcopyup \
+            --volume kinc-matrix-var:/var:rw \
+            --volume "$HOME/.local/share/containers/storage:/root/.local/share/containers/storage:rw" \
+            --volume "$PWD/override/faro:/etc/faro:ro" \
+            --volume "$PWD/override/faro-bootstrap.yaml:/etc/kinc/faro/faro-bootstrap.yaml:ro" \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv6.conf.all.keep_addr_on_down=1 \
+            --sysctl net.netfilter.nf_conntrack_tcp_timeout_established=86400 \
+            --sysctl net.netfilter.nf_conntrack_tcp_timeout_close_wait=3600 \
+            -p 127.0.0.1:6443:6443/tcp \
+            --env container=podman --env KINC_ENABLE_FARO=true \
+            "$IMG"
+
+          timeout 600 bash -c \
+            'until podman exec kinc-matrix test -f /var/lib/kinc-initialized 2>/dev/null; do sleep 2; done'
+          INIT=$(( $(date +%s) - START ))
+          echo "Initialized in ${INIT}s"
+          echo "INIT_SECONDS=$INIT" >> "$GITHUB_ENV"
+
+      - name: Collect events
+        run: |
+          FARO_PATH="$HOME/.local/share/containers/storage/volumes/kinc-matrix-var/_data/lib/kinc/faro-events/logs"
+          mkdir -p artifacts
+          cp "$FARO_PATH"/*.json artifacts/ 2>/dev/null || true
+          cp "$FARO_PATH"/*.log artifacts/ 2>/dev/null || true
+
+          EVENTS=$(cat artifacts/events-*.json 2>/dev/null | wc -l)
+          GVRS=$(cat artifacts/events-*.json 2>/dev/null | jq -r '.gvr' | sort -u | wc -l)
+          NS=$(cat artifacts/events-*.json 2>/dev/null | jq -r '.namespace // "(cluster-scoped)"' | sort -u | wc -l)
+          DROPS=$(cat artifacts/*.log 2>/dev/null | grep -c 'No lister found for key' || true)
+          DROPS=${DROPS:-0}
+
+          # A capture that dropped events understates every count in it, so
+          # record the number rather than reading the totals as complete.
+          cat > artifacts/summary.json <<EOF
+          {"tag": "${{ matrix.tag }}", "k8s": "${K8S_VERSION}", "init_seconds": ${INIT_SECONDS},
+           "events": ${EVENTS}, "resource_types": ${GVRS}, "namespaces": ${NS}, "dropped": ${DROPS}}
+          EOF
+          cat artifacts/summary.json
+
+          echo "### ${{ matrix.tag }} (Kubernetes ${K8S_VERSION})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| metric | value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| events | ${EVENTS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| resource types | ${GVRS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| namespaces | ${NS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| dropped events | ${DROPS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| init seconds | ${INIT_SECONDS} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-matrix-${{ matrix.tag }}
+          path: artifacts/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Tear down
+        if: always()
+        run: |
+          podman rm -f kinc-matrix || true
+          podman volume rm kinc-matrix-var || true
+
+  compare:
+    needs: capture
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download every capture
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bootstrap-matrix-*
+          path: captures
+
+      - name: Build comparison
+        run: |
+          echo "## Bootstrap comparison" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Faro pinned to \`${{ github.event.inputs.faro_image }}\`, one runner class, one run." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| tag | k8s | events | types | namespaces | dropped | init |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          SUMMARIES=$(find captures -name summary.json 2>/dev/null | sort)
+          if [ -n "$SUMMARIES" ]; then
+            # shellcheck disable=SC2086
+            jq -rs 'sort_by(.k8s)[] | "| \(.tag) | \(.k8s) | \(.events) | \(.resource_types) | \(.namespaces) | \(.dropped) | \(.init_seconds)s |"' \
+              $SUMMARIES >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| no captures completed | | | | | | |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Events by resource type" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          for d in captures/*/; do
+            tag=$(jq -r .tag "$d/summary.json" 2>/dev/null) || continue
+            echo "<details><summary>$tag</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat "$d"/events-*.json 2>/dev/null | jq -r '.gvr' | sort | uniq -c | sort -rn >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          done
