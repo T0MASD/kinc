@@ -86,7 +86,34 @@ else
   echo "✅ Kernel keyring limits sufficient"
 fi
 
-# Check 4: Failed services (warn only)
+# Check 4: Mandatory access control
+# The two systems need different things. SELinux labels the config volume, and
+# the container mounts it with :Z, so the labels have to be restored after the
+# file is written. AppArmor does no labelling, and instead governs whether
+# unprivileged user namespaces are available, which rootless Podman needs to
+# create the cluster container at all. Record which is active so the volume
+# step and the CI logs name it.
+KINC_MAC="none"
+if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" != "Disabled" ]; then
+  KINC_MAC="selinux"
+  echo "✅ SELinux active ($(getenforce 2>/dev/null))"
+elif [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = "Y" ]; then
+  KINC_MAC="apparmor"
+  userns_restricted=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo "0")
+  if [ "$userns_restricted" = "1" ]; then
+    echo "⚠️  AppArmor restricts unprivileged user namespaces"
+    echo "   Rootless Podman uses them to create the cluster container"
+    echo "   To fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+    echo "   Podman reports its own error below if it cannot proceed"
+  else
+    echo "✅ AppArmor active, unprivileged user namespaces available"
+  fi
+else
+  echo "✅ Kernel MAC: none active"
+fi
+export KINC_MAC
+
+# Check 5: Failed services (warn only)
 failed=$(systemctl --user list-units --state=failed --no-pager --no-legend 2>/dev/null | wc -l)
 if [ $failed -gt 0 ]; then
   echo "⚠️  Found $failed failed user service(s) - may indicate previous cluster issues"
@@ -254,13 +281,15 @@ else
     # Copy the file into the volume path (rootless Podman volume is user-owned)
     cp /tmp/kubeadm-${CLUSTER_NAME}.conf "$VOLUME_PATH/kubeadm.conf"
 
-    # 🌟 SELINUX FIX: Restore SELinux context on the volume data.
-    # For rootless Podman, user can restore context on their own files.
-    echo "🔧 Restoring SELinux context on config volume path..."
-    if command -v restorecon >/dev/null 2>&1 && command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; then
+    # The container mounts this volume with :Z, so under SELinux the file just
+    # written needs its context restored. Rootless Podman keeps the volume in
+    # the user's own tree, so the user can relabel it without privilege.
+    # AppArmor labels nothing, so there is nothing here for it to do.
+    if [ "${KINC_MAC:-none}" = "selinux" ] && command -v restorecon >/dev/null 2>&1; then
+        echo "🔧 Restoring SELinux context on config volume path..."
         restorecon -R -v "$VOLUME_PATH"
     else
-        echo "⚠️  SELinux not enabled or restorecon/getenforce not available; skipping context restore."
+        echo "🔧 Config volume written (kernel MAC: ${KINC_MAC:-none})"
     fi
 
     rm -f /tmp/kubeadm-${CLUSTER_NAME}.conf
