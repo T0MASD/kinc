@@ -213,19 +213,31 @@ fi
 
 # Step 4: Ensure image is available
 echo
-echo "🔧 Step 4: Ensuring local image is available"
-echo "🏗️ Using local build image: $IMAGE_NAME"
-# Check if local image exists using podman image exists (more reliable than grep)
-if ! podman image exists "$IMAGE_NAME"; then
-    echo "❌ Local image not found: $IMAGE_NAME"
-    echo ""
-    echo "Available kinc images:"
-    podman images | grep -E "kinc|REPOSITORY" || echo "  No kinc images found"
-    echo ""
-    echo "Please run: CLUSTER_NAME=${CLUSTER_NAME} ./tools/build.sh"
-    exit 1
+echo "🔧 Step 4: Ensuring image is available"
+echo "🏗️ Using image: $IMAGE_NAME"
+
+# Check if image is remote (contains registry like ghcr.io, docker.io, quay.io, etc.)
+if [[ "$IMAGE_NAME" == ghcr.io/* ]] || [[ "$IMAGE_NAME" == docker.io/* ]] || [[ "$IMAGE_NAME" == quay.io/* ]]; then
+    # Remote image - pull if not exists locally
+    if ! podman image exists "$IMAGE_NAME"; then
+        echo "📥 Pulling remote image..."
+        podman pull "$IMAGE_NAME"
+    else
+        echo "✅ Image already cached locally"
+    fi
+else
+    # Local image - must exist
+    if ! podman image exists "$IMAGE_NAME"; then
+        echo "❌ Local image not found: $IMAGE_NAME"
+        echo ""
+        echo "Available kinc images:"
+        podman images | grep -E "kinc|REPOSITORY" || echo "  No kinc images found"
+        echo ""
+        echo "Please run: CLUSTER_NAME=${CLUSTER_NAME} ./tools/build.sh"
+        exit 1
+    fi
+    echo "✅ Local image found"
 fi
-echo "✅ Local image found"
 
 # Step 5: Update container file with cluster-specific settings
 echo
