@@ -490,26 +490,45 @@ jobs:
           
           🎉 **Container image available**: \`ghcr.io/${IMAGE_NAME}:${{ github.ref_name }}\`
           
-          ## Quick Start
+          ## Quick Start (Recommended)
           
-          ### Standard Deployment (Mounted Configuration)
+          **Zero-Config Deployment** - Start a Kubernetes cluster in 3 commands:
+          
           \`\`\`bash
-          # Recommended: Use kinc tools for proper rootless setup
-          export KINC_IMAGE=ghcr.io/${IMAGE_NAME}:${{ github.ref_name }}
+          # 1. Clone and setup
           git clone https://github.com/t0masd/kinc.git && cd kinc
-          ./tools/deploy.sh
-          \`\`\`
+          echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
           
-          ### Zero-Config Deployment (Baked-in Configuration)
-          \`\`\`bash
-          # Fastest deployment - uses embedded configuration
+          # 2. Deploy cluster (waits until fully ready)
           export KINC_IMAGE=ghcr.io/${IMAGE_NAME}:${{ github.ref_name }}
           export USE_BAKED_IN_CONFIG=true
-          git clone https://github.com/t0masd/kinc.git && cd kinc
+          ./tools/deploy.sh
+          
+          # 3. Extract kubeconfig and use cluster
+          mkdir -p ~/.kube
+          podman cp kinc-default-control-plane:/etc/kubernetes/admin.conf ~/.kube/config
+          sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
+          kubectl get nodes
+          \`\`\`
+          
+          **First run**: 2-5 minutes (downloads container images)  
+          **Subsequent runs**: ~40 seconds (cached images)
+          
+          ---
+          
+          ## Advanced: Custom Configuration
+          
+          To deploy with custom \`kubeadm.conf\`:
+          
+          \`\`\`bash
+          export KINC_IMAGE=ghcr.io/${IMAGE_NAME}:${{ github.ref_name }}
+          # Place your kubeadm.conf in ~/.local/share/kinc/volumes/kinc-default-config/
           ./tools/deploy.sh
           \`\`\`
           
-          See the [usage examples](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for more details.
+          ---
+          
+          See the [workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for detailed usage examples.
           EOF
           
           # Create release using gh CLI
