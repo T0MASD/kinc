@@ -165,7 +165,7 @@ sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-co
 
 echo "✅ Quadlet files installed"
 
-# Step 3: Prepare cluster configuration volume 
+# Step 3: Prepare cluster configuration volume 
 echo
 if [[ "${USE_BAKED_IN_CONFIG:-}" == "true" ]]; then
     echo "🔧 Step 3: Using baked-in configuration (skipping volume)"
@@ -205,11 +205,25 @@ else
         -e "s|serviceSubnet: 10\.96\.0\.0/16|serviceSubnet: ${CLUSTER_SERVICE_SUBNET}|g" \
         runtime/config/kubeadm.conf > /tmp/kubeadm-${CLUSTER_NAME}.conf
 
+    # 1. Copy the file into the volume path (using root privileges temporarily)
     sudo cp /tmp/kubeadm-${CLUSTER_NAME}.conf "$VOLUME_PATH/kubeadm.conf"
+    
+    # 2. Reset the file ownership back to the current user
     sudo chown $(id -u):$(id -g) "$VOLUME_PATH/kubeadm.conf"
+
+    # 🌟 SELINUX FIX ADDED: Corrects the label on the volume data.
+    # This must run AFTER the copy/chown to ensure the file has the container context.
+    echo "🔧 Restoring SELinux context on config volume path..."
+    if command -v restorecon >/dev/null 2>&1 && command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" != "Disabled" ]; then
+        sudo restorecon -R -v "$VOLUME_PATH"
+    else
+        echo "⚠️  SELinux not enabled or restorecon/getenforce not available; skipping context restore."
+    fi
+
     rm -f /tmp/kubeadm-${CLUSTER_NAME}.conf
     echo "✅ Cluster configuration volume prepared"
 fi
+
 
 # Step 4: Ensure image is available
 echo

@@ -9,6 +9,9 @@ Image=localhost/kinc/node:v1.33.5
 ContainerName=kinc-control-plane
 HostName=kinc-control-plane
 
+SecurityLabelType=container_runtime_t
+
+
 # Security and privileges (rootless configuration)
 PodmanArgs=--cap-add=SYS_ADMIN --cap-add=SYS_RESOURCE --cap-add=NET_ADMIN --cap-add=SETPCAP --cap-add=NET_RAW --cap-add=SYS_PTRACE --cap-add=DAC_OVERRIDE --cap-add=CHOWN --cap-add=FOWNER --cap-add=FSETID --cap-add=KILL --cap-add=SETGID --cap-add=SETUID --cap-add=NET_BIND_SERVICE --cap-add=SYS_CHROOT --cap-add=SETFCAP --cap-add=DAC_READ_SEARCH --cap-add=AUDIT_WRITE --device /dev/fuse --sysctl net.ipv6.conf.all.disable_ipv6=0 --sysctl net.ipv6.conf.all.keep_addr_on_down=1 --sysctl net.netfilter.nf_conntrack_tcp_timeout_established=86400 --sysctl net.netfilter.nf_conntrack_tcp_timeout_close_wait=3600
 
@@ -18,10 +21,10 @@ Tmpfs=/run:rw,rprivate,nosuid,nodev,tmpcopyup
 Tmpfs=/run/lock:rw,rprivate,nosuid,nodev,tmpcopyup
 
 # Volume mounts (rootless configuration)
-Volume=kinc-var-data:/var
-Volume=kinc-config:/etc/kinc/config:ro
+Volume=kinc-var-data:/var:Z
+Volume=kinc-config:/etc/kinc/config:ro,Z
 # Share host container storage to cache images across all clusters
-Volume=%h/.local/share/containers/storage:/root/.local/share/containers/storage:rw
+Volume=%h/.local/share/containers/storage:/root/.local/share/containers/storage:rw,Z
 
 # Network configuration
 # Port must be sequential (6443, 6444, 6445...) because subnet IDs are derived from last 2 digits
