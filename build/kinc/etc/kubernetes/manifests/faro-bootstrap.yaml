@@ -1,0 +1,98 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: faro-bootstrap
+  namespace: kube-system
+  labels:
+    component: faro-bootstrap
+    tier: observability
+    app.kubernetes.io/name: faro-bootstrap
+    app.kubernetes.io/part-of: kinc
+spec:
+  # Use host network to start before CNI is available
+  hostNetwork: true
+  
+  # High priority to ensure it starts early
+  priorityClassName: system-node-critical
+  
+  containers:
+  - name: faro
+    image: ghcr.io/t0masd/faro-operator:latest
+    imagePullPolicy: IfNotPresent
+    
+    # Wait for API server before starting Faro
+    # Two-stage check: TCP port availability (fast) + HTTP healthz (verification)
+    # Experiment proved both stages are necessary - TCP-only results in "unknown API groups" errors
+    command:
+    - /bin/sh
+    - -c
+    - |
+      echo "Waiting for API server port 6443..."
+      # Stage 1: Wait for TCP port to be open (nc exits immediately when port is available)
+      while ! nc -z 127.0.0.1 6443 2>/dev/null; do 
+        sleep 0.1
+      done
+      echo "Port 6443 open, verifying API server health..."
+      
+      # Stage 2: Wait for /healthz endpoint to return "ok" (usually ready within 1-2s after port opens)
+      # This ensures API discovery is ready and prevents "unknown API groups" errors
+      until wget -qO- https://127.0.0.1:6443/healthz --no-check-certificate --timeout=2 2>/dev/null | grep -q "ok"; do 
+        sleep 0.2
+      done
+      
+      echo "API server ready, starting Faro..."
+      exec /usr/local/bin/faro-operator --config=/etc/faro/config.yaml --log-level=info --output-dir=/var/faro/events
+    
+    ports:
+    - name: metrics
+      containerPort: 8080
+      protocol: TCP
+    
+    volumeMounts:
+    # Kubeconfig for API server access
+    - name: kubeconfig
+      mountPath: /etc/kubernetes/admin.conf
+      readOnly: true
+    
+    # Faro configuration
+    - name: faro-config
+      mountPath: /etc/faro
+      readOnly: true
+    
+    # Event storage (in-container for POC)
+    - name: faro-events
+      mountPath: /var/faro/events
+    
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    
+    # Use kubeconfig from admin.conf
+    env:
+    - name: KUBECONFIG
+      value: /etc/kubernetes/admin.conf
+  
+  volumes:
+  # Kubeconfig from host
+  - name: kubeconfig
+    hostPath:
+      path: /etc/kubernetes/admin.conf
+      type: File
+  
+  # Faro configuration from host
+  - name: faro-config
+    hostPath:
+      path: /etc/faro
+      type: Directory
+  
+  # Event storage (hostPath so we can extract files from host)
+  - name: faro-events
+    hostPath:
+      path: /var/lib/kinc/faro-events
+      type: DirectoryOrCreate
+

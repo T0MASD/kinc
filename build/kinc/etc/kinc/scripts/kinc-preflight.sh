@@ -135,6 +135,46 @@ else
     exit 1
 fi
 
+# Conditional Faro deployment based on environment variable
+if [[ "${KINC_ENABLE_FARO:-false}" == "true" ]]; then
+    log "🔍 KINC_ENABLE_FARO=true detected, deploying Faro bootstrap observer..."
+    
+    if [[ -f "/etc/kinc/faro/faro-bootstrap.yaml" ]]; then
+        # Extract Faro image name from manifest using yq (proper YAML parsing)
+        FARO_IMAGE=$(yq eval '.spec.containers[0].image' /etc/kinc/faro/faro-bootstrap.yaml)
+        
+        if [[ -n "$FARO_IMAGE" && "$FARO_IMAGE" != "null" ]]; then
+            log "📥 Pre-pulling Faro operator image: $FARO_IMAGE"
+            log "   (This eliminates ~20s delay when static pod starts)"
+            
+            if crictl --runtime-endpoint unix:///var/run/crio/crio.sock pull "$FARO_IMAGE" 2>&1 | while IFS= read -r line; do log "   $line"; done; then
+                log "✅ Faro image pulled successfully"
+            else
+                log "⚠️  Failed to pre-pull Faro image, will be pulled on-demand"
+            fi
+        else
+            log "⚠️  Could not extract Faro image name from manifest"
+        fi
+        
+        # Deploy manifest
+        cp /etc/kinc/faro/faro-bootstrap.yaml /etc/kubernetes/manifests/faro-bootstrap.yaml
+        log "✅ Faro static pod manifest deployed to /etc/kubernetes/manifests/"
+        log "📊 Faro will start capturing events as soon as API server is ready"
+    else
+        log "⚠️  Faro manifest not found at /etc/kinc/faro/faro-bootstrap.yaml"
+        log "⚠️  Continuing without Faro event capture"
+    fi
+else
+    log "🔕 KINC_ENABLE_FARO not set, skipping Faro deployment"
+    log "💡 To enable event capture, set KINC_ENABLE_FARO=true"
+    
+    # Clean up any existing Faro manifest (in case it was left from previous run)
+    if [[ -f "/etc/kubernetes/manifests/faro-bootstrap.yaml" ]]; then
+        rm -f /etc/kubernetes/manifests/faro-bootstrap.yaml
+        log "🧹 Removed existing Faro manifest"
+    fi
+fi
+
 log "=== kinc Preflight Checks Complete ==="
 log "✅ Ready for kubeadm initialization"
 
