@@ -1,0 +1,79 @@
+# Faro Bootstrap Configuration for kinc
+# POC: Capture all cluster events from earliest possible moment
+
+# Output directory for event logs
+output_dir: "/var/faro/events"
+
+# Logging level (info provides good balance)
+log_level: "info"
+
+# Auto-shutdown: 0 = run indefinitely (POC requirement)
+auto_shutdown_sec: 0
+
+# Enable JSON export for structured analysis
+json_export: true
+
+# Prometheus metrics configuration
+metrics:
+  enabled: true
+  port: 8080
+  path: "/metrics"
+  bind_addr: "0.0.0.0"
+
+# Monitor everything - comprehensive event capture
+namespaces:
+  # kube-system: Core Kubernetes components
+  - name_selector: "kube-system"
+    resources:
+      # Core workloads
+      "v1/pods": {}
+      "v1/services": {}
+      "v1/endpoints": {}
+      "v1/events": {}
+      
+      # Configuration
+      "v1/configmaps": {}
+      "v1/serviceaccounts": {}
+      
+      # Storage
+      "v1/persistentvolumeclaims": {}
+      
+      # Workload controllers
+      "apps/v1/daemonsets": {}
+      "apps/v1/deployments": {}
+      "apps/v1/replicasets": {}
+      "apps/v1/statefulsets": {}
+      
+      # RBAC
+      "rbac.authorization.k8s.io/v1/roles": {}
+      "rbac.authorization.k8s.io/v1/rolebindings": {}
+  
+  # All other namespaces (default, user workloads, etc.)
+  - name_selector: "*"
+    resources:
+      "v1/pods": {}
+      "v1/services": {}
+      "v1/events": {}
+      "apps/v1/deployments": {}
+      "apps/v1/daemonsets": {}
+      "batch/v1/jobs": {}
+
+# Cluster-wide resources (no namespace)
+cluster_resources:
+  # Nodes
+  "v1/nodes": {}
+  
+  # Storage
+  "storage.k8s.io/v1/storageclasses": {}
+  "v1/persistentvolumes": {}
+  
+  # RBAC
+  "rbac.authorization.k8s.io/v1/clusterroles": {}
+  "rbac.authorization.k8s.io/v1/clusterrolebindings": {}
+  
+  # Networking
+  "networking.k8s.io/v1/ingressclasses": {}
+  
+  # API extensions
+  "apiextensions.k8s.io/v1/customresourcedefinitions": {}
+

@@ -96,6 +96,13 @@ COPY kinc/kinc/manifests/ /kinc/manifests/
 RUN mkdir -p /etc/kinc/config
 COPY --chmod=0644 kinc/etc/kinc/kubeadm.conf /etc/kinc/kubeadm.conf
 
+# Faro bootstrap integration - static pod for earliest event capture
+# Faro will start as soon as API server is available (before CNI)
+# Controlled by KINC_ENABLE_FARO environment variable (deployed by kinc-preflight)
+RUN mkdir -p /etc/faro /etc/kinc/faro
+COPY --chmod=0644 kinc/etc/kubernetes/manifests/faro-bootstrap.yaml /etc/kinc/faro/faro-bootstrap.yaml
+COPY --chmod=0644 kinc/etc/faro/config.yaml /etc/faro/config.yaml
+
 # Copy rootless kubelet configuration
 COPY --chmod=0644 base/var/lib/kubelet/config-rootless.yaml /var/lib/kubelet/config-rootless.yaml
 

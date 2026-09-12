@@ -34,13 +34,26 @@ jobs:
           
           # Inotify limits
           echo "━━━ Check 2: Inotify Limits ━━━"
-          echo "  max_user_watches:   $(cat /proc/sys/fs/inotify/max_user_watches)"
-          echo "  max_user_instances: $(cat /proc/sys/fs/inotify/max_user_instances)"
-          echo "✅ Inotify limits: checked"
+          echo "  Current max_user_watches:   $(cat /proc/sys/fs/inotify/max_user_watches)"
+          echo "  Current max_user_instances: $(cat /proc/sys/fs/inotify/max_user_instances)"
+          echo "Setting inotify limits for multi-cluster testing..."
+          echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches > /dev/null
+          echo 2048 | sudo tee /proc/sys/fs/inotify/max_user_instances > /dev/null
+          echo "✅ Inotify limits: configured (watches=524288, instances=2048)"
+          echo ""
+          
+          # Kernel keyring limits
+          echo "━━━ Check 3: Kernel Keyring Limits ━━━"
+          echo "  Current maxkeys:   $(cat /proc/sys/kernel/keys/maxkeys 2>/dev/null || echo 'N/A')"
+          echo "  Current maxbytes:  $(cat /proc/sys/kernel/keys/maxbytes 2>/dev/null || echo 'N/A')"
+          echo "Setting kernel keyring limits for multi-cluster testing..."
+          echo 1000 | sudo tee /proc/sys/kernel/keys/maxkeys > /dev/null
+          echo 25000 | sudo tee /proc/sys/kernel/keys/maxbytes > /dev/null
+          echo "✅ Kernel keyring limits: configured (maxkeys=1000, maxbytes=25000)"
           echo ""
           
           # Failed services
-          echo "━━━ Check 3: System Health ━━━"
+          echo "━━━ Check 4: System Health ━━━"
           failed=$(systemctl --user list-units --state=failed --no-pager --no-legend 2>/dev/null | wc -l)
           if [ $failed -gt 0 ]; then
             echo "⚠️  Found $failed failed services"
@@ -51,7 +64,7 @@ jobs:
           echo ""
           
           # Podman
-          echo "━━━ Check 4: Podman ━━━"
+          echo "━━━ Check 5: Podman ━━━"
           echo "✅ Podman: $(podman --version)"
           echo ""
           
@@ -71,6 +84,7 @@ jobs:
           
           export CLUSTER_NAME=default
           export USE_BAKED_IN_CONFIG=true
+          export KINC_ENABLE_FARO=true
           
           # Deploy using systemd-driven approach
           ./tools/deploy.sh
@@ -329,6 +343,44 @@ jobs:
           path: artifacts/
           retention-days: 30
 
+      - name: Extract Faro events
+        if: always()
+        run: |
+          echo "=== Extracting Faro Events ==="
+          
+          # Extract directly from data volume (no podman exec needed)
+          FARO_PATH="$HOME/.local/share/containers/storage/volumes/kinc-default-var-data/_data/lib/kinc/faro-events/logs"
+          
+          if [ -d "$FARO_PATH" ] && [ -n "$(ls -A $FARO_PATH/*.json 2>/dev/null)" ]; then
+            echo "✅ Faro events found in data volume"
+            
+            mkdir -p artifacts/faro
+            
+            # Copy events from volume
+            cp $FARO_PATH/*.json artifacts/faro/ 2>/dev/null || true
+            cp $FARO_PATH/*.log artifacts/faro/ 2>/dev/null || true
+            
+            # Count events
+            EVENT_COUNT=$(cat artifacts/faro/*.json 2>/dev/null | wc -l)
+            echo "✅ Captured $EVENT_COUNT events"
+            
+            # Show summary
+            echo ""
+            echo "Event Summary:"
+            cat artifacts/faro/*.json | jq -r '.gvr' | sort | uniq -c | sort -rn | head -10
+          else
+            echo "⚠️  Faro events not found - skipping extraction"
+          fi
+        shell: bash
+
+      - name: Upload Faro events
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: faro-events-baked-in-${{ github.run_number }}
+          path: artifacts/faro/
+          retention-days: 30
+
       - name: Cleanup
         if: always()
         run: |
@@ -361,13 +413,26 @@ jobs:
           
           # Inotify limits
           echo "━━━ Check 2: Inotify Limits ━━━"
-          echo "  max_user_watches:   $(cat /proc/sys/fs/inotify/max_user_watches)"
-          echo "  max_user_instances: $(cat /proc/sys/fs/inotify/max_user_instances)"
-          echo "✅ Inotify limits: checked"
+          echo "  Current max_user_watches:   $(cat /proc/sys/fs/inotify/max_user_watches)"
+          echo "  Current max_user_instances: $(cat /proc/sys/fs/inotify/max_user_instances)"
+          echo "Setting inotify limits for multi-cluster testing..."
+          echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches > /dev/null
+          echo 2048 | sudo tee /proc/sys/fs/inotify/max_user_instances > /dev/null
+          echo "✅ Inotify limits: configured (watches=524288, instances=2048)"
+          echo ""
+          
+          # Kernel keyring limits
+          echo "━━━ Check 3: Kernel Keyring Limits ━━━"
+          echo "  Current maxkeys:   $(cat /proc/sys/kernel/keys/maxkeys 2>/dev/null || echo 'N/A')"
+          echo "  Current maxbytes:  $(cat /proc/sys/kernel/keys/maxbytes 2>/dev/null || echo 'N/A')"
+          echo "Setting kernel keyring limits for multi-cluster testing..."
+          echo 1000 | sudo tee /proc/sys/kernel/keys/maxkeys > /dev/null
+          echo 25000 | sudo tee /proc/sys/kernel/keys/maxbytes > /dev/null
+          echo "✅ Kernel keyring limits: configured (maxkeys=1000, maxbytes=25000)"
           echo ""
           
           # Failed services
-          echo "━━━ Check 3: System Health ━━━"
+          echo "━━━ Check 4: System Health ━━━"
           failed=$(systemctl --user list-units --state=failed --no-pager --no-legend 2>/dev/null | wc -l)
           if [ $failed -gt 0 ]; then
             echo "⚠️  Found $failed failed services"
@@ -378,7 +443,7 @@ jobs:
           echo ""
           
           # Podman
-          echo "━━━ Check 4: Podman ━━━"
+          echo "━━━ Check 5: Podman ━━━"
           echo "✅ Podman: $(podman --version)"
           echo ""
           
@@ -401,6 +466,7 @@ jobs:
           # Deploy cluster 1
           echo "Deploying cluster: default (port 6443)"
           export CLUSTER_NAME=default
+          export KINC_ENABLE_FARO=true
           ./tools/deploy.sh
           echo "✅ Cluster 'default' deployment initiated"
           echo ""
@@ -408,6 +474,7 @@ jobs:
           # Deploy cluster 2
           echo "Deploying cluster: cluster01 (port 6444)"
           export CLUSTER_NAME=cluster01
+          export KINC_ENABLE_FARO=true
           ./tools/deploy.sh
           echo "✅ Cluster 'cluster01' deployment initiated"
           echo ""
@@ -709,6 +776,51 @@ jobs:
         with:
           name: kinc-diagnostics-mounted-${{ github.run_number }}
           path: artifacts/
+          retention-days: 30
+
+      - name: Extract Faro events from both clusters
+        if: always()
+        run: |
+          echo "=== Extracting Faro Events from Both Clusters ==="
+          
+          mkdir -p artifacts/faro
+          
+          for cluster in default cluster01; do
+            echo ""
+            echo "Extracting events from cluster: $cluster"
+            
+            # Extract directly from data volume (no podman exec needed)
+            FARO_PATH="$HOME/.local/share/containers/storage/volumes/kinc-${cluster}-var-data/_data/lib/kinc/faro-events/logs"
+            
+            if [ -d "$FARO_PATH" ] && [ -n "$(ls -A $FARO_PATH/*.json 2>/dev/null)" ]; then
+              echo "✅ Faro events found in $cluster data volume"
+              
+              # Copy events from volume
+              cp $FARO_PATH/*.json artifacts/faro/bootstrap-events-${cluster}.json 2>/dev/null || true
+              cp $FARO_PATH/*.log artifacts/faro/bootstrap-logs-${cluster}.log 2>/dev/null || true
+              
+              # Count events
+              EVENT_COUNT=$(cat artifacts/faro/bootstrap-events-${cluster}.json 2>/dev/null | wc -l)
+              echo "✅ Captured $EVENT_COUNT events from $cluster"
+              
+              # Show summary
+              echo "Event Summary for $cluster:"
+              cat artifacts/faro/bootstrap-events-${cluster}.json | jq -r '.gvr' | sort | uniq -c | sort -rn | head -5
+            else
+              echo "⚠️  Faro events not found in $cluster - skipping extraction"
+            fi
+          done
+          
+          echo ""
+          echo "✅ Faro event extraction complete for all clusters"
+        shell: bash
+
+      - name: Upload Faro events
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: faro-events-mounted-${{ github.run_number }}
+          path: artifacts/faro/
           retention-days: 30
 
       - name: Cleanup
