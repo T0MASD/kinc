@@ -4,6 +4,7 @@
 
 [![Build Status](https://github.com/T0MASD/kinc/actions/workflows/ci.yml/badge.svg)](https://github.com/T0MASD/kinc/actions/workflows/ci.yml)
 [![Release](https://github.com/T0MASD/kinc/actions/workflows/release.yml/badge.svg)](https://github.com/T0MASD/kinc/actions/workflows/release.yml)
+[![License](https://img.shields.io/badge/License-Unlicense-blue.svg)](https://raw.githubusercontent.com/T0MASD/faro/refs/heads/main/UNLICENSE)
 
 ---
 
@@ -15,6 +16,7 @@
 - 🔧 **Configurable:** Baked-in or mounted configuration
 - 🌐 **Isolated networking:** Sequential port allocation with subnet derivation
 - 📊 **Multi-cluster:** Run multiple clusters concurrently
+- 🔍 **Observability:** Optional Faro event capture for bootstrap analysis (enabled in CI by default)
 - ✅ **Production-grade:** Uses official Kubernetes tools (kubeadm, kubectl, CRI-O)
 
 ---
@@ -215,6 +217,7 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=myapp ./tools/deploy.sh
 - `FORCE_PORT`: Override auto port allocation
 - `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.33.5`)
 - `KINC_SKIP_SYSCTL_CHECKS`: Bypass inotify/keyring checks (default: `false`)
+- `KINC_ENABLE_FARO`: Enable Faro event capture (default: `false`, CI: `true`)
 
 ### `cleanup.sh`
 Remove a kinc cluster and clean up all resources.
@@ -308,6 +311,54 @@ Then deploy with mounted config:
 
 ```bash
 CLUSTER_NAME=custom ./tools/deploy.sh
+```
+
+### Faro Event Capture (Optional)
+
+**Faro** is a Kubernetes resource monitoring library that captures real-time events during cluster bootstrap. It's useful for:
+- Debugging initialization issues
+- Performance analysis
+- CI/CD validation
+- Cluster behavior comparison
+
+**Enable Faro:**
+
+```bash
+# Single cluster with event capture
+KINC_ENABLE_FARO=true CLUSTER_NAME=myapp ./tools/deploy.sh
+
+# Multiple clusters with event capture
+KINC_ENABLE_FARO=true CLUSTER_NAME=dev ./tools/deploy.sh
+KINC_ENABLE_FARO=true CLUSTER_NAME=staging ./tools/deploy.sh
+```
+
+**Default Behavior:**
+- **Disabled** in normal deployments (minimal overhead)
+- **Enabled** automatically in CI/CD (for validation)
+
+**Configuration:**
+
+Faro configuration and deployment are embedded in the kinc image:
+
+- **Config:** `build/kinc/etc/faro/config.yaml` - Defines what resources to monitor
+- **Deployment:** `build/kinc/etc/kubernetes/manifests/faro-bootstrap.yaml` - Static pod manifest
+
+When `KINC_ENABLE_FARO=true`, the preflight service copies the Faro manifest to `/etc/kubernetes/manifests/` during initialization, and Kubelet starts it as a static pod alongside the API server.
+
+**Access Faro Events:**
+
+Events are stored in JSON format in the cluster's data volume:
+
+```bash
+# Direct access from host (no podman exec needed)
+CLUSTER_NAME=myapp
+FARO_PATH="$HOME/.local/share/containers/storage/volumes/kinc-${CLUSTER_NAME}-var-data/_data/lib/kinc/faro-events/logs"
+
+# View events
+cat $FARO_PATH/*.json | jq .
+
+# Event summary
+cat $FARO_PATH/*.json | jq -r '.gvr' | sort | uniq -c | sort -rn
 ```
 
 ---
