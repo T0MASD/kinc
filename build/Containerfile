@@ -152,7 +152,7 @@ STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT [ "/sbin/init" ]
 
 # Labels for metadata
-LABEL io.kinc.version="v1.34.1-rootless"
+LABEL io.kinc.version="v1.34.2-rootless"
 LABEL io.kinc.runtime="crio"
 LABEL io.kinc.init="baked-in"
 LABEL io.kinc.rootless="true"
