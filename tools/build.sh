@@ -103,7 +103,7 @@ echo
 echo "🚀 Next steps:"
 echo "  1. Deploy default: ./tools/deploy.sh"
 echo "  2. Deploy custom:  CLUSTER_NAME=stage ./tools/deploy.sh"
-echo "  3. Test:           CLUSTER_NAME=default ./tools/test.sh"
+echo "  3. Validate:       ./tools/run-validation.sh"
 echo "  4. Clean:          CLUSTER_NAME=default ./tools/cleanup.sh"
 echo
 
