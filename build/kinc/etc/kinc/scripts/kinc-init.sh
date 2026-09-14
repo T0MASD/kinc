@@ -213,13 +213,35 @@ else
     fi
 fi
 
-# Install CNI (using kinc's default CNI with proper templating)
-log "Installing CNI..."
-if [[ -f /kinc/manifests/default-cni.yaml ]]; then
-    # Template the CNI manifest with our pod subnet (matching kubeadm config)
-    log "Templating CNI manifest with pod subnet..."
-    sed 's/{{ \.PodSubnet }}/10.244.0.0\/16/g' /kinc/manifests/default-cni.yaml > /tmp/cni-manifest.yaml
-    
+# Install CNI. KINC_CNI selects which CNI this cluster runs; kincnet is the
+# default, so existing deployments are unaffected.
+# The KINC_CNI environment variable wins; otherwise /etc/kinc/config/cni, which
+# arrives on the same mounted config volume as kubeadm.conf, so a deployment can
+# choose its CNI declaratively without relying on env reaching PID 1's children.
+CNI="${KINC_CNI:-$(cat /etc/kinc/config/cni 2>/dev/null || echo kincnet)}"
+CNI="${CNI:-kincnet}"
+case "$CNI" in
+    kincnet) CNI_MANIFEST=/kinc/manifests/default-cni.yaml; CNI_SELECTOR="k8s-app=kincnet" ;;
+    antrea)  CNI_MANIFEST=/kinc/manifests/antrea-cni.yaml;  CNI_SELECTOR="app=antrea" ;;
+    *) log "❌ Unknown KINC_CNI '$CNI' (expected: kincnet, antrea)"; exit 1 ;;
+esac
+log "Installing CNI: $CNI"
+if [[ -f "$CNI_MANIFEST" ]]; then
+    if [[ "$CNI" == "kincnet" ]]; then
+        # kincnet carries the cluster pod CIDR in its manifest, so read the
+        # value this cluster actually booted with rather than assume it. A
+        # cluster given a different podSubnet gets a CNI that agrees with it.
+        POD_SUBNET=$(awk '/podSubnet:/{print $2; exit}' "$CONFIG_FILE" 2>/dev/null)
+        POD_SUBNET="${POD_SUBNET:-10.244.0.0/16}"
+        log "Templating CNI manifest with pod subnet ${POD_SUBNET}"
+        sed "s|{{ .PodSubnet }}|${POD_SUBNET}|g" "$CNI_MANIFEST" > /tmp/cni-manifest.yaml
+    else
+        # Antrea reads each node's CIDR from Node.spec.podCIDR, which kubeadm
+        # allocates from podSubnet, so its manifest needs no templating.
+        cp "$CNI_MANIFEST" /tmp/cni-manifest.yaml
+        # The image ships kincnet's CNI conf; Antrea installs its own.
+        rm -f /etc/cni/net.d/10-kindnet.conflist
+    fi
     if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /tmp/cni-manifest.yaml; then
         log "✅ CNI installed successfully"
     else
@@ -227,14 +249,14 @@ if [[ -f /kinc/manifests/default-cni.yaml ]]; then
         exit 1
     fi
 else
-    log "❌ CNI manifest not found at /kinc/manifests/default-cni.yaml"
+    log "❌ CNI manifest not found at $CNI_MANIFEST"
     exit 1
 fi
 
 # Wait for CNI to be ready before proceeding
 log "Waiting for CNI pods to be ready..."
 wait_start=$(date +%s)
-if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pods -l k8s-app=kincnet -n kube-system --timeout=180s; then
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready pods -l "$CNI_SELECTOR" -n kube-system --timeout=180s; then
     wait_end=$(date +%s)
     wait_elapsed=$((wait_end - wait_start))
     log "✅ CNI pods are ready (waited ${wait_elapsed}s)"
