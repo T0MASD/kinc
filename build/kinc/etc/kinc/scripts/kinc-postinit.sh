@@ -78,41 +78,21 @@ else
     fi
 fi
 
-# Install CNI. KINC_CNI selects which CNI this cluster runs; kincnet is the
-# default, so existing deployments are unaffected.
-# The KINC_CNI environment variable wins; otherwise /etc/kinc/config/cni, which
-# arrives on the same mounted config volume as kubeadm.conf, so a deployment can
-# choose its CNI declaratively without relying on env reaching PID 1's children.
-CNI="${KINC_CNI:-$(cat /etc/kinc/config/cni 2>/dev/null || echo kincnet)}"
-CNI="${CNI:-kincnet}"
-case "$CNI" in
-    kincnet) CNI_MANIFEST=/kinc/manifests/default-cni.yaml; CNI_SELECTOR="k8s-app=kincnet" ;;
-    antrea)  CNI_MANIFEST=/kinc/manifests/antrea-cni.yaml;  CNI_SELECTOR="app=antrea" ;;
-    *) log "❌ Unknown KINC_CNI '$CNI' (expected: kincnet, antrea)"; exit 1 ;;
-esac
-log "Installing CNI: $CNI"
+# Install the CNI. Antrea is the cluster network: it reads each node's CIDR from
+# Node.spec.podCIDR, which kubeadm allocates from podSubnet, so the manifest is
+# applied as it ships and a cluster given any podSubnet gets a network that
+# agrees with it.
+CNI_MANIFEST=/kinc/manifests/antrea-cni.yaml
+log "Installing CNI: antrea"
 if [[ -f "$CNI_MANIFEST" ]]; then
-    if [[ "$CNI" == "kincnet" ]]; then
-        # kincnet carries the cluster pod CIDR in its manifest, so read the
-        # value this cluster actually booted with rather than assume it. A
-        # cluster given a different podSubnet gets a CNI that agrees with it.
-        POD_SUBNET=$(awk '/podSubnet:/{print $2; exit}' "/etc/kinc/config/kubeadm.conf" 2>/dev/null)
-        POD_SUBNET="${POD_SUBNET:-10.244.0.0/16}"
-        log "Templating CNI manifest with pod subnet ${POD_SUBNET}"
-        sed "s|{{ .PodSubnet }}|${POD_SUBNET}|g" "$CNI_MANIFEST" > /tmp/cni-manifest.yaml
-    else
-        # Antrea reads each node's CIDR from Node.spec.podCIDR, which kubeadm
-        # allocates from podSubnet, so its manifest needs no templating.
-        cp "$CNI_MANIFEST" /tmp/cni-manifest.yaml
-        # Clear the CNI directory so Antrea's own conf is the only one there.
-        # Both kincnet's conf and the one CRI-O's package installs would
-        # otherwise remain, and whichever sorts first wins until Antrea's
-        # install-cni lands - CRI-O's bridge then fails pod creation with
-        #   failed to enable keep_addr_on_down ... read-only file system
-        # An empty directory is the correct intermediate state: pods wait for a
-        # network rather than being attached to one that cannot work.
-        rm -f /etc/cni/net.d/*.conf /etc/cni/net.d/*.conflist
-    fi
+    # Antrea's own conf is the only one that should be in this directory. CRI-O's
+    # package installs a bridge conf which would otherwise win until Antrea's
+    # install-cni lands, and it fails pod creation with
+    #   failed to enable keep_addr_on_down ... read-only file system
+    # An empty directory is the correct intermediate state: pods wait for a
+    # network rather than attaching to one that cannot work.
+    rm -f /etc/cni/net.d/*.conf /etc/cni/net.d/*.conflist
+    cp "$CNI_MANIFEST" /tmp/cni-manifest.yaml
     if kubectl apply -f /tmp/cni-manifest.yaml; then
         log "✅ CNI installed successfully"
     else
@@ -127,7 +107,7 @@ fi
 # Wait for CNI to be ready before proceeding
 log "Waiting for CNI pods to be ready..."
 wait_start=$(date +%s)
-if kubectl wait --for=condition=Ready pods -l "$CNI_SELECTOR" -n kube-system --timeout=180s; then
+if kubectl wait --for=condition=Ready pods -l app=antrea -n kube-system --timeout=180s; then
     wait_end=$(date +%s)
     wait_elapsed=$((wait_end - wait_start))
     log "✅ CNI pods are ready (waited ${wait_elapsed}s)"
