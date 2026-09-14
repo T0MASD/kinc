@@ -91,13 +91,16 @@ fi
 CNI_MANIFEST=/kinc/manifests/antrea-cni.yaml
 log "Installing CNI: antrea"
 if [[ -f "$CNI_MANIFEST" ]]; then
-    # Antrea's own conf is the only one that should be in this directory. CRI-O's
-    # package installs a bridge conf which would otherwise win until Antrea's
-    # install-cni lands, and it fails pod creation with
-    #   failed to enable keep_addr_on_down ... read-only file system
-    # An empty directory is the correct intermediate state: pods wait for a
-    # network rather than attaching to one that cannot work.
-    rm -f /etc/cni/net.d/*.conf /etc/cni/net.d/*.conflist
+    # Remove the confs that would otherwise claim pods before Antrea's own is in
+    # place: kincnet's, and the bridge conf CRI-O's package installs, which fails
+    # pod creation with "keep_addr_on_down ... read-only file system".
+    #
+    # Antrea's own conf is left alone. It is written by the agent's install-cni
+    # init container, which runs only when that pod starts, so deleting it on a
+    # restart - when the agent is already running - takes the cluster's network
+    # away with nothing to put it back.
+    find /etc/cni/net.d -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conflist' \) \
+         ! -name '*antrea*' -delete 2>/dev/null || true
     cp "$CNI_MANIFEST" /tmp/cni-manifest.yaml
     if kubectl apply -f /tmp/cni-manifest.yaml; then
         log "✅ CNI installed successfully"
