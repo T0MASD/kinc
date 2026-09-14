@@ -239,8 +239,14 @@ if [[ -f "$CNI_MANIFEST" ]]; then
         # Antrea reads each node's CIDR from Node.spec.podCIDR, which kubeadm
         # allocates from podSubnet, so its manifest needs no templating.
         cp "$CNI_MANIFEST" /tmp/cni-manifest.yaml
-        # The image ships kincnet's CNI conf; Antrea installs its own.
-        rm -f /etc/cni/net.d/10-kindnet.conflist
+        # Clear the CNI directory so Antrea's own conf is the only one there.
+        # Both kincnet's conf and the one CRI-O's package installs would
+        # otherwise remain, and whichever sorts first wins until Antrea's
+        # install-cni lands - CRI-O's bridge then fails pod creation with
+        #   failed to enable keep_addr_on_down ... read-only file system
+        # An empty directory is the correct intermediate state: pods wait for a
+        # network rather than being attached to one that cannot work.
+        rm -f /etc/cni/net.d/*.conf /etc/cni/net.d/*.conflist
     fi
     if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /tmp/cni-manifest.yaml; then
         log "✅ CNI installed successfully"
