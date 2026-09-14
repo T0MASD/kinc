@@ -6,7 +6,8 @@ echo "============================="
 
 # Single image for all clusters (no cluster name in tag)
 # Build once, deploy many times with different configs
-IMAGE_NAME="localhost/kinc/node:v1.33.5"
+# Note: Update this when upgrading Kubernetes version
+IMAGE_NAME="localhost/kinc/node:v1.34.2"
 
 # Cache busting for package updates (increment when packages need updating)
 CACHE_BUST="${CACHE_BUST:-1}"
@@ -96,13 +97,13 @@ echo "✅ Validation complete - Baked-in configuration active!"
 # Show image size
 echo
 echo "📊 Image information:"
-podman images | grep "kinc/node.*v1.33.5"
+podman images | grep "kinc/node.*v1.34"
 
 echo
 echo "🚀 Next steps:"
 echo "  1. Deploy default: ./tools/deploy.sh"
 echo "  2. Deploy custom:  CLUSTER_NAME=stage ./tools/deploy.sh"
-echo "  3. Test:           CLUSTER_NAME=default ./tools/test.sh"
+echo "  3. Validate:       ./tools/run-validation.sh"
 echo "  4. Clean:          CLUSTER_NAME=default ./tools/cleanup.sh"
 echo
 
