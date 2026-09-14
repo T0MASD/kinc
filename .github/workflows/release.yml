@@ -131,6 +131,7 @@ jobs:
           echo "=== Testing built image using kinc tools ==="
           
           IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
+          LOCAL_TEST_TAG="localhost/kinc/node:v${{ env.K8S_VERSION }}"
           
           # Basic image inspection
           echo "Image details:"
@@ -141,6 +142,9 @@ jobs:
           
           export CLUSTER_NAME="test"
           export KINC_ENABLE_FARO=true
+          export KINC_IMAGE="$LOCAL_TEST_TAG"
+          
+          echo "Using image for testing: $KINC_IMAGE"
           
           # Deploy cluster
           echo "Deploying test cluster..."
