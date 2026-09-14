@@ -87,7 +87,6 @@ COPY kinc/etc/systemd/system/kinc-cgroup-setup.service /etc/systemd/system/kinc-
 # Keep old kinc-init.service for backward compatibility (disabled by default)
 COPY kinc/etc/systemd/system/kinc-init.service /etc/systemd/system/kinc-init.service
 COPY --chmod=0755 kinc/etc/kinc/scripts/* /etc/kinc/scripts/
-COPY --chmod=0644 kinc/etc/systemd/journald.conf.d/10-persistent.conf /etc/systemd/journald.conf.d/10-persistent.conf
 COPY kinc/kinc/manifests/ /kinc/manifests/
 
 # Phase 2: Baked-in configuration with mounted config override
