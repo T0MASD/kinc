@@ -16,64 +16,115 @@ json_export: true
 # Prometheus metrics configuration
 metrics:
   enabled: true
-  port: 8080
   path: "/metrics"
+  port: 8080
   bind_addr: "0.0.0.0"
 
-# Monitor everything - comprehensive event capture
+# Cluster-scoped resources.
+#
+# Faro's config schema (pkg/config.go Config) has exactly two top-level
+# collections: `resources` and `namespaces`. Faro decides scope from API
+# discovery (resourceInfo.Namespaced), and for a cluster-scoped type it
+# ignores namespace fields and watches cluster-wide.
+resources:
+  # Nodes
+  - gvr: "v1/nodes"
+    scope: "Cluster"
+
+  # Namespaces themselves, so namespace creation is visible
+  - gvr: "v1/namespaces"
+    scope: "Cluster"
+
+  # Storage
+  - gvr: "storage.k8s.io/v1/storageclasses"
+    scope: "Cluster"
+  - gvr: "v1/persistentvolumes"
+    scope: "Cluster"
+
+  # RBAC
+  - gvr: "rbac.authorization.k8s.io/v1/clusterroles"
+    scope: "Cluster"
+  - gvr: "rbac.authorization.k8s.io/v1/clusterrolebindings"
+    scope: "Cluster"
+
+  # Networking
+  - gvr: "networking.k8s.io/v1/ingressclasses"
+    scope: "Cluster"
+
+  # API extensions
+  - gvr: "apiextensions.k8s.io/v1/customresourcedefinitions"
+    scope: "Cluster"
+
+# Namespace-scoped resources.
+#
+# `name_selector` is an exact namespace name used for server-side
+# filtering, so every namespace is listed by name.
+#
+# An empty name_selector is not a substitute. It builds one informer per
+# GVR across all namespaces, but reconcile() looks its lister up as
+# "<gvr>@<object namespace>" while the informer registered
+# "<gvr>@", so every namespaced event is dropped with
+# "No lister found for key" and requeued forever. Measured on a 1.36.4
+# cluster: 2644 dropped events, nothing written. Cluster-scoped types are
+# unaffected, because their keys carry no namespace.
+#
+# These five namespaces are the ones a kinc bootstrap creates.
 namespaces:
-  # kube-system: Core Kubernetes components
+  # kube-system: the control plane
   - name_selector: "kube-system"
     resources:
-      # Core workloads
       "v1/pods": {}
       "v1/services": {}
       "v1/endpoints": {}
       "v1/events": {}
-      
-      # Configuration
       "v1/configmaps": {}
       "v1/serviceaccounts": {}
-      
-      # Storage
       "v1/persistentvolumeclaims": {}
-      
-      # Workload controllers
       "apps/v1/daemonsets": {}
       "apps/v1/deployments": {}
       "apps/v1/replicasets": {}
       "apps/v1/statefulsets": {}
-      
-      # RBAC
+      "batch/v1/jobs": {}
       "rbac.authorization.k8s.io/v1/roles": {}
       "rbac.authorization.k8s.io/v1/rolebindings": {}
-  
-  # All other namespaces (default, user workloads, etc.)
-  - name_selector: "*"
+
+  # local-path-storage: the storage provisioner kinc installs at postinit
+  - name_selector: "local-path-storage"
     resources:
       "v1/pods": {}
       "v1/services": {}
       "v1/events": {}
-      "apps/v1/deployments": {}
+      "v1/configmaps": {}
+      "v1/serviceaccounts": {}
+      "v1/persistentvolumeclaims": {}
       "apps/v1/daemonsets": {}
+      "apps/v1/deployments": {}
+      "apps/v1/replicasets": {}
       "batch/v1/jobs": {}
 
-# Cluster-wide resources (no namespace)
-cluster_resources:
-  # Nodes
-  "v1/nodes": {}
-  
-  # Storage
-  "storage.k8s.io/v1/storageclasses": {}
-  "v1/persistentvolumes": {}
-  
-  # RBAC
-  "rbac.authorization.k8s.io/v1/clusterroles": {}
-  "rbac.authorization.k8s.io/v1/clusterrolebindings": {}
-  
-  # Networking
-  "networking.k8s.io/v1/ingressclasses": {}
-  
-  # API extensions
-  "apiextensions.k8s.io/v1/customresourcedefinitions": {}
+  # default: where user workloads land
+  - name_selector: "default"
+    resources:
+      "v1/pods": {}
+      "v1/services": {}
+      "v1/events": {}
+      "v1/configmaps": {}
+      "v1/persistentvolumeclaims": {}
+      "apps/v1/daemonsets": {}
+      "apps/v1/deployments": {}
+      "apps/v1/replicasets": {}
+      "apps/v1/statefulsets": {}
+      "batch/v1/jobs": {}
 
+  # kube-public
+  - name_selector: "kube-public"
+    resources:
+      "v1/pods": {}
+      "v1/events": {}
+      "v1/configmaps": {}
+
+  # kube-node-lease
+  - name_selector: "kube-node-lease"
+    resources:
+      "v1/pods": {}
+      "v1/events": {}
