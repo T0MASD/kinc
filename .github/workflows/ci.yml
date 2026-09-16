@@ -17,7 +17,7 @@ jobs:
     
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: System prerequisites check
         run: |
@@ -337,7 +337,7 @@ jobs:
 
       - name: Upload diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kinc-diagnostics-baked-in-${{ github.run_number }}
           path: artifacts/
@@ -375,7 +375,7 @@ jobs:
 
       - name: Upload Faro events
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: faro-events-baked-in-${{ github.run_number }}
           path: artifacts/faro/
@@ -396,7 +396,7 @@ jobs:
     
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: System prerequisites check
         run: |
@@ -772,7 +772,7 @@ jobs:
 
       - name: Upload diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kinc-diagnostics-mounted-${{ github.run_number }}
           path: artifacts/
@@ -817,7 +817,7 @@ jobs:
 
       - name: Upload Faro events
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: faro-events-mounted-${{ github.run_number }}
           path: artifacts/faro/
