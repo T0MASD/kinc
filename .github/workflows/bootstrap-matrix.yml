@@ -106,8 +106,21 @@ jobs:
           # so warming it here is what keeps kubeadm init inside its
           # wait-control-plane timeout.
           podman pull "${{ github.event.inputs.faro_image }}"
-          for i in $(podman run --rm --entrypoint /usr/bin/kubeadm "$IMG" \
-                       config images list --kubernetes-version "$K8S"); do
+
+          # kubeadm lists only the control plane. The CNI and the storage
+          # provisioner come from kinc's own manifests, and their tags are
+          # identical across these releases, so leaving them cold makes their
+          # arrival time a measure of registry latency rather than of the
+          # Kubernetes version. That was the whole difference between the first
+          # matrix run's releases: local-path-storage appeared at T+20s, T+19s
+          # and T+11s while every control-plane phase matched to the second.
+          {
+            podman run --rm --entrypoint /usr/bin/kubeadm "$IMG" \
+              config images list --kubernetes-version "$K8S"
+            podman run --rm --entrypoint /bin/sh "$IMG" \
+              -c 'grep -rhoE "image: *[^ ]+" /kinc/manifests/ 2>/dev/null | sed "s/image: *//"'
+          } | sort -u | while read -r i; do
+            [ -n "$i" ] || continue
             echo "pulling $i"
             podman pull -q "$i" > /dev/null
           done
