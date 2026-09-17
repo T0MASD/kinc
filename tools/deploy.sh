@@ -99,14 +99,20 @@ if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" != "Di
   echo "✅ SELinux active ($(getenforce 2>/dev/null))"
 elif [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = "Y" ]; then
   KINC_MAC="apparmor"
-  userns_restricted=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo "0")
-  if [ "$userns_restricted" = "1" ]; then
-    echo "⚠️  AppArmor restricts unprivileged user namespaces"
-    echo "   Rootless Podman uses them to create the cluster container"
-    echo "   To fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
-    echo "   Podman reports its own error below if it cannot proceed"
+  # Ask Podman to make a user namespace rather than reading the sysctl and
+  # inferring. Ubuntu sets kernel.apparmor_restrict_unprivileged_userns to 1
+  # and ships a profile granting Podman "userns create", so the restriction is
+  # on and rootless Podman works anyway. Reading the sysctl alone reports a
+  # problem on every Ubuntu host that has none.
+  if podman unshare true >/dev/null 2>&1; then
+    echo "✅ AppArmor active, user namespaces available to Podman"
   else
-    echo "✅ AppArmor active, unprivileged user namespaces available"
+    echo "⚠️  AppArmor active, and Podman cannot create a user namespace"
+    if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = "1" ]; then
+      echo "   kernel.apparmor_restrict_unprivileged_userns is 1 and no profile grants Podman 'userns create'"
+      echo "   To fix: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+    fi
+    echo "   Podman reports its own error below if it cannot proceed"
   fi
 else
   echo "✅ Kernel MAC: none active"
