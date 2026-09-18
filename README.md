@@ -29,6 +29,24 @@
 - **IP forwarding enabled**
 - **Sufficient inotify limits** (for multiple clusters)
 - **Sufficient kernel keyring limits** (for multiple clusters)
+- **User namespaces available to Podman** (AppArmor hosts)
+
+`deploy.sh` reports which kernel mandatory access control system is active and
+adapts to it. Under SELinux it restores the context on the config volume, which
+a rootless user can do to files they own. Under AppArmor it asks Podman to
+create a user namespace, since that is what rootless Podman needs to start the
+cluster container.
+
+Ubuntu 24.04 and later set `kernel.apparmor_restrict_unprivileged_userns` to 1
+and ship a profile granting Podman `userns create`, so the probe passes with the
+restriction in place. Where it does not pass, lifting the restriction takes root
+and so belongs with the sysctls below:
+
+```bash
+# Only where deploy.sh reports Podman cannot create a user namespace
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+echo 'kernel.apparmor_restrict_unprivileged_userns = 0' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+```
 
 ```bash
 # Enable IP forwarding (one-time setup)
