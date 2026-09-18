@@ -216,28 +216,33 @@ jobs:
         run: |
           echo "=== Verifying Configuration Validation ==="
           
-          # Check kinc-preflight completed config validation
-          if ! podman exec kinc-default-control-plane journalctl -u kinc-preflight.service --no-pager --boot | grep -q "Configuration validated"; then
-            echo "❌ Configuration validation not found in kinc-preflight.service logs"
-            exit 1
-          fi
+          # journald can lag behind a service that has already finished, so poll
+          # for each marker rather than reading the journal once. A single read
+          # failed this step on clusters that had in fact initialized.
+          wait_for_log() {
+            local unit="$1" marker="$2" timeout="${3:-120}" waited=0
+            while [ "$waited" -lt "$timeout" ]; do
+              if podman exec kinc-default-control-plane journalctl -u "$unit" --no-pager --boot 2>/dev/null | grep -q "$marker"; then
+                if [ "$waited" -gt 0 ]; then echo "   (appeared after ${waited}s)"; fi
+                return 0
+              fi
+              sleep 2
+              waited=$((waited + 2))
+            done
+            echo "❌ '$marker' not found in $unit after ${timeout}s"
+            podman exec kinc-default-control-plane systemctl status "$unit" --no-pager || true
+            podman exec kinc-default-control-plane journalctl -u "$unit" --no-pager --boot || true
+            return 1
+          }
+
+          wait_for_log kinc-preflight.service "Configuration validated" || exit 1
           echo "✅ Configuration validated by kinc-preflight.service"
-          
-          # Verify kubeadm-init completed successfully
-          # Note: We skip the show-join-command phase, so check for addon installation instead
-          if ! podman exec kinc-default-control-plane journalctl -u kubeadm-init.service --no-pager --boot | grep -q "Applied essential addon: kube-proxy"; then
-            echo "❌ kubeadm init did not complete successfully"
-            exit 1
-          fi
+
+          # We skip the show-join-command phase, so check for addon installation
+          wait_for_log kubeadm-init.service "Applied essential addon: kube-proxy" || exit 1
           echo "✅ kubeadm init completed successfully (as systemd service)"
-          
-          # Verify CNI installation by kinc-postinit
-          if ! podman exec kinc-default-control-plane journalctl -u kinc-postinit.service --no-pager --boot | grep "Installing CNI" >/dev/null 2>&1; then
-            echo "❌ CNI installation not found in kinc-postinit.service logs"
-            echo "Full kinc-postinit logs:"
-            podman exec kinc-default-control-plane journalctl -u kinc-postinit.service --no-pager --boot
-            exit 1
-          fi
+
+          wait_for_log kinc-postinit.service "Installing CNI" || exit 1
           echo "✅ CNI installed by kinc-postinit.service"
           
           echo ""
@@ -625,34 +630,40 @@ jobs:
         run: |
           echo "=== Verifying Configuration Validation (Both Clusters) ==="
           
+          # journald can lag behind a service that has already finished, so poll
+          # for each marker rather than reading the journal once. Reading once
+          # failed this step on whichever cluster the runner was slower with,
+          # on clusters that had in fact initialized.
+          wait_for_log() {
+            local cluster="$1" unit="$2" marker="$3" timeout="${4:-120}" waited=0
+            while [ "$waited" -lt "$timeout" ]; do
+              if podman exec "kinc-${cluster}-control-plane" journalctl -u "$unit" --no-pager --boot 2>/dev/null | grep -q "$marker"; then
+                if [ "$waited" -gt 0 ]; then echo "   (appeared after ${waited}s)"; fi
+                return 0
+              fi
+              sleep 2
+              waited=$((waited + 2))
+            done
+            echo "❌ '$marker' not found in $unit on cluster '$cluster' after ${timeout}s"
+            podman exec "kinc-${cluster}-control-plane" systemctl status "$unit" --no-pager || true
+            podman exec "kinc-${cluster}-control-plane" journalctl -u "$unit" --no-pager --boot || true
+            return 1
+          }
+
           for cluster in default cluster01; do
             echo ""
             echo "Checking cluster: $cluster"
-            
-            # Check kinc-preflight completed config validation
-            if ! podman exec kinc-${cluster}-control-plane journalctl -u kinc-preflight.service --no-pager --boot | grep -q "Configuration validated"; then
-              echo "❌ Configuration validation not found in cluster '$cluster'"
-              exit 1
-            fi
+
+            wait_for_log "$cluster" kinc-preflight.service "Configuration validated" || exit 1
             echo "✅ Configuration validated by kinc-preflight.service"
-            
-            # Verify kubeadm-init completed successfully
-            # Note: We skip the show-join-command phase, so check for addon installation instead
-            if ! podman exec kinc-${cluster}-control-plane journalctl -u kubeadm-init.service --no-pager --boot | grep -q "Applied essential addon: kube-proxy"; then
-              echo "❌ kubeadm init did not complete successfully in cluster '$cluster'"
-              exit 1
-            fi
+
+            # We skip the show-join-command phase, so check for addon installation
+            wait_for_log "$cluster" kubeadm-init.service "Applied essential addon: kube-proxy" || exit 1
             echo "✅ kubeadm init completed successfully (as systemd service)"
-            
-            # Verify CNI installation by kinc-postinit
-            if ! podman exec kinc-${cluster}-control-plane journalctl -u kinc-postinit.service --no-pager --boot | grep "Installing CNI" >/dev/null 2>&1; then
-              echo "❌ CNI installation not found in cluster '$cluster'"
-              echo "Full kinc-postinit logs:"
-              podman exec kinc-${cluster}-control-plane journalctl -u kinc-postinit.service --no-pager --boot
-              exit 1
-            fi
+
+            wait_for_log "$cluster" kinc-postinit.service "Installing CNI" || exit 1
             echo "✅ CNI installed by kinc-postinit.service"
-            
+
             echo "✅ Cluster '$cluster': All configuration validations passed"
           done
           
