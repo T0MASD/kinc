@@ -20,55 +20,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: System prerequisites check
-        run: |
-          echo "=== System Prerequisites Check ==="
-          
-          # IP forwarding
-          echo "━━━ Check 1: IP Forwarding ━━━"
-          if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
-            echo "Enabling IP forwarding..."
-            echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-          fi
-          echo "✅ IP forwarding: enabled"
-          echo ""
-          
-          # Inotify limits
-          echo "━━━ Check 2: Inotify Limits ━━━"
-          echo "  Current max_user_watches:   $(cat /proc/sys/fs/inotify/max_user_watches)"
-          echo "  Current max_user_instances: $(cat /proc/sys/fs/inotify/max_user_instances)"
-          echo "Setting inotify limits for multi-cluster testing..."
-          echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches > /dev/null
-          echo 2048 | sudo tee /proc/sys/fs/inotify/max_user_instances > /dev/null
-          echo "✅ Inotify limits: configured (watches=524288, instances=2048)"
-          echo ""
-          
-          # Kernel keyring limits
-          echo "━━━ Check 3: Kernel Keyring Limits ━━━"
-          echo "  Current maxkeys:   $(cat /proc/sys/kernel/keys/maxkeys 2>/dev/null || echo 'N/A')"
-          echo "  Current maxbytes:  $(cat /proc/sys/kernel/keys/maxbytes 2>/dev/null || echo 'N/A')"
-          echo "Setting kernel keyring limits for multi-cluster testing..."
-          echo 1000 | sudo tee /proc/sys/kernel/keys/maxkeys > /dev/null
-          echo 25000 | sudo tee /proc/sys/kernel/keys/maxbytes > /dev/null
-          echo "✅ Kernel keyring limits: configured (maxkeys=1000, maxbytes=25000)"
-          echo ""
-          
-          # Failed services
-          echo "━━━ Check 4: System Health ━━━"
-          failed=$(systemctl --user list-units --state=failed --output=json --no-pager 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
-          if [ $failed -gt 0 ]; then
-            echo "⚠️  Found $failed failed services"
-            systemctl --user list-units --state=failed --no-pager
-          else
-            echo "✅ No failed services"
-          fi
-          echo ""
-          
-          # Podman
-          echo "━━━ Check 5: Podman ━━━"
-          echo "✅ Podman: $(podman --version)"
-          echo ""
-          
-          echo "✅ Prerequisites check complete"
+        run: ./tools/ci-prepare-host.sh
         shell: bash
 
       - name: Build kinc image
@@ -514,55 +466,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: System prerequisites check
-        run: |
-          echo "=== System Prerequisites Check ==="
-          
-          # IP forwarding
-          echo "━━━ Check 1: IP Forwarding ━━━"
-          if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
-            echo "Enabling IP forwarding..."
-            echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-          fi
-          echo "✅ IP forwarding: enabled"
-          echo ""
-          
-          # Inotify limits
-          echo "━━━ Check 2: Inotify Limits ━━━"
-          echo "  Current max_user_watches:   $(cat /proc/sys/fs/inotify/max_user_watches)"
-          echo "  Current max_user_instances: $(cat /proc/sys/fs/inotify/max_user_instances)"
-          echo "Setting inotify limits for multi-cluster testing..."
-          echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches > /dev/null
-          echo 2048 | sudo tee /proc/sys/fs/inotify/max_user_instances > /dev/null
-          echo "✅ Inotify limits: configured (watches=524288, instances=2048)"
-          echo ""
-          
-          # Kernel keyring limits
-          echo "━━━ Check 3: Kernel Keyring Limits ━━━"
-          echo "  Current maxkeys:   $(cat /proc/sys/kernel/keys/maxkeys 2>/dev/null || echo 'N/A')"
-          echo "  Current maxbytes:  $(cat /proc/sys/kernel/keys/maxbytes 2>/dev/null || echo 'N/A')"
-          echo "Setting kernel keyring limits for multi-cluster testing..."
-          echo 1000 | sudo tee /proc/sys/kernel/keys/maxkeys > /dev/null
-          echo 25000 | sudo tee /proc/sys/kernel/keys/maxbytes > /dev/null
-          echo "✅ Kernel keyring limits: configured (maxkeys=1000, maxbytes=25000)"
-          echo ""
-          
-          # Failed services
-          echo "━━━ Check 4: System Health ━━━"
-          failed=$(systemctl --user list-units --state=failed --output=json --no-pager 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
-          if [ $failed -gt 0 ]; then
-            echo "⚠️  Found $failed failed services"
-            systemctl --user list-units --state=failed --no-pager
-          else
-            echo "✅ No failed services"
-          fi
-          echo ""
-          
-          # Podman
-          echo "━━━ Check 5: Podman ━━━"
-          echo "✅ Podman: $(podman --version)"
-          echo ""
-          
-          echo "✅ Prerequisites check complete"
+        run: ./tools/ci-prepare-host.sh
         shell: bash
 
       - name: Build kinc image
