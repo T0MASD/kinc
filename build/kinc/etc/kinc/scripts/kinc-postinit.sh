@@ -2,8 +2,14 @@
 set -euo pipefail
 
 # Enhanced logging function
+# Also append to a plain file under /var/log, which deployments publish to the
+# hypervisor. journald cannot be used for this: its store needs fallocate and
+# mmap semantics that a virtiofs mount does not provide, so it silently stays
+# volatile and the account of why a cluster came up is lost with the container.
+KINC_LOG="${KINC_LOG:-/var/log/kinc/$(basename "$0" .sh).log}"
+mkdir -p "$(dirname "$KINC_LOG")" 2>/dev/null || true
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >&2
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$KINC_LOG" >&2
 }
 
 # Start overall timing
@@ -78,13 +84,24 @@ else
     fi
 fi
 
-# Install CNI (using kinc's default CNI with proper templating)
-log "Installing CNI..."
-if [[ -f /kinc/manifests/default-cni.yaml ]]; then
-    # Template the CNI manifest with the pod subnet from kubeadm config
-    # Use hardcoded default that matches kubeadm.conf
-    sed "s|{{ .PodSubnet }}|10.244.0.0/16|g" /kinc/manifests/default-cni.yaml > /tmp/cni-manifest.yaml
-    
+# Install the CNI. Antrea is the cluster network: it reads each node's CIDR from
+# Node.spec.podCIDR, which kubeadm allocates from podSubnet, so the manifest is
+# applied as it ships and a cluster given any podSubnet gets a network that
+# agrees with it.
+CNI_MANIFEST=/kinc/manifests/antrea-cni.yaml
+log "Installing CNI: antrea"
+if [[ -f "$CNI_MANIFEST" ]]; then
+    # Remove the confs that would otherwise claim pods before Antrea's own is in
+    # place: kincnet's, and the bridge conf CRI-O's package installs, which fails
+    # pod creation with "keep_addr_on_down ... read-only file system".
+    #
+    # Antrea's own conf is left alone. It is written by the agent's install-cni
+    # init container, which runs only when that pod starts, so deleting it on a
+    # restart - when the agent is already running - takes the cluster's network
+    # away with nothing to put it back.
+    find /etc/cni/net.d -maxdepth 1 -type f \( -name '*.conf' -o -name '*.conflist' \) \
+         ! -name '*antrea*' -delete 2>/dev/null || true
+    cp "$CNI_MANIFEST" /tmp/cni-manifest.yaml
     if kubectl apply -f /tmp/cni-manifest.yaml; then
         log "✅ CNI installed successfully"
     else
@@ -92,14 +109,14 @@ if [[ -f /kinc/manifests/default-cni.yaml ]]; then
         exit 1
     fi
 else
-    log "❌ CNI manifest not found at /kinc/manifests/default-cni.yaml"
+    log "❌ CNI manifest not found at $CNI_MANIFEST"
     exit 1
 fi
 
 # Wait for CNI to be ready before proceeding
 log "Waiting for CNI pods to be ready..."
 wait_start=$(date +%s)
-if kubectl wait --for=condition=Ready pods -l k8s-app=kincnet -n kube-system --timeout=180s; then
+if kubectl wait --for=condition=Ready pods -l app=antrea -n kube-system --timeout=180s; then
     wait_end=$(date +%s)
     wait_elapsed=$((wait_end - wait_start))
     log "✅ CNI pods are ready (waited ${wait_elapsed}s)"

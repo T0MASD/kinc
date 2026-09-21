@@ -7,7 +7,7 @@ echo "============================="
 # Single image for all clusters (no cluster name in tag)
 # Build once, deploy many times with different configs
 # Note: Update this when upgrading Kubernetes version
-IMAGE_NAME="localhost/kinc/node:v1.34.2"
+IMAGE_NAME="localhost/kinc/node:v1.36.4"
 
 # Cache busting for package updates (increment when packages need updating)
 CACHE_BUST="${CACHE_BUST:-1}"
@@ -40,7 +40,10 @@ echo "🏷️  Image built: $IMAGE_NAME"
 # Verify the image
 echo
 echo "🔍 Verifying image..."
-if ! podman images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}$"; then
+# podman answers this exactly. Piping the image list into grep -q made the
+# reader exit early, SIGPIPE the producer, and pipefail report 141 - a build
+# that had tagged its image fine failed verification.
+if ! podman image exists "$IMAGE_NAME"; then
     echo "❌ Image verification failed"
     exit 1
 fi
@@ -97,7 +100,7 @@ echo "✅ Validation complete - Baked-in configuration active!"
 # Show image size
 echo
 echo "📊 Image information:"
-podman images | grep "kinc/node.*v1.34"
+podman images | grep "kinc/node.*v1.36.4"
 
 echo
 echo "🚀 Next steps:"
