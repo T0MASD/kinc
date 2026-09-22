@@ -16,7 +16,7 @@ echo "╚═══════════════════════�
 echo ""
 
 # Test configuration
-KINC_IMAGE="${KINC_IMAGE:-localhost/kinc/node:v1.36.4}"
+KINC_IMAGE="${KINC_IMAGE:-localhost/kinc/node:v1.37.0}"
 echo "Using image: $KINC_IMAGE"
 echo ""
 

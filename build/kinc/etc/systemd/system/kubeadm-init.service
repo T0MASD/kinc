@@ -15,7 +15,7 @@ TimeoutStartSec=300
 Restart=no
 
 # Run kubeadm init
-ExecStart=/usr/bin/kubeadm init --config=/tmp/kubeadm-final.conf --skip-phases=preflight,upload-config/kubelet,show-join-command
+ExecStart=/etc/kinc/scripts/kinc-kubeadm-init.sh
 
 # Create success marker
 ExecStartPost=/bin/touch /var/lib/kubeadm-initialized
