@@ -418,6 +418,94 @@ jobs:
           echo "✅ Cleanup complete"
         shell: bash
 
+  test-multi-node:
+    runs-on: ubuntu-latest
+    name: Test (multi-node)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: System prerequisites check
+        run: ./tools/ci-prepare-host.sh
+        shell: bash
+
+      - name: Build kinc image
+        run: |
+          echo "=== Building kinc image ==="
+          ./tools/build.sh
+          echo "✅ Image built successfully"
+        shell: bash
+
+      # A control plane and one worker. A second worker proves nothing the
+      # first does not: what is under test is whether pod traffic leaves a
+      # node at all, and one tunnel shows that.
+      - name: Deploy a two-node cluster
+        run: |
+          echo "=== Deploying a control plane and one worker ==="
+          export CLUSTER_NAME=default
+          export KINC_WORKERS=1
+          export KINC_ENABLE_FARO=true
+          ./tools/deploy.sh
+        shell: bash
+
+      - name: Verify configuration validation
+        run: ./tools/ci-verify-init.sh default
+        shell: bash
+
+      - name: Extract kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          podman exec kinc-default-control-plane cat /etc/kubernetes/admin.conf > ~/.kube/config
+          sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
+          kubectl get nodes -o wide
+        shell: bash
+
+      # Antrea's geneve tunnel is what makes a second node possible, and it is
+      # the one thing a single-node cluster can never exercise. Both probes are
+      # pinned to a node on purpose; the gate asserts the placement rather than
+      # trusting the scheduler to have honoured it.
+      - name: Validate traffic across nodes
+        run: |
+          kubectl apply -f runtime/manifests/test-workload.yaml
+          kubectl apply -f runtime/manifests/test-workload-crossnode.yaml
+          ./tools/ci-verify-crossnode.sh kinc-default-control-plane kinc-default-w1
+        shell: bash
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p artifacts/logs
+          kubectl get nodes -o wide > artifacts/nodes.txt 2>&1 || true
+          kubectl get pods -A -o wide > artifacts/pods.txt 2>&1 || true
+          for node in kinc-default-control-plane kinc-default-w1; do
+            mkdir -p "artifacts/logs/${node}"
+            # kubeadm writes to a file, not the journal, which holds only
+            # systemd's own start and stop lines for this unit.
+            podman exec "$node" cat /var/log/kinc/kubeadm-init.log \
+              > "artifacts/logs/${node}/kubeadm-init.log" 2>&1 || true
+            podman exec "$node" journalctl --no-pager --boot \
+              > "artifacts/logs/${node}/system-full.log" 2>&1 || true
+          done
+          kubectl -n kube-system logs -l app=antrea,component=antrea-agent \
+            --all-containers --tail=500 > artifacts/logs/antrea-agents.log 2>&1 || true
+        shell: bash
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kinc-diagnostics-multi-node-${{ github.run_number }}
+          path: artifacts/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: |
+          CLUSTER_NAME=default ./tools/cleanup.sh || true
+          systemctl --user reset-failed || true
+        shell: bash
+
   test-mounted:
     runs-on: ubuntu-latest
     name: Test (mounted config)

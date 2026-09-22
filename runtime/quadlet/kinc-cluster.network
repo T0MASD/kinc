@@ -1,0 +1,18 @@
+[Unit]
+Description=kinc Cluster Network
+
+# A user-defined podman network, one per cluster.
+#
+# This is what makes a second node possible. Containers on the default rootless
+# network get no DNS, so a worker cannot resolve the control plane by name; on
+# a user-defined network aardvark-dns resolves container names, which is what
+# controlPlaneEndpoint and the join config both dial.
+#
+# It also scopes a cluster: two clusters on one host get separate networks, so
+# their nodes cannot see each other and their addresses cannot collide.
+#
+# The subnet is podman's to choose. Nothing here derives from it - pod and
+# service CIDRs come from the cluster's own spec - so pinning it would only
+# create collisions between clusters.
+[Network]
+NetworkName=NETWORK_NAME_PLACEHOLDER

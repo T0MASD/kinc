@@ -131,7 +131,39 @@ fi
 
 # Template the kubeadm config with the actual container IP
 log "Templating kubeadm configuration with container IP..."
-sed "s/CONTAINER_IP_PLACEHOLDER/$CONTAINER_IP/g" "$CONFIG_FILE" > /tmp/kubeadm-final.conf
+# The control-plane endpoint is this container's own name, which the quadlet
+# sets as HostName and which other nodes resolve over the cluster's podman
+# network. Resolving it here rather than in deploy.sh means the baked-in config
+# and the mounted one are templated the same way.
+#
+# A worker renders its own name here and never uses the result: its
+# kubeadm-init is replaced by a join, which reads join.conf instead.
+CONTROL_PLANE_NAME="$(hostname)"
+log "Control-plane endpoint: ${CONTROL_PLANE_NAME}:6443"
+
+sed -e "s/CONTAINER_IP_PLACEHOLDER/$CONTAINER_IP/g" \
+    -e "s/CONTROL_PLANE_NAME_PLACEHOLDER/${CONTROL_PLANE_NAME}/g" \
+    -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${CONTROL_PLANE_NAME}:6443/g" \
+    "$CONFIG_FILE" > /tmp/kubeadm-final.conf
+
+# Adopt the cluster CA if one was minted for this cluster.
+#
+# kubeadm creates the CA during init otherwise, which means the hash a joining
+# node must pin cannot be known until after the control plane is up - so
+# discovery becomes something a node learns rather than something its config
+# states. Minting the CA first lets every join config carry the hash from the
+# start, so a worker needs nothing from this filesystem and can start in any
+# order. kubeadm uses an existing ca.crt/ca.key as-is and mints the rest.
+#
+# A worker has no CA mount and skips this: it authenticates the control plane
+# by the hash its join config already carries.
+if [[ -f /etc/kinc/ca/ca.crt && -f /etc/kinc/ca/ca.key ]]; then
+    log "Adopting the pre-minted cluster CA"
+    install -d -m 0755 /etc/kubernetes/pki
+    install -m 0644 /etc/kinc/ca/ca.crt /etc/kubernetes/pki/ca.crt
+    install -m 0600 /etc/kinc/ca/ca.key /etc/kubernetes/pki/ca.key
+    log "✅ Cluster CA adopted"
+fi
 
 # Validate the final configuration
 if validate_configuration "/tmp/kubeadm-final.conf"; then
