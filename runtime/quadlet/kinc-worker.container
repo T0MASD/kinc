@@ -1,0 +1,74 @@
+[Unit]
+Description=kinc Kubernetes Worker Node Container (Quadlet Backend)
+Documentation=https://github.com/T0MASD/kinc
+After=network-online.target kinc-var-data-volume.service kinc-config-volume.service
+Wants=network-online.target kinc-var-data-volume.service kinc-config-volume.service
+
+[Container]
+Image=localhost/kinc/node:v1.36.4
+ContainerName=kinc-NODE_NAME_PLACEHOLDER
+HostName=kinc-NODE_NAME_PLACEHOLDER
+
+SecurityLabelType=container_runtime_t
+
+
+# Security and privileges (rootless configuration)
+# The full capability set, because the cluster runs privileged pods. Antrea's
+# install-cni requests SYS_MODULE and its OVS container SYS_ADMIN, NET_ADMIN,
+# SYS_NICE and IPC_LOCK; a nested container can only hold what this container's
+# bounding set already holds, and short of that the nested runtime fails with
+# "capset: Operation not permitted" and the agent never starts. Rootless keeps
+# this bounded: these are capabilities inside the user namespace, where
+# container root maps to the invoking user on the host.
+PodmanArgs=--cap-add=all --device /dev/fuse --sysctl net.ipv6.conf.all.disable_ipv6=0 --sysctl net.ipv6.conf.all.keep_addr_on_down=1 --sysctl net.netfilter.nf_conntrack_tcp_timeout_established=86400 --sysctl net.netfilter.nf_conntrack_tcp_timeout_close_wait=3600
+
+# Tmpfs mounts (rootless configuration)
+Tmpfs=/tmp:rw,rprivate,nosuid,nodev,tmpcopyup
+# rshared: Antrea's agent needs network namespaces created inside the container
+# to be visible across the mount tree.
+Tmpfs=/run:rw,rshared,nosuid,nodev,tmpcopyup
+Tmpfs=/run/lock:rw,rprivate,nosuid,nodev,tmpcopyup
+
+# Volume mounts (rootless configuration)
+# rslave so network namespaces created inside are visible to Antrea's agent,
+# which refuses to start on a private mount: "path /var/run/netns is mounted on
+# /var but it is not a shared or slave mount".
+Volume=kinc-var-data:/var:Z,rslave
+Volume=kinc-config:/etc/kinc/config:ro,Z
+# The join config, and the drop-ins that turn this node's kubeadm-init into a
+# join and its postinit into a no-op. Mounted twice because systemd wants a
+# drop-in under a .d directory named for its unit.
+Volume=JOIN_DIR_PLACEHOLDER:/etc/kinc/join:ro,Z
+Volume=JOIN_DROPIN_DIR_PLACEHOLDER:/etc/systemd/system/kubeadm-init.service.d:ro,Z
+Volume=POSTINIT_DROPIN_DIR_PLACEHOLDER:/etc/systemd/system/kinc-postinit.service.d:ro,Z
+# Share host container storage to cache images across all clusters
+Volume=%h/.local/share/containers/storage:/root/.local/share/containers/storage:rw,Z
+# Antrea's OVS looks up its kernel module here. The module is loaded by the
+# host, and this mount is what lets the agent find and confirm it: modprobe
+# reads /lib/modules/$(uname -r), which the container does not otherwise have,
+# and install-cni exits non-zero when the lookup fails even though the module
+# is already loaded and visible at /sys/module/openvswitch.
+Volume=/lib/modules:/lib/modules:ro
+
+# Network configuration
+# A worker publishes nothing. It is reached over the cluster network by the
+# control plane and by other nodes, and kubectl reaches the cluster through the
+# control plane's published port. A published port here would also answer
+# before the node had joined anything, which is not a signal worth having.
+Network=NETWORK_UNIT_PLACEHOLDER
+
+# Environment variables
+Environment=container=podman
+Environment=KUBECONFIG=/etc/kubernetes/admin.conf
+
+# Container startup command - use default entrypoint
+# Exec line removed - using default ENTRYPOINT from container image
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=900
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

@@ -35,6 +35,10 @@ Tmpfs=/run/lock:rw,rprivate,nosuid,nodev,tmpcopyup
 # /var but it is not a shared or slave mount".
 Volume=kinc-var-data:/var:Z,rslave
 Volume=kinc-config:/etc/kinc/config:ro,Z
+# The cluster CA, minted before this container starts so that every join config
+# can state its hash. kinc-preflight copies it into /etc/kubernetes/pki, and
+# kubeadm uses it as-is rather than creating one of its own.
+Volume=CA_DIR_PLACEHOLDER:/etc/kinc/ca:ro,Z
 # Share host container storage to cache images across all clusters
 Volume=%h/.local/share/containers/storage:/root/.local/share/containers/storage:rw,Z
 # Antrea's OVS looks up its kernel module here. The module is loaded by the
@@ -45,8 +49,15 @@ Volume=%h/.local/share/containers/storage:/root/.local/share/containers/storage:
 Volume=/lib/modules:/lib/modules:ro
 
 # Network configuration
+#
+# Two ports that are easy to confuse, named apart on purpose. The published
+# port is how kubectl on the host reaches this cluster, chosen so two clusters
+# do not collide. What a node inside the cluster dials is controlPlaneEndpoint,
+# whose port is the one the API server binds - 6443, always.
 # Port must be sequential (6443, 6444, 6445...) because subnet IDs are derived from last 2 digits
 PublishPort=127.0.0.1:CLUSTER_PORT:6443/tcp
+# The cluster's own network, so other nodes resolve this one by name.
+Network=NETWORK_UNIT_PLACEHOLDER
 
 # Environment variables
 Environment=container=podman

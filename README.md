@@ -1,6 +1,6 @@
 # kinc - Kubernetes in Container
 
-**Single-node rootless Kubernetes cluster running in a Podman container.**
+**Rootless Kubernetes cluster running in Podman containers, one per node.**
 
 [![Build Status](https://github.com/T0MASD/kinc/actions/workflows/ci.yml/badge.svg)](https://github.com/T0MASD/kinc/actions/workflows/ci.yml)
 [![Release](https://github.com/T0MASD/kinc/actions/workflows/release.yml/badge.svg)](https://github.com/T0MASD/kinc/actions/workflows/release.yml)
@@ -103,6 +103,22 @@ kubectl get nodes
 kubectl get pods -A
 ```
 
+### Deploy Multiple Nodes
+
+```bash
+# A control plane and two workers, each its own container
+KINC_WORKERS=2 ./tools/deploy.sh
+```
+
+Each worker joins with a config that is complete before it starts: the cluster
+CA is minted first, so every join states the hash it pins rather than learning
+it from the control plane. A worker publishes no ports - it is reached over the
+cluster's own podman network, which is also how it resolves the control plane
+by name. Pod traffic between nodes travels Antrea's geneve tunnel, which is
+what the `openvswitch` and `geneve` modules are required for.
+
+`KINC_WORKERS` defaults to 0, which is a single-node cluster.
+
 ### Deploy Multiple Clusters
 
 ```bash
@@ -111,11 +127,16 @@ CLUSTER_NAME=dev ./tools/deploy.sh
 CLUSTER_NAME=staging ./tools/deploy.sh
 CLUSTER_NAME=prod ./tools/deploy.sh
 
-# Clusters get sequential ports and isolated networks:
-# dev:     127.0.0.1:6443, subnet 10.244.43.0/24
-# staging: 127.0.0.1:6444, subnet 10.244.44.0/24
-# prod:    127.0.0.1:6445, subnet 10.244.45.0/24
+# Clusters get sequential ports and their own network and pod CIDR:
+# dev:     127.0.0.1:6443, pods 10.244.0.0/21
+# staging: 127.0.0.1:6444, pods 10.244.8.0/21
+# prod:    127.0.0.1:6445, pods 10.244.16.0/21
 ```
+
+A cluster's pod CIDR is a /21 because the controller-manager carves a /24 per
+node out of it: eight nodes per cluster, and 32 clusters inside 10.244.0.0/16.
+Clusters are isolated from each other - each has its own podman network, so
+one cluster's nodes cannot see another's.
 
 ### Cleanup
 

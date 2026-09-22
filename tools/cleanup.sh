@@ -8,8 +8,25 @@ echo "================================"
 CLUSTER_NAME="${CLUSTER_NAME:-default}"
 echo "🏷️  Cleaning up cluster: $CLUSTER_NAME"
 
+STATE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kinc/${CLUSTER_NAME}"
+
+# Every node of this cluster, control plane and workers alike. Worker names are
+# discovered from the quadlets on disk rather than from a count, so a cleanup
+# after a partial deploy still finds them.
+NODES=(kinc-${CLUSTER_NAME}-control-plane)
+for f in ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-w*.container; do
+    [ -e "$f" ] || continue
+    NODES+=("$(basename "$f" .container)")
+done
+echo "🧩 Nodes: ${NODES[*]}"
+
 echo "Stopping user services..."
-systemctl --user stop kinc-${CLUSTER_NAME}-control-plane.service kinc-${CLUSTER_NAME}-var-data-volume.service kinc-${CLUSTER_NAME}-config-volume.service 2>/dev/null || true
+for node in "${NODES[@]}"; do
+    systemctl --user stop ${node}.service ${node}-var-data-volume.service 2>/dev/null || true
+done
+systemctl --user stop kinc-${CLUSTER_NAME}-var-data-volume.service kinc-${CLUSTER_NAME}-config-volume.service 2>/dev/null || true
+# The network outlives its containers, so it is stopped after them.
+systemctl --user stop kinc-${CLUSTER_NAME}-network.service 2>/dev/null || true
 
 # Wait for services to actually stop
 echo "Waiting for services to stop..."
@@ -25,13 +42,28 @@ done
 pkill -f "pasta.*6443" 2>/dev/null || true
 echo "✅ Services stopped"
 
-echo "Removing container..."
-podman rm -f kinc-${CLUSTER_NAME}-control-plane 2>/dev/null || true
-echo "✅ Container removed"
+echo "Removing containers..."
+for node in "${NODES[@]}"; do
+    podman rm -f "$node" 2>/dev/null || true
+done
+echo "✅ Containers removed"
 
 echo "Removing volumes..."
+for node in "${NODES[@]}"; do
+    podman volume rm "${node}-var-data" 2>/dev/null || true
+done
 podman volume rm kinc-${CLUSTER_NAME}-var-data kinc-${CLUSTER_NAME}-config 2>/dev/null || true
 echo "✅ Volumes removed"
+
+echo "Removing cluster network..."
+podman network rm -f kinc-${CLUSTER_NAME} 2>/dev/null || true
+echo "✅ Network removed"
+
+# The CA and the rendered join configs. They are the cluster's, so they go with
+# it: a redeploy under the same name mints a new CA and renders new configs.
+echo "Removing cluster state..."
+rm -rf "${STATE_DIR}"
+echo "✅ Cluster state removed"
 
 echo "Removing Quadlet files..."
 rm -f ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-*.*
