@@ -1,4 +1,4 @@
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    #!/bin/bash
+#!/bin/bash
 set -euo pipefail
 
 echo "🏗️ kinc Container Image Build"
@@ -31,7 +31,15 @@ echo "🚀 Building consolidated image..."
 echo "   This may take several minutes (downloading Fedora, installing packages)"
 echo "   Using cache for unchanged layers (CACHE_BUST=$CACHE_BUST)"
 cd build
-podman build -f Containerfile -t "$IMAGE_NAME" --build-arg CACHE_BUST="$CACHE_BUST" .
+# Everything the image copies from this tree, as one digest. Passed as a build
+# arg so a change to any of it invalidates the COPY layers that follow, and
+# asserted against the built image below.
+CONTENT_DIGEST=$(find base kinc -type f -exec sha256sum {} + | sort | sha256sum | cut -c1-16)
+echo "   Content digest: $CONTENT_DIGEST"
+
+podman build -f Containerfile -t "$IMAGE_NAME" \
+    --build-arg CACHE_BUST="$CACHE_BUST" \
+    --build-arg KINC_CONTENT_DIGEST="$CONTENT_DIGEST" .
 
 echo
 echo "✅ Build complete!"
@@ -47,6 +55,18 @@ if ! podman image exists "$IMAGE_NAME"; then
     echo "❌ Image verification failed"
     exit 1
 fi
+
+# The image must carry the tree it was built from. A cached COPY layer once
+# served the previous run's scripts while the build reported success, so this
+# compares what the image recorded against what is on disk now.
+built_digest=$(podman run --rm --entrypoint="" "$IMAGE_NAME" cat /etc/kinc/.content-digest 2>/dev/null | tr -d '[:space:]')
+if [ "$built_digest" != "$CONTENT_DIGEST" ]; then
+    echo "❌ Image carries content '$built_digest', tree is '$CONTENT_DIGEST'"
+    echo "   The build served a cached layer for changed sources."
+    echo "   Retry with: CACHE_BUST=\$(date +%s) ./tools/build.sh"
+    exit 1
+fi
+echo "✅ Image carries this source tree ($CONTENT_DIGEST)"
 
 echo "✅ Image verified successfully!"
 
