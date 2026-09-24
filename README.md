@@ -12,9 +12,10 @@
 
 - 🚀 **Fast:** Cluster ready in ~40 seconds (with cached images)
 - 🔒 **Rootless:** Runs as regular user, no root required
-- 📦 **Self-contained:** Everything in one container (systemd, CRI-O, kubeadm, kubectl)
+- 📦 **Self-contained:** Each node is one container (systemd, CRI-O, kubeadm, kubectl)
 - 🔧 **Configurable:** Baked-in or mounted configuration
 - 🌐 **Isolated networking:** Sequential port allocation with subnet derivation
+- 🧩 **Multi-node:** A cluster has as many nodes as you ask for, on one host
 - 📊 **Multi-cluster:** Run multiple clusters concurrently
 - 🔍 **Observability:** Optional Faro event capture for bootstrap analysis (enabled in CI by default)
 - ✅ **Production-grade:** Uses official Kubernetes tools (kubeadm, kubectl, CRI-O)
@@ -119,6 +120,29 @@ what the `openvswitch` and `geneve` modules are required for.
 
 `KINC_WORKERS` defaults to 0, which is a single-node cluster.
 
+### API-Server Audit Logging
+
+```bash
+# Record reads of the resources you name. Off unless set.
+KINC_AUDIT_RESOURCES="/pods,fleet.example.com/widgets" ./tools/deploy.sh
+```
+
+Each entry is `<group>/<resource>`; the core group is empty, so `/pods`. Reads
+are logged at `Metadata` level for `get`, `list` and `watch` — user,
+impersonated user, verb, objectRef, source IPs and timestamps, no bodies.
+Everything else on the cluster is not logged.
+
+A GET or LIST changes nothing, so it raises no watch event and is invisible to
+every informer: the audit log is the only place a read is recorded. The policy
+is narrow on purpose — auditing everything is a volume problem, and naming the
+resources is the point.
+
+The log is at `/var/log/kubernetes/audit/audit.log` inside the control-plane
+container, on the cluster's own volume, so it survives a container restart and
+is readable from the host. It is capped at 100MB × 10 files × 30 days.
+
+Unset, the API server starts with no audit flags at all and nothing is written.
+
 ### Deploy Multiple Clusters
 
 ```bash
@@ -137,6 +161,28 @@ A cluster's pod CIDR is a /21 because the controller-manager carves a /24 per
 node out of it: eight nodes per cluster, and 32 clusters inside 10.244.0.0/16.
 Clusters are isolated from each other - each has its own podman network, so
 one cluster's nodes cannot see another's.
+
+### Image Store
+
+kinc keeps its own image store at `~/.local/share/kinc/storage`, shared by every
+node of every cluster on the host. Sharing is deliberate: a joining node needs
+no pull, because the control plane has already fetched what the cluster runs.
+
+It is separate from your podman store. Mounting that one instead made the
+cluster's runtime and your podman two writers of one store, let the cluster run
+any image on the host without pulling, and left cluster images where you prune
+for your own reasons.
+
+`cleanup.sh` leaves the store alone — it is a cache shared across clusters. To
+clear it, note that layer contents belong to a mapped root and plain `rm` will
+refuse:
+
+```bash
+podman unshare rm -rf ~/.local/share/kinc/storage
+```
+
+A cold store costs one pull of the control-plane images, which kinc does before
+`kubeadm init` rather than during it.
 
 ### Cleanup
 
@@ -188,13 +234,18 @@ Marker: /var/lib/kinc-initialized
 
 Ports are allocated sequentially, and network subnets are derived from the port's last 2 digits:
 
-| Cluster | Host Port     | Pod Subnet       | Service Subnet |
-|---------|---------------|------------------|----------------|
-| default | 127.0.0.1:6443 | 10.244.43.0/24   | 10.43.0.0/16   |
-| cluster01 | 127.0.0.1:6444 | 10.244.44.0/24   | 10.44.0.0/16   |
-| cluster02 | 127.0.0.1:6445 | 10.244.45.0/24   | 10.45.0.0/16   |
+| Cluster   | Host Port      | Pod Subnet     | Service Subnet |
+|-----------|----------------|----------------|----------------|
+| default   | 127.0.0.1:6443 | 10.244.0.0/21  | 10.43.0.0/16   |
+| cluster01 | 127.0.0.1:6444 | 10.244.8.0/21  | 10.44.0.0/16   |
+| cluster02 | 127.0.0.1:6445 | 10.244.16.0/21 | 10.45.0.0/16   |
 
 This ensures **non-overlapping networks** for concurrent clusters.
+
+A pod subnet is a /21 because the controller-manager carves a /24 out of it per
+node: eight nodes per cluster, and 32 clusters within 10.244.0.0/16. Each
+cluster also gets its own podman network, so one cluster's nodes cannot reach
+another's.
 
 ---
 
@@ -209,7 +260,7 @@ USE_BAKED_IN_CONFIG=true ./tools/deploy.sh
 ```
 
 - No config volume mount
-- Single cluster only (can't customize cluster name in kubeadm.conf)
+- Single cluster only (can't customize cluster name in kubeadm.conf), though it can still have workers
 - Fastest deployment
 
 ### Mounted Config (Multi-Cluster)
@@ -266,7 +317,7 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=myapp ./tools/deploy.sh
 **Environment Variables:**
 - `CLUSTER_NAME`: Cluster identifier (default: `default`)
 - `FORCE_PORT`: Override auto port allocation
-- `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.36.4`)
+- `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.37.0`)
 - `KINC_SKIP_SYSCTL_CHECKS`: Bypass inotify/keyring checks (default: `false`)
 - `KINC_ENABLE_FARO`: Enable Faro event capture (default: `false`, CI: `true`)
 
@@ -307,7 +358,13 @@ SKIP_CLEANUP=true ./tools/run-validation.sh
 
 ### Direct Podman Run (No Quadlet)
 
-For environments without systemd or for quick testing:
+For environments without systemd or for quick testing. This is a single-node
+cluster: workers need a podman network and a join config, which `deploy.sh`
+renders.
+
+The host still needs what Antrea's datapath needs - `openvswitch` and `geneve`
+loaded, and the volume's mount shared. `deploy.sh` checks both and says so;
+here they are your responsibility.
 
 ```bash
 # Create volume
@@ -317,17 +374,13 @@ podman volume create kinc-var-data
 podman run -d --name kinc-cluster \
   --hostname kinc-control-plane \
   --cgroups=split \
-  --cap-add=SYS_ADMIN --cap-add=SYS_RESOURCE --cap-add=NET_ADMIN \
-  --cap-add=SETPCAP --cap-add=NET_RAW --cap-add=SYS_PTRACE \
-  --cap-add=DAC_OVERRIDE --cap-add=CHOWN --cap-add=FOWNER \
-  --cap-add=FSETID --cap-add=KILL --cap-add=SETGID --cap-add=SETUID \
-  --cap-add=NET_BIND_SERVICE --cap-add=SYS_CHROOT --cap-add=SETFCAP \
-  --cap-add=DAC_READ_SEARCH --cap-add=AUDIT_WRITE \
+  --cap-add=all \
   --device /dev/fuse \
   --tmpfs /tmp:rw,rprivate,nosuid,nodev,tmpcopyup \
-  --tmpfs /run:rw,rprivate,nosuid,nodev,tmpcopyup \
+  --tmpfs /run:rw,rshared,nosuid,nodev,tmpcopyup \
   --tmpfs /run/lock:rw,rprivate,nosuid,nodev,tmpcopyup \
-  --volume kinc-var-data:/var:rw \
+  --volume kinc-var-data:/var:rw,rslave \
+  --volume /lib/modules:/lib/modules:ro \
   --volume $HOME/.local/share/containers/storage:/root/.local/share/containers/storage:rw \
   --sysctl net.ipv6.conf.all.disable_ipv6=0 \
   --sysctl net.ipv6.conf.all.keep_addr_on_down=1 \
@@ -335,7 +388,7 @@ podman run -d --name kinc-cluster \
   --sysctl net.netfilter.nf_conntrack_tcp_timeout_close_wait=3600 \
   -p 127.0.0.1:6443:6443/tcp \
   --env container=podman \
-  ghcr.io/t0masd/kinc:latest
+  localhost/kinc/node:v1.37.0
 
 # Wait for cluster (~40 seconds)
 timeout 300 bash -c 'until podman exec kinc-cluster test -f /var/lib/kinc-initialized 2>/dev/null; do sleep 2; done'
@@ -518,11 +571,11 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=cluster02 ./tools/deploy.sh
 
 ## Components
 
-- **Kubernetes:** v1.36.4
-- **CRI-O:** v1.36.4
-- **kubeadm:** v1.36.4
-- **kubectl:** v1.36.4
-- **CNI:** kindnet (from Kubernetes KIND project)
+- **Kubernetes:** v1.37.0
+- **CRI-O:** v1.37.1 (Fedora 44 updates-testing until its Bodhi update is stable)
+- **kubeadm:** v1.37.0
+- **kubectl:** v1.37.0
+- **CNI:** Antrea v2.7.0 (Open vSwitch datapath, geneve between nodes)
 - **Storage:** local-path-provisioner
 - **Base:** Fedora 44
 
@@ -559,9 +612,10 @@ THE SOFTWARE IS AI GENERATED AND PROVIDED “AS IS”, WITHOUT CLAIM OF COPYRIGH
 
 ## Credits
 
-- **KIND (Kubernetes IN Docker):** Inspiration and kindnet CNI
-- **kubeadm:** v1.36.4
-- **CRI-O:** v1.36.4
+- **KIND (Kubernetes IN Docker):** Inspiration
+- **Antrea:** Cluster networking
+- **kubeadm:** v1.37.0
+- **CRI-O:** v1.37.1
 - **Podman:** Rootless containers
 - **systemd:** Service management
 

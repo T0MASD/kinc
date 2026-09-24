@@ -53,6 +53,11 @@ for node in "${NODES[@]}"; do
     podman volume rm "${node}-var-data" 2>/dev/null || true
 done
 podman volume rm kinc-${CLUSTER_NAME}-var-data kinc-${CLUSTER_NAME}-config 2>/dev/null || true
+
+# The cluster's PersistentVolumes. Removed with the cluster, like its other
+# volumes - export it first if the data matters:
+#   podman volume export kinc-${CLUSTER_NAME}-storage > storage.tar
+podman volume rm kinc-${CLUSTER_NAME}-storage 2>/dev/null || true
 echo "✅ Volumes removed"
 
 echo "Removing cluster network..."
@@ -61,8 +66,22 @@ echo "✅ Network removed"
 
 # The CA and the rendered join configs. They are the cluster's, so they go with
 # it: a redeploy under the same name mints a new CA and renders new configs.
+# Each node's image store lives under here too, and its layer directories are
+# owned by the container's mapped UIDs - an unprivileged rm cannot touch them
+# and stops at "Permission denied", leaving the store behind. Removing it from
+# inside the user namespace that owns it is the only thing that works.
+#
+# A store left behind is not cosmetic: the next deploy mounts it again, and a
+# half-removed store is one whose layers.json no longer describes what is on
+# disk. So this asserts the directory is gone rather than hoping.
 echo "Removing cluster state..."
-rm -rf "${STATE_DIR}"
+if [ -d "${STATE_DIR}" ]; then
+    podman unshare rm -rf "${STATE_DIR}"
+fi
+if [ -e "${STATE_DIR}" ]; then
+    echo "❌ ${STATE_DIR} survived removal - a later deploy would reuse it"
+    exit 1
+fi
 echo "✅ Cluster state removed"
 
 echo "Removing Quadlet files..."

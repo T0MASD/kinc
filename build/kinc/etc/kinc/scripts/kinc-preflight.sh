@@ -146,6 +146,29 @@ sed -e "s/CONTAINER_IP_PLACEHOLDER/$CONTAINER_IP/g" \
     -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${CONTROL_PLANE_NAME}:6443/g" \
     "$CONFIG_FILE" > /tmp/kubeadm-final.conf
 
+# Tell the kubelet the OOM score it can actually hold.
+#
+# It asks for -999 by default, to keep itself and the runtime off the OOM
+# killer's list. Lowering oom_score_adj below the inherited floor needs
+# CAP_SYS_RESOURCE in the *initial* user namespace - fs/proc/base.c calls
+# capable(), not ns_capable() - so no capability a rootless container can be
+# given satisfies it. Verified: the write is refused even under --privileged,
+# which holds every capability there is.
+#
+# So the request fails, the kubelet stays where it was, and it logs an error
+# and retries every five minutes for the life of the node. Asking for the value
+# it already has ends that: the write is no longer a decrease, so it succeeds,
+# and nothing about the node's actual standing with the OOM killer changes -
+# it was never going to get -999.
+#
+# Read rather than hardcoded, because the floor belongs to the session that
+# started podman: 200 here, 0 elsewhere, and a value below it fails the same
+# way. PID 1 is the container's systemd, which is what the kubelet inherits.
+OOM_SCORE_ADJ="$(cat /proc/1/oom_score_adj)"
+log "Kubelet oomScoreAdj: ${OOM_SCORE_ADJ} (inherited; -999 is unreachable rootless)"
+yq eval -i "(select(.kind == \"KubeletConfiguration\") | .oomScoreAdj) = ${OOM_SCORE_ADJ}" \
+    /tmp/kubeadm-final.conf
+
 # Adopt the cluster CA if one was minted for this cluster.
 #
 # kubeadm creates the CA during init otherwise, which means the hash a joining
@@ -163,6 +186,129 @@ if [[ -f /etc/kinc/ca/ca.crt && -f /etc/kinc/ca/ca.key ]]; then
     install -m 0644 /etc/kinc/ca/ca.crt /etc/kubernetes/pki/ca.crt
     install -m 0600 /etc/kinc/ca/ca.key /etc/kubernetes/pki/ca.key
     log "✅ Cluster CA adopted"
+fi
+
+# API-server audit logging, when KINC_AUDIT_RESOURCES names something.
+#
+# A GET or LIST changes nothing, so it raises no watch event and is invisible to
+# every informer - the audit log is the only place a read is recorded. That is
+# what this is for, and why the policy is narrow rather than catch-all: an
+# audit-everything policy is a volume problem, and naming the resources is the
+# point. Each entry is "<group>/<resource>"; the core group is empty, so "/pods".
+#
+# DELETE is recorded alongside the reads. It does raise a watch event, so Faro
+# sees the object go - but a watch says only that it is gone, never who removed
+# it, and the object is past tense by the time anything can be asked about it.
+# The deleter's identity exists in one place only, and this is it. It is also
+# what makes a denial legible after the fact: the API returns Forbidden rather
+# than NotFound for an object the caller may no longer name, so a delete and the
+# refusals that follow it read as one sequence instead of two unrelated ones.
+#
+# Unset, nothing here runs and the API server starts with no audit flags at all.
+#
+# A worker never serves the API, so it has no policy to write.
+if [[ -n "${KINC_AUDIT_RESOURCES:-}" ]]; then
+    log "🔎 KINC_AUDIT_RESOURCES set, enabling API-server audit: ${KINC_AUDIT_RESOURCES}"
+
+    install -d -m 0755 /etc/kubernetes/audit /var/log/kubernetes/audit
+
+    # Metadata, not Request or RequestResponse: user, impersonatedUser, verb,
+    # objectRef, sourceIPs and timestamps, without any body.
+    # RequestReceived is dropped because ResponseComplete is the stage worth
+    # keeping, and omitting it halves the event count.
+    {
+        echo "apiVersion: audit.k8s.io/v1"
+        echo "kind: Policy"
+        echo "omitStages:"
+        echo "  - RequestReceived"
+        echo "rules:"
+        IFS=',' read -ra _entries <<< "$KINC_AUDIT_RESOURCES"
+        for entry in "${_entries[@]}"; do
+            entry="$(echo "$entry" | tr -d '[:space:]')"
+            [[ -z "$entry" ]] && continue
+            group="${entry%%/*}"
+            resource="${entry#*/}"
+            echo "  - level: Metadata"
+            echo "    verbs: [\"get\", \"list\", \"watch\", \"delete\"]"
+            echo "    resources:"
+            echo "      - group: \"${group}\""
+            echo "        resources: [\"${resource}\"]"
+        done
+        echo "  # Everything else on this cluster: not logged."
+        echo "  - level: None"
+    } > /etc/kubernetes/audit/policy.yaml
+
+    if ! yq eval '.' /etc/kubernetes/audit/policy.yaml >/dev/null 2>&1; then
+        log "❌ Generated audit policy is not valid YAML"
+        cat /etc/kubernetes/audit/policy.yaml
+        exit 1
+    fi
+    log "   policy: $(grep -c 'level: Metadata' /etc/kubernetes/audit/policy.yaml) audited resource(s)"
+
+    # Injected with yq, not sed: the config is four YAML documents and the
+    # flags belong only to ClusterConfiguration. v1beta4 takes extraArgs as a
+    # list of name/value pairs, not a map.
+    #
+    # A static pod sees only what is mounted into it, and hostPath here is this
+    # container's filesystem. /var is the cluster's own volume, so the log
+    # outlives a container restart and is readable from the host.
+    yq eval -i '
+      (select(.kind == "ClusterConfiguration") | .apiServer.extraArgs) +=
+        [{"name": "audit-policy-file", "value": "/etc/kubernetes/audit/policy.yaml"},
+         {"name": "audit-log-path", "value": "/var/log/kubernetes/audit/audit.log"},
+         {"name": "audit-log-maxage", "value": "30"},
+         {"name": "audit-log-maxbackup", "value": "10"},
+         {"name": "audit-log-maxsize", "value": "100"}] |
+      (select(.kind == "ClusterConfiguration") | .apiServer.extraVolumes) =
+        [{"name": "audit-policy", "hostPath": "/etc/kubernetes/audit",
+          "mountPath": "/etc/kubernetes/audit", "readOnly": true, "pathType": "DirectoryOrCreate"},
+         {"name": "audit-log", "hostPath": "/var/log/kubernetes/audit",
+          "mountPath": "/var/log/kubernetes/audit", "pathType": "DirectoryOrCreate"}]
+    ' /tmp/kubeadm-final.conf
+
+    log "✅ Audit logging configured"
+else
+    log "🔕 KINC_AUDIT_RESOURCES not set, API server starts with no audit flags"
+fi
+
+# Pull the control-plane images before kubeadm needs them.
+#
+# kubeadm bootstraps the admin user under a deadline that assumes the API
+# server is coming up, not still downloading. With a warm image store that is
+# always true and this is a no-op; with a cold one the static pods are still
+# pulling when the deadline expires, and it fails as "could not bootstrap the
+# admin user" rather than as a slow pull.
+#
+# Only the control-plane set: the CNI and storage images are pulled later, by
+# postinit, whose waits are sized for it. `kubeadm config images list` does not
+# name them.
+#
+# A worker runs a join and needs none of this, so it is skipped there.
+if [[ ! -f /etc/kinc/join/join.conf ]]; then
+    pull_start=$(date +%s)
+
+    # Ask the local store first. 'kubeadm config images pull' contacts the
+    # registry for every image even when all of them are present, which costs
+    # about as long as the bootstrap it is protecting. crictl answers from the
+    # store, so a warm node skips the network entirely.
+    missing=""
+    for img in $(kubeadm config images list --config=/tmp/kubeadm-final.conf 2>/dev/null); do
+        if [[ -z "$(crictl --runtime-endpoint unix:///var/run/crio/crio.sock images -q "$img" 2>/dev/null)" ]]; then
+            missing="$missing $img"
+        fi
+    done
+
+    if [[ -z "$missing" ]]; then
+        log "✅ Control-plane images already present ($(($(date +%s) - pull_start))s)"
+    else
+        log "Pre-pulling control-plane images:$missing"
+        if kubeadm config images pull --config=/tmp/kubeadm-final.conf 2>&1 | while IFS= read -r line; do log "   $line"; done; then
+            log "✅ Control-plane images present ($(($(date +%s) - pull_start))s)"
+        else
+            # Not fatal: kubeadm will pull them itself, just against its own clock.
+            log "⚠️  Pre-pull did not complete; kubeadm will pull during init"
+        fi
+    fi
 fi
 
 # Validate the final configuration

@@ -7,7 +7,7 @@ echo "============================="
 # Single image for all clusters (no cluster name in tag)
 # Build once, deploy many times with different configs
 # Note: Update this when upgrading Kubernetes version
-IMAGE_NAME="localhost/kinc/node:v1.36.4"
+IMAGE_NAME="localhost/kinc/node:v1.37.0"
 
 # Cache busting for package updates (increment when packages need updating)
 CACHE_BUST="${CACHE_BUST:-1}"
@@ -31,10 +31,15 @@ echo "🚀 Building consolidated image..."
 echo "   This may take several minutes (downloading Fedora, installing packages)"
 echo "   Using cache for unchanged layers (CACHE_BUST=$CACHE_BUST)"
 cd build
-# Everything the image copies from this tree, as one digest. Passed as a build
-# arg so a change to any of it invalidates the COPY layers that follow, and
-# asserted against the built image below.
-CONTENT_DIGEST=$(find base kinc -type f -exec sha256sum {} + | sort | sha256sum | cut -c1-16)
+# Everything this image is built from, as one digest. Passed as a build arg so
+# a change to any of it invalidates the COPY layers that follow, and asserted
+# against the built image below.
+#
+# The Containerfile is included because the assertion claims the image carries
+# this source tree, and the Containerfile is part of it. podman keys its own
+# cache on the Containerfile already, so this changes no rebuild behaviour - it
+# makes the claim match what is checked.
+CONTENT_DIGEST=$(find base kinc Containerfile -type f -exec sha256sum {} + | sort | sha256sum | cut -c1-16)
 echo "   Content digest: $CONTENT_DIGEST"
 
 podman build -f Containerfile -t "$IMAGE_NAME" \
@@ -120,7 +125,7 @@ echo "✅ Validation complete - Baked-in configuration active!"
 # Show image size
 echo
 echo "📊 Image information:"
-podman images | grep "kinc/node.*v1.36.4"
+podman images | grep "kinc/node.*v1.37.0"
 
 echo
 echo "🚀 Next steps:"

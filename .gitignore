@@ -32,3 +32,6 @@ go.work.sum
 # .vscode/
 
 work
+
+# Gate and collector output (uploaded from CI, never committed)
+artifacts/

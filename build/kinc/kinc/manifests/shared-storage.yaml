@@ -1,0 +1,49 @@
+# System storage: one podman volume, mounted by every node, exposed as a static
+# ReadWriteMany PersistentVolume.
+#
+# The split this cluster keeps:
+#
+#   podman volume  ->  system storage.  Static, no provisioner, no helper pod,
+#                      and 'podman volume export' moves it. For components this
+#                      tree ships and for anything that needs a directory rather
+#                      than a claim of its own.
+#
+#   local-path     ->  user storage.  Dynamic, through the 'standard' class. A
+#                      StatefulSet's volumeClaimTemplates creates its own PVCs at
+#                      runtime and can only be served this way, so user workloads
+#                      keep it.
+#
+# No PersistentVolumeClaim is shipped. A PV binds exactly one claim, so choosing
+# a namespace here would hand this cluster's system storage to whoever happened
+# to be in it. A component that wants it claims it:
+#
+#   kind: PersistentVolumeClaim
+#   spec: { accessModes: [ReadWriteMany], storageClassName: kinc-shared,
+#           resources: { requests: { storage: 100Gi } } }
+#
+# and consumers share that claim with a subPath each.
+#
+# Backed by shared/ inside the cluster's podman volume, a sibling of the
+# dynamic/ subtree local-path writes, so neither reads the other's data.
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: kinc-shared
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: Immediate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kinc-shared
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: kinc-shared
+  hostPath:
+    path: /tmp/kinc-storage/shared
+    type: DirectoryOrCreate

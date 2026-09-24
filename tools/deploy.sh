@@ -14,7 +14,7 @@ FORCE_PORT="${FORCE_PORT:-}"  # Allow manual port override
 # Image configuration - Single image for all clusters
 # All clusters use the same image with different mounted configs
 # Allow KINC_IMAGE env var to override default
-IMAGE_NAME="${KINC_IMAGE:-localhost/kinc/node:v1.36.4}"
+IMAGE_NAME="${KINC_IMAGE:-localhost/kinc/node:v1.37.0}"
 
 echo "📁 Working directory: $SCRIPT_DIR"
 echo "🏷️  Cluster name: $CLUSTER_NAME"
@@ -291,6 +291,25 @@ echo "✅ Ready for deployment"
 # same cluster name so a node's join config stays valid, and removed by
 # cleanup.sh with the rest of the cluster.
 echo
+# kinc's own image store: one per node, under this cluster's state directory so
+# cleanup.sh takes it with the rest.
+#
+# Per node, not per cluster. containers/storage is single-writer - two CRI-O
+# daemons pointed at one directory each garbage-collect the layers the other
+# still references, and the loser ends up running containers with no rootfs.
+# Created here so it is owned by this user before the container relabels it: a
+# :Z mount on a root-owned directory fails.
+node_store() {
+    local dir="${STATE_DIR}/stores/$1"
+    mkdir -p "$dir"
+    printf '%s' "$dir"
+}
+
+# Where this cluster's PersistentVolumes live: one podman volume, mounted by
+# every node. Named rather than a host path so 'podman volume export' moves a
+# cluster's data and cleanup.sh removes it with everything else.
+CLUSTER_STORAGE="kinc-${CLUSTER_NAME}-storage"
+
 echo "🔑 Step 1b: Minting the cluster CA"
 mkdir -p "${STATE_DIR}/ca"
 if [ -f "${STATE_DIR}/ca/ca.crt" ] && [ -f "${STATE_DIR}/ca/ca.key" ]; then
@@ -333,6 +352,9 @@ sed "s/VolumeName=kinc-var-data/VolumeName=kinc-${CLUSTER_NAME}-var-data/g" \
 sed "s/VolumeName=kinc-config/VolumeName=kinc-${CLUSTER_NAME}-config/g" \
     runtime/quadlet/kinc-config.volume > ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-config.volume
 
+sed "s/VolumeName=kinc-storage/VolumeName=${CLUSTER_STORAGE}/g" \
+    runtime/quadlet/kinc-storage.volume > ~/.config/containers/systemd/${CLUSTER_STORAGE}.volume
+
 # Copy and customize container file
 sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-control-plane/g" \
     -e "s/HostName=kinc-control-plane/HostName=kinc-${CLUSTER_NAME}-control-plane/g" \
@@ -343,6 +365,8 @@ sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-co
     -e "s/PublishPort=127.0.0.1:6443:6443\/tcp/PublishPort=127.0.0.1:${CLUSTER_PORT}:6443\/tcp/g" \
     -e "s|CA_DIR_PLACEHOLDER|${STATE_DIR}/ca|g" \
     -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
+    -e "s|STORAGE_VOLUME_PLACEHOLDER|${CLUSTER_STORAGE}|g" \
+    -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${CONTROL_PLANE_NAME}")|g" \
     runtime/quadlet/kinc-control-plane.container > ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 
 echo "✅ Quadlet files installed"
@@ -441,6 +465,15 @@ sed -i "s|Image=.*|Image=$IMAGE_NAME|g" ~/.config/containers/systemd/kinc-${CLUS
 sed -i "s|PublishPort=.*|PublishPort=127.0.0.1:${CLUSTER_PORT}:6443/tcp|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 sed -i "s|ContainerName=.*|ContainerName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 sed -i "s|HostName=.*|HostName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+
+# API-server audit logging, when asked for. Each entry is "<group>/<resource>";
+# the core group is empty, so "/pods". Unset, the API server starts with no
+# audit flags at all and the image is untouched - the same opt-in shape as Faro.
+if [[ -n "${KINC_AUDIT_RESOURCES:-}" ]]; then
+    echo "🔎 KINC_AUDIT_RESOURCES set - auditing: ${KINC_AUDIT_RESOURCES}"
+    sed -i "/^Environment=KUBECONFIG/a Environment=KINC_AUDIT_RESOURCES=${KINC_AUDIT_RESOURCES}" \
+        ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+fi
 
 # Conditionally add Faro environment variable if requested
 if [[ "${KINC_ENABLE_FARO:-false}" == "true" ]]; then
@@ -653,6 +686,8 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
             -e "s|JOIN_DROPIN_DIR_PLACEHOLDER|${STATE_DIR}/dropins/kubeadm-init|g" \
             -e "s|POSTINIT_DROPIN_DIR_PLACEHOLDER|${STATE_DIR}/dropins/kinc-postinit|g" \
             -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
+            -e "s|STORAGE_VOLUME_PLACEHOLDER|${CLUSTER_STORAGE}|g" \
+            -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${WORKER_CONTAINER}")|g" \
             runtime/quadlet/kinc-worker.container > ~/.config/containers/systemd/${WORKER_CONTAINER}.container
 
         sed "s/VolumeName=kinc-var-data/VolumeName=${WORKER_CONTAINER}-var-data/g" \
