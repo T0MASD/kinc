@@ -30,6 +30,7 @@
 - **Sufficient inotify limits** (for multiple clusters)
 - **Sufficient kernel keyring limits** (for multiple clusters)
 - **User namespaces available to Podman** (AppArmor hosts)
+- **`openvswitch` and `geneve` kernel modules loaded** (Antrea's datapath)
 
 `deploy.sh` reports which kernel mandatory access control system is active and
 adapts to it. Under SELinux it restores the context on the config volume, which
@@ -46,6 +47,16 @@ and so belongs with the sysctls below:
 # Only where deploy.sh reports Podman cannot create a user namespace
 sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 echo 'kernel.apparmor_restrict_unprivileged_userns = 0' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+```
+
+Antrea's datapath is Open vSwitch, and geneve carries its traffic. A rootless
+nested container cannot load a kernel module itself, so the host loads them:
+
+```bash
+sudo modprobe openvswitch geneve
+
+# Make permanent
+printf 'openvswitch\ngeneve\n' | sudo tee /etc/modules-load.d/kinc.conf
 ```
 
 ```bash
@@ -142,7 +153,7 @@ Container Start
     ↓
 ┌─────────────────────────────────────┐
 │ kinc-postinit.service (oneshot)     │
-│ - CNI installation (kindnet)        │
+│ - CNI installation (Antrea)         │
 │ - Storage provisioner               │
 │ - kubectl wait for readiness        │
 └─────────────────────────────────────┘
