@@ -298,6 +298,94 @@ jobs:
           echo "✅ Cluster validated"
         shell: bash
 
+      # Antrea replaces kindnet, so the gate has to check the datapath rather
+      # than infer it. A Pod can be Running with no OVS port behind it, and a
+      # Service can resolve while nothing is forwarded: this asks the agent what
+      # it did, and traceflow reports each component a packet passed through.
+      - name: Validate storage and the Antrea datapath
+        run: |
+          echo "=== Validating storage and the Antrea datapath ==="
+
+          kubectl apply -f runtime/manifests/test-workload.yaml
+          kubectl -n kinc-validation wait --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc --timeout=120s
+          kubectl -n kinc-validation wait --for=condition=Ready pod/test-server pod/test-client --timeout=180s
+
+          # Storage: a provisioner that binds but cannot be written to is still a failure.
+          echo ""
+          echo "--- storage ---"
+          kubectl -n kinc-validation exec test-server -- sh -c 'echo kinc-storage-probe > /data/probe.txt'
+          read_back=$(kubectl -n kinc-validation exec test-server -- cat /data/probe.txt)
+          if [ "$read_back" != "kinc-storage-probe" ]; then
+            echo "❌ PVC wrote '$read_back'"
+            exit 1
+          fi
+          echo "✅ PVC bound, written and read back"
+
+          AGENT=$(kubectl -n kube-system get pod -l app=antrea,component=antrea-agent -o name | head -1)
+
+          # Antrea's own view: the agent's health, and an OVS port per Pod. A Pod can be
+          # Running with no datapath behind it, so ask the agent rather than the API.
+          echo ""
+          echo "--- antrea agent ---"
+          # All four conditions, not just AgentHealthy: the OVSDB and OpenFlow ones are
+          # what report an agent that came up without a working datapath underneath.
+          agentinfo=$(kubectl -n kube-system exec "$AGENT" -c antrea-agent -- antctl get agentinfo -o json)
+          for cond in AgentHealthy ControllerConnectionUp OVSDBConnectionUp OpenflowConnectionUp; do
+            status=$(printf '%s' "$agentinfo" | jq -r --arg c "$cond" '.agentConditions[]? | select(.type==$c) | .status')
+            if [ "$status" != "True" ]; then
+              echo "❌ $cond is '$status'"
+              printf '%s' "$agentinfo" | jq -r '.agentConditions[]? | "   \(.type)=\(.status)"'
+              exit 1
+            fi
+            echo "✅ $cond"
+          done
+
+          for pod in test-server test-client; do
+            ofport=$(kubectl -n kube-system exec "$AGENT" -c antrea-agent -- \
+              antctl get podinterface "$pod" -n kinc-validation -o json | jq -r '.[0].ofPort // empty')
+            if [ -z "$ofport" ]; then
+              echo "❌ $pod has no OVS port"
+              exit 1
+            fi
+            echo "✅ $pod on OVS port $ofport"
+          done
+
+          # Traceflow reports what the datapath did with a packet, per component. It is
+          # how a CNI change is checked: a Service that resolves and a Pod that is Ready
+          # say nothing about whether traffic is actually forwarded.
+          trace() {
+            local desc="$1" dst="$2" flow="$3" want="$4"
+            local out
+            out=$(kubectl -n kube-system exec "$AGENT" -c antrea-agent -- \
+                  antctl traceflow -S kinc-validation/test-client -D "$dst" -f "$flow" -o json 2>/dev/null)
+            if ! printf '%s' "$out" | jq -e --arg w "$want" \
+                 '.phase == "Succeeded" and ([.results[].observations[].action] | index($w) != null)' >/dev/null; then
+              echo "❌ $desc: expected a '$want' observation"
+              printf '%s' "$out" | jq -r '"   phase=\(.phase)", (.results[]?.observations[]? | "   \(.component) -> \(.action)")' || true
+              exit 1
+            fi
+            echo "✅ $desc"
+            printf '%s' "$out" | jq -r '.results[].observations[] | "     \(.component)\(if .componentInfo then "/"+.componentInfo else "" end) -> \(.action)"'
+          }
+
+          echo ""
+          echo "--- datapath ---"
+          CLUSTER_IP=$(kubectl -n kinc-validation get svc test-service -o jsonpath='{.spec.clusterIP}')
+          trace "east/west: pod to pod"          kinc-validation/test-server tcp,tcp_dst=8080 Delivered
+          trace "service: pod to ClusterIP"      "$CLUSTER_IP"               tcp,tcp_dst=8080 Delivered
+          trace "north/south: pod to external"   8.8.8.8                     icmp             ForwardedOutOfNetwork
+
+          # Traceflow injects a synthetic packet. Real traffic also needs CoreDNS and the
+          # Service proxy, so send some.
+          echo ""
+          echo "--- live traffic ---"
+          kubectl -n kinc-validation exec test-client -- /agnhost connect --timeout=15s test-service:8080
+          echo "✅ pod reached the Service by name"
+
+          kubectl delete -f runtime/manifests/test-workload.yaml --wait=false
+          echo ""
+          echo "✅ storage and datapath validated"
+
       - name: Collect comprehensive diagnostics
         if: always()
         run: |
