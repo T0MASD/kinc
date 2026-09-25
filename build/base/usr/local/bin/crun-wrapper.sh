@@ -39,6 +39,19 @@ if [[ "$*" == *"create"* ]]; then
                 mv "$bundle/config.json.tmp" "$bundle/config.json"
             else
                 rm -f "$bundle/config.json.tmp"
+                # Say so, because the alternative is silence followed by a
+                # container that will not create. crun rejects the spec this
+                # left in place, and CRI-O reports only "write to
+                # /proc/self/oom_score_adj: Permission denied" - true, and no
+                # help in finding the rewrite that was supposed to prevent it.
+                #
+                # The journal rather than a file: journald bounds it, and the
+                # diagnostics collector already takes the whole boot journal,
+                # so this reaches a CI artifact without anything being wired up
+                # for it. `journalctl -t crun-wrapper` on a node, or grep the
+                # collected journal.txt.
+                logger -t crun-wrapper -p daemon.err \
+                    "failed to strip oomScoreAdj from ${bundle}/config.json; crun will refuse it"
             fi
         fi
     fi
