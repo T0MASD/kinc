@@ -54,7 +54,7 @@ jobs:
           
           # Failed services
           echo "━━━ Check 4: System Health ━━━"
-          failed=$(systemctl --user list-units --state=failed --no-pager --no-legend 2>/dev/null | wc -l)
+          failed=$(systemctl --user list-units --state=failed --output=json --no-pager 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
           if [ $failed -gt 0 ]; then
             echo "⚠️  Found $failed failed services"
             systemctl --user list-units --state=failed --no-pager
@@ -103,7 +103,7 @@ jobs:
           
           while [ $waited -lt $max_wait ]; do
             # Check if container is running
-            if ! podman ps --filter "name=kinc-default-control-plane" --format "{{.Names}}" | grep -q "kinc-default-control-plane"; then
+            if ! podman ps --format json | jq -e --arg n "kinc-default-control-plane" 'any(.[]; (.Names[]? // "") == $n)' >/dev/null; then
               echo "❌ Container not running"
               systemctl --user status kinc-default-control-plane.service --no-pager || true
               exit 1
@@ -197,7 +197,11 @@ jobs:
           echo "=== Verifying Baked-In Configuration ==="
           
           # Check kinc-preflight.service logs for config source
-          config_source=$(podman exec kinc-default-control-plane journalctl -u kinc-preflight.service --no-pager --boot 2>/dev/null | grep -oP '(Using mounted configuration|No mounted config found, using baked-in configuration)' | head -1)
+          # -o json and jq: grep -oP piped to head -1 exits on the first match,
+          # which SIGPIPEs journalctl and fails the pipeline under -o pipefail.
+          config_source=$(podman exec kinc-default-control-plane journalctl -u kinc-preflight.service -o json --no-pager --boot 2>/dev/null \
+            | jq -r -s '[.[] | (.MESSAGE // "" | tostring)
+                        | capture("(?<m>Using mounted configuration|No mounted config found, using baked-in configuration)").m] | first // ""')
           
           echo "Configuration source: $config_source"
           
@@ -219,10 +223,18 @@ jobs:
           # journald can lag behind a service that has already finished, so poll
           # for each marker rather than reading the journal once. A single read
           # failed this step on clusters that had in fact initialized.
+          #
+          # The journal is captured and matched in bash rather than piped to
+          # grep -q. This step runs under -o pipefail, and grep -q exits on the
+          # first match, which SIGPIPEs journalctl and makes the pipeline report
+          # failure for a marker that is present. Only the largest journal hit
+          # it: smaller ones fit the pipe buffer, so journalctl finished writing
+          # before grep could exit.
           wait_for_log() {
-            local unit="$1" marker="$2" timeout="${3:-120}" waited=0
+            local unit="$1" marker="$2" timeout="${3:-120}" waited=0 journal
             while [ "$waited" -lt "$timeout" ]; do
-              if podman exec kinc-default-control-plane journalctl -u "$unit" --no-pager --boot 2>/dev/null | grep -q "$marker"; then
+              journal=$(podman exec kinc-default-control-plane journalctl -u "$unit" -o json --no-pager --boot 2>/dev/null || true)
+              if printf '%s\n' "$journal" | jq -e -s --arg m "$marker" 'any(.[]; (.MESSAGE // "") | tostring | contains($m))' >/dev/null 2>&1; then
                 if [ "$waited" -gt 0 ]; then echo "   (appeared after ${waited}s)"; fi
                 return 0
               fi
@@ -366,13 +378,23 @@ jobs:
             cp $FARO_PATH/*.log artifacts/faro/ 2>/dev/null || true
             
             # Count events
-            EVENT_COUNT=$(cat artifacts/faro/*.json 2>/dev/null | wc -l)
-            echo "✅ Captured $EVENT_COUNT events"
-            
-            # Show summary
+            # jq counts objects rather than lines, so a truncated capture is
+            # reported instead of being counted as an event.
+            if EVENT_COUNT=$(jq -s 'length' artifacts/faro/*.json 2>/dev/null); then
+              echo "✅ Captured $EVENT_COUNT events"
+            else
+              echo "⚠️  Event file is not valid JSON"
+              EVENT_COUNT=0
+            fi
+
+            # Show summary. Grouping in jq keeps the whole thing in one process:
+            # sort | uniq -c | sort -rn | head exits early and SIGPIPEs its
+            # producer, which fails the pipeline under -o pipefail.
             echo ""
             echo "Event Summary:"
-            cat artifacts/faro/*.json | jq -r '.gvr' | sort | uniq -c | sort -rn | head -10
+            jq -r -s 'group_by(.gvr) | map({gvr: .[0].gvr, n: length})
+                      | sort_by(-.n) | .[:10] | .[] | "\(.n)\t\(.gvr)"' \
+              artifacts/faro/*.json 2>/dev/null || true
           else
             echo "⚠️  Faro events not found - skipping extraction"
           fi
@@ -438,7 +460,7 @@ jobs:
           
           # Failed services
           echo "━━━ Check 4: System Health ━━━"
-          failed=$(systemctl --user list-units --state=failed --no-pager --no-legend 2>/dev/null | wc -l)
+          failed=$(systemctl --user list-units --state=failed --output=json --no-pager 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
           if [ $failed -gt 0 ]; then
             echo "⚠️  Found $failed failed services"
             systemctl --user list-units --state=failed --no-pager
@@ -500,7 +522,7 @@ jobs:
             
             while [ $waited -lt $max_wait ]; do
               # Check if container is running
-              if ! podman ps --filter "name=kinc-${cluster}-control-plane" --format "{{.Names}}" | grep -q "kinc-${cluster}-control-plane"; then
+              if ! podman ps --format json | jq -e --arg n "kinc-${cluster}-control-plane" 'any(.[]; (.Names[]? // "") == $n)' >/dev/null; then
                 echo "❌ Container not running: kinc-${cluster}-control-plane"
                 systemctl --user status kinc-${cluster}-control-plane.service --no-pager || true
                 exit 1
@@ -607,7 +629,11 @@ jobs:
             echo "Checking cluster: $cluster"
             
             # Check kinc-preflight.service logs for config source
-            config_source=$(podman exec kinc-${cluster}-control-plane journalctl -u kinc-preflight.service --no-pager --boot 2>/dev/null | grep -oP '(Using mounted configuration|No mounted config found, using baked-in configuration)' | head -1)
+            # -o json and jq: grep -oP piped to head -1 exits on the first match,
+            # which SIGPIPEs journalctl and fails the pipeline under -o pipefail.
+            config_source=$(podman exec kinc-${cluster}-control-plane journalctl -u kinc-preflight.service -o json --no-pager --boot 2>/dev/null \
+              | jq -r -s '[.[] | (.MESSAGE // "" | tostring)
+                          | capture("(?<m>Using mounted configuration|No mounted config found, using baked-in configuration)").m] | first // ""')
             
             echo "Configuration source: $config_source"
             
@@ -634,10 +660,16 @@ jobs:
           # for each marker rather than reading the journal once. Reading once
           # failed this step on whichever cluster the runner was slower with,
           # on clusters that had in fact initialized.
+          #
+          # The journal is captured and matched in bash rather than piped to
+          # grep -q: under -o pipefail, grep -q exiting on the first match
+          # SIGPIPEs journalctl and the pipeline reports failure for a marker
+          # that is present.
           wait_for_log() {
-            local cluster="$1" unit="$2" marker="$3" timeout="${4:-120}" waited=0
+            local cluster="$1" unit="$2" marker="$3" timeout="${4:-120}" waited=0 journal
             while [ "$waited" -lt "$timeout" ]; do
-              if podman exec "kinc-${cluster}-control-plane" journalctl -u "$unit" --no-pager --boot 2>/dev/null | grep -q "$marker"; then
+              journal=$(podman exec "kinc-${cluster}-control-plane" journalctl -u "$unit" -o json --no-pager --boot 2>/dev/null || true)
+              if printf '%s\n' "$journal" | jq -e -s --arg m "$marker" 'any(.[]; (.MESSAGE // "") | tostring | contains($m))' >/dev/null 2>&1; then
                 if [ "$waited" -gt 0 ]; then echo "   (appeared after ${waited}s)"; fi
                 return 0
               fi
@@ -811,12 +843,21 @@ jobs:
               cp $FARO_PATH/*.log artifacts/faro/bootstrap-logs-${cluster}.log 2>/dev/null || true
               
               # Count events
-              EVENT_COUNT=$(cat artifacts/faro/bootstrap-events-${cluster}.json 2>/dev/null | wc -l)
-              echo "✅ Captured $EVENT_COUNT events from $cluster"
-              
-              # Show summary
+              # jq counts objects rather than lines, so a truncated capture is
+              # reported instead of being counted as an event.
+              if EVENT_COUNT=$(jq -s 'length' "artifacts/faro/bootstrap-events-${cluster}.json" 2>/dev/null); then
+                echo "✅ Captured $EVENT_COUNT events from $cluster"
+              else
+                echo "⚠️  Event file for $cluster is not valid JSON"
+                EVENT_COUNT=0
+              fi
+
+              # Grouping in jq keeps this in one process; a sort | uniq | head
+              # pipeline SIGPIPEs its producer and fails under -o pipefail.
               echo "Event Summary for $cluster:"
-              cat artifacts/faro/bootstrap-events-${cluster}.json | jq -r '.gvr' | sort | uniq -c | sort -rn | head -5
+              jq -r -s 'group_by(.gvr) | map({gvr: .[0].gvr, n: length})
+                        | sort_by(-.n) | .[:5] | .[] | "\(.n)\t\(.gvr)"' \
+                "artifacts/faro/bootstrap-events-${cluster}.json" 2>/dev/null || true
             else
               echo "⚠️  Faro events not found in $cluster - skipping extraction"
             fi
