@@ -52,19 +52,21 @@ jobs:
           echo "✅ Kernel keyring limits: configured (maxkeys=1000, maxbytes=25000)"
           echo ""
           
-          # Kernel modules for Antrea's datapath. A rootless nested container
-          # cannot load one itself, so the host loads them, exactly as a user
-          # does on their own machine.
-          echo "━━━ Check 4: Antrea Kernel Modules ━━━"
-          sudo modprobe openvswitch geneve
-          for m in openvswitch geneve; do
-            if [ ! -d "/sys/module/$m" ]; then
-              echo "❌ $m did not load"
-              exit 1
-            fi
-            echo "  $m loaded"
-          done
-          echo "✅ Antrea kernel modules: openvswitch, geneve"
+          # Antrea's datapath is Open vSwitch, and a rootless nested container
+          # cannot load a kernel module itself, so the host loads it - exactly
+          # as a user does on their own machine.
+          #
+          # Only openvswitch is required: geneve encapsulates traffic between
+          # nodes, and a kinc cluster is one node. Verified by running the
+          # datapath checks below with geneve absent - east-west, Service and
+          # north-south all pass. It is not available on every runner kernel.
+          echo "━━━ Check 4: Antrea Kernel Module ━━━"
+          sudo modprobe openvswitch
+          if [ ! -d /sys/module/openvswitch ]; then
+            echo "❌ openvswitch did not load"
+            exit 1
+          fi
+          echo "✅ Antrea kernel module: openvswitch"
           echo ""
 
           # The Pod /var volume must sit on a shared mount, so network
@@ -572,19 +574,21 @@ jobs:
           echo "✅ Kernel keyring limits: configured (maxkeys=1000, maxbytes=25000)"
           echo ""
           
-          # Kernel modules for Antrea's datapath. A rootless nested container
-          # cannot load one itself, so the host loads them, exactly as a user
-          # does on their own machine.
-          echo "━━━ Check 4: Antrea Kernel Modules ━━━"
-          sudo modprobe openvswitch geneve
-          for m in openvswitch geneve; do
-            if [ ! -d "/sys/module/$m" ]; then
-              echo "❌ $m did not load"
-              exit 1
-            fi
-            echo "  $m loaded"
-          done
-          echo "✅ Antrea kernel modules: openvswitch, geneve"
+          # Antrea's datapath is Open vSwitch, and a rootless nested container
+          # cannot load a kernel module itself, so the host loads it - exactly
+          # as a user does on their own machine.
+          #
+          # Only openvswitch is required: geneve encapsulates traffic between
+          # nodes, and a kinc cluster is one node. Verified by running the
+          # datapath checks below with geneve absent - east-west, Service and
+          # north-south all pass. It is not available on every runner kernel.
+          echo "━━━ Check 4: Antrea Kernel Module ━━━"
+          sudo modprobe openvswitch
+          if [ ! -d /sys/module/openvswitch ]; then
+            echo "❌ openvswitch did not load"
+            exit 1
+          fi
+          echo "✅ Antrea kernel module: openvswitch"
           echo ""
 
           # The Pod /var volume must sit on a shared mount, so network

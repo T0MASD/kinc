@@ -119,31 +119,28 @@ else
 fi
 export KINC_MAC
 
-# Check 5: Kernel modules Antrea's datapath needs
+# Check 5: Kernel module Antrea's datapath needs
 #
-# Antrea's datapath is Open vSwitch, and its inter-node traffic is geneve. A
-# rootless nested container cannot load a kernel module itself: autoloading
-# happens on behalf of the calling process and needs CAP_SYS_MODULE against the
-# host kernel, which a user namespace never grants. Loading them on the host is
-# what makes the capability unnecessary.
+# Antrea's datapath is Open vSwitch. A rootless nested container cannot load a
+# kernel module itself: autoloading happens on behalf of the calling process and
+# needs CAP_SYS_MODULE against the host kernel, which a user namespace never
+# grants. Loading it on the host is what makes the capability unnecessary.
 #
-# Without them the cluster still reports success: kubeadm completes, the marker
-# is written, and the failure surfaces later as CoreDNS stuck in
-# ContainerCreating with antrea-agent in Init:Error.
-missing_modules=""
-for m in openvswitch geneve; do
-  if [ ! -d "/sys/module/$m" ]; then
-    missing_modules="$missing_modules $m"
-  fi
-done
-if [ -n "$missing_modules" ]; then
-  echo "❌ Kernel modules not loaded:$missing_modules"
-  echo "   Antrea's datapath needs them, and a rootless container cannot load them"
-  echo "   To fix: sudo modprobe$missing_modules"
-  echo "   Persist: echo -e 'openvswitch\ngeneve' | sudo tee /etc/modules-load.d/kinc.conf"
+# Without it the cluster still reports success: kubeadm completes, the marker is
+# written, and the failure surfaces later as CoreDNS stuck in ContainerCreating
+# with antrea-agent in Init:Error.
+#
+# geneve is not checked. It encapsulates traffic between nodes, and a kinc
+# cluster is one node. A multi-node setup built on kinc wants it on the host for
+# the same reason as openvswitch.
+if [ ! -d /sys/module/openvswitch ]; then
+  echo "❌ Kernel module not loaded: openvswitch"
+  echo "   Antrea's datapath needs it, and a rootless container cannot load it"
+  echo "   To fix: sudo modprobe openvswitch"
+  echo "   Persist: echo openvswitch | sudo tee /etc/modules-load.d/kinc.conf"
   [ "${KINC_SKIP_SYSCTL_CHECKS:-false}" != "true" ] && exit 1
 else
-  echo "✅ Antrea kernel modules loaded (openvswitch, geneve)"
+  echo "✅ Antrea kernel module loaded (openvswitch)"
 fi
 
 # Check 6: Failed services (warn only)
