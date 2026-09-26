@@ -119,28 +119,41 @@ else
 fi
 export KINC_MAC
 
-# Check 5: Kernel module Antrea's datapath needs
+# Check 5: Kernel modules Antrea's datapath needs
 #
-# Antrea's datapath is Open vSwitch. A rootless nested container cannot load a
-# kernel module itself: autoloading happens on behalf of the calling process and
-# needs CAP_SYS_MODULE against the host kernel, which a user namespace never
-# grants. Loading it on the host is what makes the capability unnecessary.
+# Antrea's datapath is Open vSwitch, and geneve encapsulates traffic between
+# nodes. A single-node cluster never tunnels, but the host contract is the same
+# either way: a rootless nested container cannot load a kernel module itself,
+# because autoloading happens on behalf of the calling process and needs
+# CAP_SYS_MODULE against the host kernel, which a user namespace never grants.
+# Requiring both here is what keeps a multi-node cluster built on kinc working.
 #
-# Without it the cluster still reports success: kubeadm completes, the marker is
-# written, and the failure surfaces later as CoreDNS stuck in ContainerCreating
-# with antrea-agent in Init:Error.
+# Without them the cluster still reports success: kubeadm completes, the marker
+# is written, and the failure surfaces later as CoreDNS stuck in
+# ContainerCreating with antrea-agent in Init:Error.
 #
-# geneve is not checked. It encapsulates traffic between nodes, and a kinc
-# cluster is one node. A multi-node setup built on kinc wants it on the host for
-# the same reason as openvswitch.
-if [ ! -d /sys/module/openvswitch ]; then
-  echo "❌ Kernel module not loaded: openvswitch"
-  echo "   Antrea's datapath needs it, and a rootless container cannot load it"
-  echo "   To fix: sudo modprobe openvswitch"
-  echo "   Persist: echo openvswitch | sudo tee /etc/modules-load.d/kinc.conf"
+# A module compiled into the kernel is available without appearing in
+# /sys/module, so modules.builtin is consulted as well. Checking only
+# /sys/module reports a builtin geneve as missing.
+module_available() {
+  [ -d "/sys/module/$1" ] && return 0
+  grep -qw "$1" "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null && return 0
+  grep -qw "^$1" /proc/modules 2>/dev/null && return 0
+  return 1
+}
+
+missing_modules=""
+for m in openvswitch geneve; do
+  module_available "$m" || missing_modules="$missing_modules $m"
+done
+if [ -n "$missing_modules" ]; then
+  echo "❌ Kernel modules not available:$missing_modules"
+  echo "   Antrea's datapath needs them, and a rootless container cannot load them"
+  echo "   To fix: sudo modprobe$missing_modules"
+  echo "   Persist: printf 'openvswitch\\ngeneve\\n' | sudo tee /etc/modules-load.d/kinc.conf"
   [ "${KINC_SKIP_SYSCTL_CHECKS:-false}" != "true" ] && exit 1
 else
-  echo "✅ Antrea kernel module loaded (openvswitch)"
+  echo "✅ Antrea kernel modules available (openvswitch, geneve)"
 fi
 
 # Check 6: Failed services (warn only)
