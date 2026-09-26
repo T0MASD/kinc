@@ -52,8 +52,34 @@ jobs:
           echo "✅ Kernel keyring limits: configured (maxkeys=1000, maxbytes=25000)"
           echo ""
           
+          # Kernel modules for Antrea's datapath. A rootless nested container
+          # cannot load one itself, so the host loads them, exactly as a user
+          # does on their own machine.
+          echo "━━━ Check 4: Antrea Kernel Modules ━━━"
+          sudo modprobe openvswitch geneve
+          for m in openvswitch geneve; do
+            if [ ! -d "/sys/module/$m" ]; then
+              echo "❌ $m did not load"
+              exit 1
+            fi
+            echo "  $m loaded"
+          done
+          echo "✅ Antrea kernel modules: openvswitch, geneve"
+          echo ""
+
+          # The Pod /var volume must sit on a shared mount, so network
+          # namespaces created inside the cluster container are visible to
+          # Antrea's agent. Podman keeps rootless volumes under the user's home.
+          echo "━━━ Check 5: Mount Propagation ━━━"
+          volroot="$HOME/.local/share/containers/storage"
+          mkdir -p "$volroot"
+          target=$(findmnt -no TARGET --target "$volroot" | head -1)
+          sudo mount --make-rshared "$target"
+          echo "✅ $target is $(findmnt -no PROPAGATION --target "$volroot")"
+          echo ""
+
           # Failed services
-          echo "━━━ Check 4: System Health ━━━"
+          echo "━━━ Check 6: System Health ━━━"
           failed=$(systemctl --user list-units --state=failed --output=json --no-pager 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
           if [ $failed -gt 0 ]; then
             echo "⚠️  Found $failed failed services"
@@ -64,7 +90,7 @@ jobs:
           echo ""
           
           # Podman
-          echo "━━━ Check 5: Podman ━━━"
+          echo "━━━ Check 7: Podman ━━━"
           echo "✅ Podman: $(podman --version)"
           echo ""
           
@@ -546,8 +572,34 @@ jobs:
           echo "✅ Kernel keyring limits: configured (maxkeys=1000, maxbytes=25000)"
           echo ""
           
+          # Kernel modules for Antrea's datapath. A rootless nested container
+          # cannot load one itself, so the host loads them, exactly as a user
+          # does on their own machine.
+          echo "━━━ Check 4: Antrea Kernel Modules ━━━"
+          sudo modprobe openvswitch geneve
+          for m in openvswitch geneve; do
+            if [ ! -d "/sys/module/$m" ]; then
+              echo "❌ $m did not load"
+              exit 1
+            fi
+            echo "  $m loaded"
+          done
+          echo "✅ Antrea kernel modules: openvswitch, geneve"
+          echo ""
+
+          # The Pod /var volume must sit on a shared mount, so network
+          # namespaces created inside the cluster container are visible to
+          # Antrea's agent. Podman keeps rootless volumes under the user's home.
+          echo "━━━ Check 5: Mount Propagation ━━━"
+          volroot="$HOME/.local/share/containers/storage"
+          mkdir -p "$volroot"
+          target=$(findmnt -no TARGET --target "$volroot" | head -1)
+          sudo mount --make-rshared "$target"
+          echo "✅ $target is $(findmnt -no PROPAGATION --target "$volroot")"
+          echo ""
+
           # Failed services
-          echo "━━━ Check 4: System Health ━━━"
+          echo "━━━ Check 6: System Health ━━━"
           failed=$(systemctl --user list-units --state=failed --output=json --no-pager 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
           if [ $failed -gt 0 ]; then
             echo "⚠️  Found $failed failed services"
@@ -558,7 +610,7 @@ jobs:
           echo ""
           
           # Podman
-          echo "━━━ Check 5: Podman ━━━"
+          echo "━━━ Check 7: Podman ━━━"
           echo "✅ Podman: $(podman --version)"
           echo ""
           
