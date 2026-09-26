@@ -14,7 +14,7 @@ FORCE_PORT="${FORCE_PORT:-}"  # Allow manual port override
 # Image configuration - Single image for all clusters
 # All clusters use the same image with different mounted configs
 # Allow KINC_IMAGE env var to override default
-IMAGE_NAME="${KINC_IMAGE:-localhost/kinc/node:v1.34.2}"
+IMAGE_NAME="${KINC_IMAGE:-localhost/kinc/node:v1.36.4}"
 
 echo "📁 Working directory: $SCRIPT_DIR"
 echo "🏷️  Cluster name: $CLUSTER_NAME"
@@ -119,7 +119,44 @@ else
 fi
 export KINC_MAC
 
-# Check 5: Failed services (warn only)
+# Check 5: Kernel modules Antrea's datapath needs
+#
+# Antrea's datapath is Open vSwitch, and geneve encapsulates traffic between
+# nodes. A single-node cluster never tunnels, but the host contract is the same
+# either way: a rootless nested container cannot load a kernel module itself,
+# because autoloading happens on behalf of the calling process and needs
+# CAP_SYS_MODULE against the host kernel, which a user namespace never grants.
+# Requiring both here is what keeps a multi-node cluster built on kinc working.
+#
+# Without them the cluster still reports success: kubeadm completes, the marker
+# is written, and the failure surfaces later as CoreDNS stuck in
+# ContainerCreating with antrea-agent in Init:Error.
+#
+# A module compiled into the kernel is available without appearing in
+# /sys/module, so modules.builtin is consulted as well. Checking only
+# /sys/module reports a builtin geneve as missing.
+module_available() {
+  [ -d "/sys/module/$1" ] && return 0
+  grep -qw "$1" "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null && return 0
+  grep -qw "^$1" /proc/modules 2>/dev/null && return 0
+  return 1
+}
+
+missing_modules=""
+for m in openvswitch geneve; do
+  module_available "$m" || missing_modules="$missing_modules $m"
+done
+if [ -n "$missing_modules" ]; then
+  echo "❌ Kernel modules not available:$missing_modules"
+  echo "   Antrea's datapath needs them, and a rootless container cannot load them"
+  echo "   To fix: sudo modprobe$missing_modules"
+  echo "   Persist: printf 'openvswitch\\ngeneve\\n' | sudo tee /etc/modules-load.d/kinc.conf"
+  [ "${KINC_SKIP_SYSCTL_CHECKS:-false}" != "true" ] && exit 1
+else
+  echo "✅ Antrea kernel modules available (openvswitch, geneve)"
+fi
+
+# Check 6: Failed services (warn only)
 failed=$(systemctl --user list-units --state=failed --no-pager --no-legend 2>/dev/null | wc -l)
 if [ $failed -gt 0 ]; then
   echo "⚠️  Found $failed failed user service(s) - may indicate previous cluster issues"

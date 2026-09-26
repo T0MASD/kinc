@@ -2,8 +2,14 @@
 set -euo pipefail
 
 # Enhanced logging function
+# Also append to a plain file under /var/log, which deployments publish to the
+# hypervisor. journald cannot be used for this: its store needs fallocate and
+# mmap semantics that a virtiofs mount does not provide, so it silently stays
+# volatile and the account of why a cluster came up is lost with the container.
+KINC_LOG="${KINC_LOG:-/var/log/kinc/$(basename "$0" .sh).log}"
+mkdir -p "$(dirname "$KINC_LOG")" 2>/dev/null || true
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >&2
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$KINC_LOG" >&2
 }
 
 log "=== kinc Preflight Checks Starting ==="

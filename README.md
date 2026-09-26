@@ -30,6 +30,7 @@
 - **Sufficient inotify limits** (for multiple clusters)
 - **Sufficient kernel keyring limits** (for multiple clusters)
 - **User namespaces available to Podman** (AppArmor hosts)
+- **`openvswitch` and `geneve` kernel modules loaded** (Antrea's datapath)
 
 `deploy.sh` reports which kernel mandatory access control system is active and
 adapts to it. Under SELinux it restores the context on the config volume, which
@@ -46,6 +47,17 @@ and so belongs with the sysctls below:
 # Only where deploy.sh reports Podman cannot create a user namespace
 sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 echo 'kernel.apparmor_restrict_unprivileged_userns = 0' | sudo tee -a /etc/sysctl.d/99-kubernetes.conf
+```
+
+Antrea's datapath is Open vSwitch, and geneve encapsulates traffic between
+nodes. A rootless nested container cannot load a kernel module itself, so the
+host loads them:
+
+```bash
+sudo modprobe openvswitch geneve
+
+# Make permanent
+printf 'openvswitch\ngeneve\n' | sudo tee /etc/modules-load.d/kinc.conf
 ```
 
 ```bash
@@ -142,7 +154,7 @@ Container Start
     ↓
 ┌─────────────────────────────────────┐
 │ kinc-postinit.service (oneshot)     │
-│ - CNI installation (kindnet)        │
+│ - CNI installation (Antrea)         │
 │ - Storage provisioner               │
 │ - kubectl wait for readiness        │
 └─────────────────────────────────────┘
@@ -233,7 +245,7 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=myapp ./tools/deploy.sh
 **Environment Variables:**
 - `CLUSTER_NAME`: Cluster identifier (default: `default`)
 - `FORCE_PORT`: Override auto port allocation
-- `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.33.5`)
+- `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.36.4`)
 - `KINC_SKIP_SYSCTL_CHECKS`: Bypass inotify/keyring checks (default: `false`)
 - `KINC_ENABLE_FARO`: Enable Faro event capture (default: `false`, CI: `true`)
 
@@ -485,13 +497,13 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=cluster02 ./tools/deploy.sh
 
 ## Components
 
-- **Kubernetes:** v1.33.5
-- **CRI-O:** v1.33.5
-- **kubeadm:** v1.33.5
-- **kubectl:** v1.33.5
+- **Kubernetes:** v1.36.4
+- **CRI-O:** v1.36.4
+- **kubeadm:** v1.36.4
+- **kubectl:** v1.36.4
 - **CNI:** kindnet (from Kubernetes KIND project)
 - **Storage:** local-path-provisioner
-- **Base:** Fedora 42
+- **Base:** Fedora 44
 
 ---
 
@@ -527,8 +539,8 @@ THE SOFTWARE IS AI GENERATED AND PROVIDED “AS IS”, WITHOUT CLAIM OF COPYRIGH
 ## Credits
 
 - **KIND (Kubernetes IN Docker):** Inspiration and kindnet CNI
-- **kubeadm:** Cluster bootstrapping
-- **CRI-O:** Container runtime
+- **kubeadm:** v1.36.4
+- **CRI-O:** v1.36.4
 - **Podman:** Rootless containers
 - **systemd:** Service management
 
