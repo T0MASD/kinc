@@ -5,12 +5,23 @@ After=kubeadm-init.service
 Requires=kubeadm-init.service
 ConditionPathExists=/var/lib/kubeadm-initialized
 ConditionPathExists=!/var/lib/kinc-initialized
+# Retry limits belong to the unit, not the service. Without these the default
+# burst of 5 stops the retries above well before a slow API has come up.
+StartLimitBurst=20
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 TimeoutStartSec=900
-Restart=no
+# The script waits a bounded time for node registration and then exits. With
+# Restart=no, anything that delays the API means the CNI is never applied at
+# all, which presents as CoreDNS stuck in ContainerCreating rather than as the
+# bootstrap failure it is. Retrying is safe by construction: the unit writes
+# its success marker only on success, and ConditionPathExists=! above refuses
+# to run once that marker exists.
+Restart=on-failure
+RestartSec=10
 
 # Install manifests and wait for readiness
 ExecStart=/etc/kinc/scripts/kinc-postinit.sh

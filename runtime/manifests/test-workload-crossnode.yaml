@@ -1,0 +1,60 @@
+# Workload the multi-node gate deploys to prove pod traffic crosses nodes.
+#
+# The two pods are pinned to different nodes on purpose. Left to the scheduler
+# they can land on the same one, and then every check below passes while the
+# datapath under test - Antrea's geneve tunnel between nodes - was never used.
+# The gate asserts the placement it asked for rather than assuming it.
+#
+# The roles are labels the cluster carries: the control plane's is kubeadm's,
+# and the worker's is applied by deploy.sh after the node registers, because
+# NodeRestriction refuses a kubernetes.io label a kubelet sets for itself.
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: xnode-server
+  namespace: kinc-validation
+  labels:
+    app: xnode-server
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      effect: NoSchedule
+  containers:
+    - name: agnhost
+      image: registry.k8s.io/e2e-test-images/agnhost:2.47
+      command: ["/agnhost", "netexec", "--http-port=8080"]
+      ports:
+        - containerPort: 8080
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+        initialDelaySeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: xnode-service
+  namespace: kinc-validation
+spec:
+  selector:
+    app: xnode-server
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: xnode-client
+  namespace: kinc-validation
+spec:
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
+  containers:
+    - name: agnhost
+      image: registry.k8s.io/e2e-test-images/agnhost:2.47
+      command: ["sleep", "3600"]
