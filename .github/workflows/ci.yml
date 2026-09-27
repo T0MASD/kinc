@@ -20,55 +20,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: System prerequisites check
-        run: |
-          echo "=== System Prerequisites Check ==="
-          
-          # IP forwarding
-          echo "━━━ Check 1: IP Forwarding ━━━"
-          if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
-            echo "Enabling IP forwarding..."
-            echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-          fi
-          echo "✅ IP forwarding: enabled"
-          echo ""
-          
-          # Inotify limits
-          echo "━━━ Check 2: Inotify Limits ━━━"
-          echo "  Current max_user_watches:   $(cat /proc/sys/fs/inotify/max_user_watches)"
-          echo "  Current max_user_instances: $(cat /proc/sys/fs/inotify/max_user_instances)"
-          echo "Setting inotify limits for multi-cluster testing..."
-          echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches > /dev/null
-          echo 2048 | sudo tee /proc/sys/fs/inotify/max_user_instances > /dev/null
-          echo "✅ Inotify limits: configured (watches=524288, instances=2048)"
-          echo ""
-          
-          # Kernel keyring limits
-          echo "━━━ Check 3: Kernel Keyring Limits ━━━"
-          echo "  Current maxkeys:   $(cat /proc/sys/kernel/keys/maxkeys 2>/dev/null || echo 'N/A')"
-          echo "  Current maxbytes:  $(cat /proc/sys/kernel/keys/maxbytes 2>/dev/null || echo 'N/A')"
-          echo "Setting kernel keyring limits for multi-cluster testing..."
-          echo 1000 | sudo tee /proc/sys/kernel/keys/maxkeys > /dev/null
-          echo 25000 | sudo tee /proc/sys/kernel/keys/maxbytes > /dev/null
-          echo "✅ Kernel keyring limits: configured (maxkeys=1000, maxbytes=25000)"
-          echo ""
-          
-          # Failed services
-          echo "━━━ Check 4: System Health ━━━"
-          failed=$(systemctl --user list-units --state=failed --output=json --no-pager 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
-          if [ $failed -gt 0 ]; then
-            echo "⚠️  Found $failed failed services"
-            systemctl --user list-units --state=failed --no-pager
-          else
-            echo "✅ No failed services"
-          fi
-          echo ""
-          
-          # Podman
-          echo "━━━ Check 5: Podman ━━━"
-          echo "✅ Podman: $(podman --version)"
-          echo ""
-          
-          echo "✅ Prerequisites check complete"
+        run: ./tools/ci-prepare-host.sh
         shell: bash
 
       - name: Build kinc image
@@ -217,48 +169,7 @@ jobs:
         shell: bash
 
       - name: Verify configuration validation
-        run: |
-          echo "=== Verifying Configuration Validation ==="
-          
-          # journald can lag behind a service that has already finished, so poll
-          # for each marker rather than reading the journal once. A single read
-          # failed this step on clusters that had in fact initialized.
-          #
-          # The journal is captured and matched in bash rather than piped to
-          # grep -q. This step runs under -o pipefail, and grep -q exits on the
-          # first match, which SIGPIPEs journalctl and makes the pipeline report
-          # failure for a marker that is present. Only the largest journal hit
-          # it: smaller ones fit the pipe buffer, so journalctl finished writing
-          # before grep could exit.
-          wait_for_log() {
-            local unit="$1" marker="$2" timeout="${3:-120}" waited=0 journal
-            while [ "$waited" -lt "$timeout" ]; do
-              journal=$(podman exec kinc-default-control-plane journalctl -u "$unit" -o json --no-pager --boot 2>/dev/null || true)
-              if printf '%s\n' "$journal" | jq -e -s --arg m "$marker" 'any(.[]; (.MESSAGE // "") | tostring | contains($m))' >/dev/null 2>&1; then
-                if [ "$waited" -gt 0 ]; then echo "   (appeared after ${waited}s)"; fi
-                return 0
-              fi
-              sleep 2
-              waited=$((waited + 2))
-            done
-            echo "❌ '$marker' not found in $unit after ${timeout}s"
-            podman exec kinc-default-control-plane systemctl status "$unit" --no-pager || true
-            podman exec kinc-default-control-plane journalctl -u "$unit" --no-pager --boot || true
-            return 1
-          }
-
-          wait_for_log kinc-preflight.service "Configuration validated" || exit 1
-          echo "✅ Configuration validated by kinc-preflight.service"
-
-          # We skip the show-join-command phase, so check for addon installation
-          wait_for_log kubeadm-init.service "Applied essential addon: kube-proxy" || exit 1
-          echo "✅ kubeadm init completed successfully (as systemd service)"
-
-          wait_for_log kinc-postinit.service "Installing CNI" || exit 1
-          echo "✅ CNI installed by kinc-postinit.service"
-          
-          echo ""
-          echo "✅ All configuration validations passed"
+        run: ./tools/ci-verify-init.sh default
         shell: bash
 
       - name: Extract kubeconfig and validate cluster
@@ -298,6 +209,94 @@ jobs:
           echo "✅ Cluster validated"
         shell: bash
 
+      # Antrea replaces kindnet, so the gate has to check the datapath rather
+      # than infer it. A Pod can be Running with no OVS port behind it, and a
+      # Service can resolve while nothing is forwarded: this asks the agent what
+      # it did, and traceflow reports each component a packet passed through.
+      - name: Validate storage and the Antrea datapath
+        run: |
+          echo "=== Validating storage and the Antrea datapath ==="
+
+          kubectl apply -f runtime/manifests/test-workload.yaml
+          kubectl -n kinc-validation wait --for=jsonpath='{.status.phase}'=Bound pvc/test-pvc --timeout=120s
+          kubectl -n kinc-validation wait --for=condition=Ready pod/test-server pod/test-client --timeout=180s
+
+          # Storage: a provisioner that binds but cannot be written to is still a failure.
+          echo ""
+          echo "--- storage ---"
+          kubectl -n kinc-validation exec test-server -- sh -c 'echo kinc-storage-probe > /data/probe.txt'
+          read_back=$(kubectl -n kinc-validation exec test-server -- cat /data/probe.txt)
+          if [ "$read_back" != "kinc-storage-probe" ]; then
+            echo "❌ PVC wrote '$read_back'"
+            exit 1
+          fi
+          echo "✅ PVC bound, written and read back"
+
+          AGENT=$(kubectl -n kube-system get pod -l app=antrea,component=antrea-agent -o name | head -1)
+
+          # Antrea's own view: the agent's health, and an OVS port per Pod. A Pod can be
+          # Running with no datapath behind it, so ask the agent rather than the API.
+          echo ""
+          echo "--- antrea agent ---"
+          # All four conditions, not just AgentHealthy: the OVSDB and OpenFlow ones are
+          # what report an agent that came up without a working datapath underneath.
+          agentinfo=$(kubectl -n kube-system exec "$AGENT" -c antrea-agent -- antctl get agentinfo -o json)
+          for cond in AgentHealthy ControllerConnectionUp OVSDBConnectionUp OpenflowConnectionUp; do
+            status=$(printf '%s' "$agentinfo" | jq -r --arg c "$cond" '.agentConditions[]? | select(.type==$c) | .status')
+            if [ "$status" != "True" ]; then
+              echo "❌ $cond is '$status'"
+              printf '%s' "$agentinfo" | jq -r '.agentConditions[]? | "   \(.type)=\(.status)"'
+              exit 1
+            fi
+            echo "✅ $cond"
+          done
+
+          for pod in test-server test-client; do
+            ofport=$(kubectl -n kube-system exec "$AGENT" -c antrea-agent -- \
+              antctl get podinterface "$pod" -n kinc-validation -o json | jq -r '.[0].ofPort // empty')
+            if [ -z "$ofport" ]; then
+              echo "❌ $pod has no OVS port"
+              exit 1
+            fi
+            echo "✅ $pod on OVS port $ofport"
+          done
+
+          # Traceflow reports what the datapath did with a packet, per component. It is
+          # how a CNI change is checked: a Service that resolves and a Pod that is Ready
+          # say nothing about whether traffic is actually forwarded.
+          trace() {
+            local desc="$1" dst="$2" flow="$3" want="$4"
+            local out
+            out=$(kubectl -n kube-system exec "$AGENT" -c antrea-agent -- \
+                  antctl traceflow -S kinc-validation/test-client -D "$dst" -f "$flow" -o json 2>/dev/null)
+            if ! printf '%s' "$out" | jq -e --arg w "$want" \
+                 '.phase == "Succeeded" and ([.results[].observations[].action] | index($w) != null)' >/dev/null; then
+              echo "❌ $desc: expected a '$want' observation"
+              printf '%s' "$out" | jq -r '"   phase=\(.phase)", (.results[]?.observations[]? | "   \(.component) -> \(.action)")' || true
+              exit 1
+            fi
+            echo "✅ $desc"
+            printf '%s' "$out" | jq -r '.results[].observations[] | "     \(.component)\(if .componentInfo then "/"+.componentInfo else "" end) -> \(.action)"'
+          }
+
+          echo ""
+          echo "--- datapath ---"
+          CLUSTER_IP=$(kubectl -n kinc-validation get svc test-service -o jsonpath='{.spec.clusterIP}')
+          trace "east/west: pod to pod"          kinc-validation/test-server tcp,tcp_dst=8080 Delivered
+          trace "service: pod to ClusterIP"      "$CLUSTER_IP"               tcp,tcp_dst=8080 Delivered
+          trace "north/south: pod to external"   8.8.8.8                     icmp             ForwardedOutOfNetwork
+
+          # Traceflow injects a synthetic packet. Real traffic also needs CoreDNS and the
+          # Service proxy, so send some.
+          echo ""
+          echo "--- live traffic ---"
+          kubectl -n kinc-validation exec test-client -- /agnhost connect --timeout=15s test-service:8080
+          echo "✅ pod reached the Service by name"
+
+          kubectl delete -f runtime/manifests/test-workload.yaml --wait=false
+          echo ""
+          echo "✅ storage and datapath validated"
+
       - name: Collect comprehensive diagnostics
         if: always()
         run: |
@@ -312,7 +311,9 @@ jobs:
           # Container-side multi-service logs (from boot)
           echo "Collecting multi-service logs from boot..."
           podman exec kinc-default-control-plane journalctl -u kinc-preflight.service --no-pager --boot > artifacts/logs/kinc-preflight.log 2>&1 || true
-          podman exec kinc-default-control-plane journalctl -u kubeadm-init.service --no-pager --boot > artifacts/logs/kubeadm-init.log 2>&1 || true
+          # kubeadm logs to a file, not the journal, so collect the file - the
+          # journal holds only systemd's own start/stop lines for this unit.
+          podman exec kinc-default-control-plane cat /var/log/kinc/kubeadm-init.log > artifacts/logs/kubeadm-init.log 2>&1 || true
           podman exec kinc-default-control-plane journalctl -u kinc-postinit.service --no-pager --boot > artifacts/logs/kinc-postinit.log 2>&1 || true
           podman exec kinc-default-control-plane journalctl -u crio.service --no-pager --boot > artifacts/logs/crio.log 2>&1 || true
           podman exec kinc-default-control-plane journalctl -u kubelet.service --no-pager --boot > artifacts/logs/kubelet.log 2>&1 || true
@@ -426,55 +427,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: System prerequisites check
-        run: |
-          echo "=== System Prerequisites Check ==="
-          
-          # IP forwarding
-          echo "━━━ Check 1: IP Forwarding ━━━"
-          if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
-            echo "Enabling IP forwarding..."
-            echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-          fi
-          echo "✅ IP forwarding: enabled"
-          echo ""
-          
-          # Inotify limits
-          echo "━━━ Check 2: Inotify Limits ━━━"
-          echo "  Current max_user_watches:   $(cat /proc/sys/fs/inotify/max_user_watches)"
-          echo "  Current max_user_instances: $(cat /proc/sys/fs/inotify/max_user_instances)"
-          echo "Setting inotify limits for multi-cluster testing..."
-          echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches > /dev/null
-          echo 2048 | sudo tee /proc/sys/fs/inotify/max_user_instances > /dev/null
-          echo "✅ Inotify limits: configured (watches=524288, instances=2048)"
-          echo ""
-          
-          # Kernel keyring limits
-          echo "━━━ Check 3: Kernel Keyring Limits ━━━"
-          echo "  Current maxkeys:   $(cat /proc/sys/kernel/keys/maxkeys 2>/dev/null || echo 'N/A')"
-          echo "  Current maxbytes:  $(cat /proc/sys/kernel/keys/maxbytes 2>/dev/null || echo 'N/A')"
-          echo "Setting kernel keyring limits for multi-cluster testing..."
-          echo 1000 | sudo tee /proc/sys/kernel/keys/maxkeys > /dev/null
-          echo 25000 | sudo tee /proc/sys/kernel/keys/maxbytes > /dev/null
-          echo "✅ Kernel keyring limits: configured (maxkeys=1000, maxbytes=25000)"
-          echo ""
-          
-          # Failed services
-          echo "━━━ Check 4: System Health ━━━"
-          failed=$(systemctl --user list-units --state=failed --output=json --no-pager 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
-          if [ $failed -gt 0 ]; then
-            echo "⚠️  Found $failed failed services"
-            systemctl --user list-units --state=failed --no-pager
-          else
-            echo "✅ No failed services"
-          fi
-          echo ""
-          
-          # Podman
-          echo "━━━ Check 5: Podman ━━━"
-          echo "✅ Podman: $(podman --version)"
-          echo ""
-          
-          echo "✅ Prerequisites check complete"
+        run: ./tools/ci-prepare-host.sh
         shell: bash
 
       - name: Build kinc image
@@ -653,54 +606,7 @@ jobs:
         shell: bash
 
       - name: Verify configuration validation (both clusters)
-        run: |
-          echo "=== Verifying Configuration Validation (Both Clusters) ==="
-          
-          # journald can lag behind a service that has already finished, so poll
-          # for each marker rather than reading the journal once. Reading once
-          # failed this step on whichever cluster the runner was slower with,
-          # on clusters that had in fact initialized.
-          #
-          # The journal is captured and matched in bash rather than piped to
-          # grep -q: under -o pipefail, grep -q exiting on the first match
-          # SIGPIPEs journalctl and the pipeline reports failure for a marker
-          # that is present.
-          wait_for_log() {
-            local cluster="$1" unit="$2" marker="$3" timeout="${4:-120}" waited=0 journal
-            while [ "$waited" -lt "$timeout" ]; do
-              journal=$(podman exec "kinc-${cluster}-control-plane" journalctl -u "$unit" -o json --no-pager --boot 2>/dev/null || true)
-              if printf '%s\n' "$journal" | jq -e -s --arg m "$marker" 'any(.[]; (.MESSAGE // "") | tostring | contains($m))' >/dev/null 2>&1; then
-                if [ "$waited" -gt 0 ]; then echo "   (appeared after ${waited}s)"; fi
-                return 0
-              fi
-              sleep 2
-              waited=$((waited + 2))
-            done
-            echo "❌ '$marker' not found in $unit on cluster '$cluster' after ${timeout}s"
-            podman exec "kinc-${cluster}-control-plane" systemctl status "$unit" --no-pager || true
-            podman exec "kinc-${cluster}-control-plane" journalctl -u "$unit" --no-pager --boot || true
-            return 1
-          }
-
-          for cluster in default cluster01; do
-            echo ""
-            echo "Checking cluster: $cluster"
-
-            wait_for_log "$cluster" kinc-preflight.service "Configuration validated" || exit 1
-            echo "✅ Configuration validated by kinc-preflight.service"
-
-            # We skip the show-join-command phase, so check for addon installation
-            wait_for_log "$cluster" kubeadm-init.service "Applied essential addon: kube-proxy" || exit 1
-            echo "✅ kubeadm init completed successfully (as systemd service)"
-
-            wait_for_log "$cluster" kinc-postinit.service "Installing CNI" || exit 1
-            echo "✅ CNI installed by kinc-postinit.service"
-
-            echo "✅ Cluster '$cluster': All configuration validations passed"
-          done
-          
-          echo ""
-          echo "✅ Both clusters configuration validated"
+        run: ./tools/ci-verify-init.sh default cluster01
         shell: bash
 
       - name: Extract kubeconfig and validate clusters
@@ -768,7 +674,9 @@ jobs:
             # Container-side multi-service logs (from boot)
             echo "Collecting multi-service logs from boot..."
             podman exec kinc-${cluster}-control-plane journalctl -u kinc-preflight.service --no-pager --boot > artifacts/${cluster}/logs/kinc-preflight.log 2>&1 || true
-            podman exec kinc-${cluster}-control-plane journalctl -u kubeadm-init.service --no-pager --boot > artifacts/${cluster}/logs/kubeadm-init.log 2>&1 || true
+            # kubeadm logs to a file, not the journal, so collect the file - the
+            # journal holds only systemd's own start/stop lines for this unit.
+            podman exec kinc-${cluster}-control-plane cat /var/log/kinc/kubeadm-init.log > artifacts/${cluster}/logs/kubeadm-init.log 2>&1 || true
             podman exec kinc-${cluster}-control-plane journalctl -u kinc-postinit.service --no-pager --boot > artifacts/${cluster}/logs/kinc-postinit.log 2>&1 || true
             podman exec kinc-${cluster}-control-plane journalctl -u crio.service --no-pager --boot > artifacts/${cluster}/logs/crio.log 2>&1 || true
             podman exec kinc-${cluster}-control-plane journalctl -u kubelet.service --no-pager --boot > artifacts/${cluster}/logs/kubelet.log 2>&1 || true
