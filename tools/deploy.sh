@@ -208,12 +208,23 @@ get_cluster_port() {
 }
 
 # CIDR allocation functions - mapped from port last 2 digits
+#
+# A /21 per cluster, not a /24. The controller-manager carves a /24 per node
+# out of this, so a /24 held exactly one node and a second one never got a pod
+# CIDR - it registered, stayed NotReady, and Antrea had nothing to configure.
+# A /21 is eight nodes per cluster and 32 clusters inside 10.244.0.0/16.
 get_cluster_pod_subnet() {
     local port=$1
-    
+
     # Extract last 2 digits from port (6443 -> 43, 6444 -> 44, etc.)
     local subnet_id=${port: -2}
-    echo "10.244.${subnet_id}.0/24"
+    # Index from the first port so the blocks start at 10.244.0.0 and pack.
+    local block=$(( (subnet_id - 43) * 8 ))
+    if [ "$block" -lt 0 ] || [ "$block" -gt 248 ]; then
+        echo "❌ Port $port maps outside 10.244.0.0/16 (block $block)" >&2
+        exit 1
+    fi
+    echo "10.244.${block}.0/21"
 }
 
 get_cluster_service_subnet() {
@@ -249,6 +260,18 @@ if systemctl --user is-active kinc-${CLUSTER_NAME}-control-plane.service >/dev/n
     exit 1
 fi
 
+# How many workers to join to this cluster. 0 keeps the single-node shape.
+KINC_WORKERS="${KINC_WORKERS:-0}"
+CONTROL_PLANE_NAME="kinc-${CLUSTER_NAME}-control-plane"
+CONTROL_PLANE_ENDPOINT="${CONTROL_PLANE_NAME}:6443"
+NETWORK_NAME="kinc-${CLUSTER_NAME}"
+NETWORK_UNIT="kinc-${CLUSTER_NAME}.network"
+STATE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kinc/${CLUSTER_NAME}"
+
+if [ "$KINC_WORKERS" -gt 0 ]; then
+    echo "👥 Workers: $KINC_WORKERS (cluster endpoint ${CONTROL_PLANE_ENDPOINT})"
+fi
+
 # Clean up any leftover artifacts from previous failed deployments
 echo
 echo "🧹 Step 1: Cleaning up any leftover artifacts"
@@ -257,10 +280,51 @@ systemctl --user daemon-reload
 systemctl --user reset-failed 2>/dev/null || true
 echo "✅ Ready for deployment"
 
+# Step 1b: Mint the cluster CA, before any node starts.
+#
+# kubeadm would create it during init, which means the hash a joining node must
+# pin cannot be known until the control plane is already up - discovery becomes
+# something a node learns rather than something its config states. Minting it
+# here lets every join config carry the hash from the start.
+#
+# The CA is the cluster's, not a node's: it is reused across redeploys of the
+# same cluster name so a node's join config stays valid, and removed by
+# cleanup.sh with the rest of the cluster.
+echo
+echo "🔑 Step 1b: Minting the cluster CA"
+mkdir -p "${STATE_DIR}/ca"
+if [ -f "${STATE_DIR}/ca/ca.crt" ] && [ -f "${STATE_DIR}/ca/ca.key" ]; then
+    echo "✅ Reusing the CA already minted for cluster '${CLUSTER_NAME}'"
+else
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -subj "/CN=kubernetes" \
+        -addext "basicConstraints=critical,CA:TRUE" \
+        -addext "keyUsage=critical,keyCertSign,cRLSign,digitalSignature" \
+        -keyout "${STATE_DIR}/ca/ca.key" -out "${STATE_DIR}/ca/ca.crt" 2>/dev/null
+    chmod 0600 "${STATE_DIR}/ca/ca.key"
+    echo "✅ CA minted"
+fi
+
+# The hash a joining node pins. kubeadm compares it against the DER of the
+# public key, not the certificate, so this is SubjectPublicKeyInfo.
+CA_HASH=$(openssl x509 -in "${STATE_DIR}/ca/ca.crt" -noout -pubkey \
+    | openssl pkey -pubin -outform DER 2>/dev/null \
+    | openssl dgst -sha256 | awk '{print $NF}')
+if [ ${#CA_HASH} -ne 64 ]; then
+    echo "❌ CA hash is not a sha256 digest: '$CA_HASH'"
+    exit 1
+fi
+echo "🔑 CA hash: sha256:${CA_HASH}"
+
 # Step 2: Install Quadlet files with cluster-specific names
 echo
 echo "📦 Step 2: Installing Quadlet files"
 mkdir -p ~/.config/containers/systemd/
+
+# The cluster's own podman network. A worker resolves the control plane by name
+# on it; the default rootless network has no DNS at all.
+sed "s/NETWORK_NAME_PLACEHOLDER/${NETWORK_NAME}/g" \
+    runtime/quadlet/kinc-cluster.network > ~/.config/containers/systemd/${NETWORK_UNIT}
 
 # Copy and customize volume files
 sed "s/VolumeName=kinc-var-data/VolumeName=kinc-${CLUSTER_NAME}-var-data/g" \
@@ -277,6 +341,8 @@ sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-co
     -e "s/kinc-var-data-volume.service/kinc-${CLUSTER_NAME}-var-data-volume.service/g" \
     -e "s/kinc-config-volume.service/kinc-${CLUSTER_NAME}-config-volume.service/g" \
     -e "s/PublishPort=127.0.0.1:6443:6443\/tcp/PublishPort=127.0.0.1:${CLUSTER_PORT}:6443\/tcp/g" \
+    -e "s|CA_DIR_PLACEHOLDER|${STATE_DIR}/ca|g" \
+    -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
     runtime/quadlet/kinc-control-plane.container > ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 
 echo "✅ Quadlet files installed"
@@ -457,8 +523,10 @@ if [ $waited -ge $max_wait ]; then
     exit 1
 fi
 
-# Wait for kinc-init.service inside container to complete
-echo "Waiting for kinc-init.service to complete..."
+# Wait for initialisation to complete. The marker is what says so: it is
+# written after postinit succeeds, and kinc-init.service is disabled - the live
+# path is kinc-preflight, kubeadm-init, kinc-postinit.
+echo "Waiting for cluster initialization to complete..."
 max_wait=1500  # 25 minutes max for initialization
 waited=0
 while [ $waited -lt $max_wait ]; do
@@ -537,6 +605,119 @@ if [ $waited -ge $max_wait ]; then
 fi
 
 echo "✅ Cluster initialization completed successfully!"
+
+# ===========================================================================
+# Step 8: Join the workers
+# ===========================================================================
+#
+# Each worker is the same image and the same host contract as the control
+# plane. What differs is a drop-in that replaces kubeadm-init's ExecStart with
+# a join, and a second that makes postinit a no-op - cluster-scoped manifests
+# belong to the control plane. The unit's ordering, conditions and success
+# marker are shared, because only the command differs.
+if [ "$KINC_WORKERS" -gt 0 ]; then
+    echo
+    echo "👥 Step 8: Joining $KINC_WORKERS worker(s)"
+
+    # One directory per drop-in: systemd applies every .conf in a .d directory,
+    # so the two must not share one.
+    mkdir -p "${STATE_DIR}/dropins/kubeadm-init" "${STATE_DIR}/dropins/kinc-postinit"
+    cp runtime/config/dropins/join.conf "${STATE_DIR}/dropins/kubeadm-init/join.conf"
+    cp runtime/config/dropins/postinit.conf "${STATE_DIR}/dropins/kinc-postinit/postinit.conf"
+
+    for i in $(seq 1 "$KINC_WORKERS"); do
+        WORKER_NAME="${CLUSTER_NAME}-w${i}"
+        WORKER_CONTAINER="kinc-${WORKER_NAME}"
+        WORKER_STATE="${STATE_DIR}/${WORKER_NAME}"
+        echo
+        echo "  ── ${WORKER_CONTAINER}"
+
+        # The join config is complete as written: it carries the endpoint and
+        # the CA hash, so this node needs nothing from the control plane's
+        # filesystem and waits on its own discovery timeout.
+        mkdir -p "${WORKER_STATE}/join"
+        sed -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${CONTROL_PLANE_ENDPOINT}/g" \
+            -e "s/CA_HASH_PLACEHOLDER/${CA_HASH}/g" \
+            runtime/config/join.conf > "${WORKER_STATE}/join/join.conf"
+
+        if [ "${KINC_MAC:-none}" = "selinux" ] && command -v restorecon >/dev/null 2>&1; then
+            restorecon -R "${WORKER_STATE}" "${STATE_DIR}/dropins" 2>/dev/null || true
+        fi
+
+        sed -e "s/kinc-NODE_NAME_PLACEHOLDER/${WORKER_CONTAINER}/g" \
+            -e "s/Volume=kinc-var-data:/Volume=${WORKER_CONTAINER}-var-data:/g" \
+            -e "s/Volume=kinc-config:/Volume=kinc-${CLUSTER_NAME}-config:/g" \
+            -e "s/kinc-var-data-volume.service/${WORKER_CONTAINER}-var-data-volume.service/g" \
+            -e "s/kinc-config-volume.service/kinc-${CLUSTER_NAME}-config-volume.service/g" \
+            -e "s|JOIN_DIR_PLACEHOLDER|${WORKER_STATE}/join|g" \
+            -e "s|JOIN_DROPIN_DIR_PLACEHOLDER|${STATE_DIR}/dropins/kubeadm-init|g" \
+            -e "s|POSTINIT_DROPIN_DIR_PLACEHOLDER|${STATE_DIR}/dropins/kinc-postinit|g" \
+            -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
+            runtime/quadlet/kinc-worker.container > ~/.config/containers/systemd/${WORKER_CONTAINER}.container
+
+        sed "s/VolumeName=kinc-var-data/VolumeName=${WORKER_CONTAINER}-var-data/g" \
+            runtime/quadlet/kinc-var-data.volume > ~/.config/containers/systemd/${WORKER_CONTAINER}-var-data.volume
+
+        if [[ "${USE_BAKED_IN_CONFIG:-}" == "true" ]]; then
+            sed -i '/kinc-config-volume.service/d' ~/.config/containers/systemd/${WORKER_CONTAINER}.container
+            sed -i '/Volume=kinc-.*-config:/d' ~/.config/containers/systemd/${WORKER_CONTAINER}.container
+        fi
+
+        systemctl --user daemon-reload
+        systemctl --user start ${WORKER_CONTAINER}.service
+        echo "  ✅ ${WORKER_CONTAINER} started"
+    done
+
+    # A node that never joined leaves a cluster-wide check green, so each one is
+    # waited for by name. Ready needs the CNI, which Antrea schedules onto the
+    # node once it registers.
+    echo
+    echo "⏳ Waiting for workers to register and become Ready"
+    KUBECONFIG_TMP=$(mktemp)
+    podman exec ${CONTROL_PLANE_NAME} cat /etc/kubernetes/admin.conf > "$KUBECONFIG_TMP"
+    sed -i "s|server: https://.*:6443|server: https://127.0.0.1:${CLUSTER_PORT}|g" "$KUBECONFIG_TMP"
+
+    for i in $(seq 1 "$KINC_WORKERS"); do
+        WORKER_CONTAINER="kinc-${CLUSTER_NAME}-w${i}"
+        # Registration first, then readiness. 'kubectl wait' on a node that does
+        # not exist yet fails immediately with NotFound rather than waiting, so
+        # a worker still joining fails the check instead of being waited for.
+        registered=false
+        for _ in $(seq 1 120); do
+            if kubectl --kubeconfig="$KUBECONFIG_TMP" get node "${WORKER_CONTAINER}" >/dev/null 2>&1; then
+                registered=true
+                break
+            fi
+            sleep 5
+        done
+        if [ "$registered" != true ]; then
+            echo "❌ ${WORKER_CONTAINER} never registered with the API"
+            # kubeadm writes to a file, not the journal, which holds only
+            # systemd's own start and stop lines for this unit.
+            podman exec ${WORKER_CONTAINER} cat /var/log/kinc/kubeadm-init.log || true
+            rm -f "$KUBECONFIG_TMP"
+            exit 1
+        fi
+
+        if ! kubectl --kubeconfig="$KUBECONFIG_TMP" wait --for=condition=Ready \
+             "node/${WORKER_CONTAINER}" --timeout=600s; then
+            echo "❌ ${WORKER_CONTAINER} registered but did not become Ready"
+            kubectl --kubeconfig="$KUBECONFIG_TMP" describe node "${WORKER_CONTAINER}" || true
+            podman exec ${WORKER_CONTAINER} cat /var/log/kinc/kubeadm-init.log || true
+            rm -f "$KUBECONFIG_TMP"
+            exit 1
+        fi
+
+        # NodeRestriction refuses every kubernetes.io and k8s.io label a kubelet
+        # sets for itself, so the role is applied here, with the cluster's own
+        # credentials, after the node has registered.
+        kubectl --kubeconfig="$KUBECONFIG_TMP" label node "${WORKER_CONTAINER}" \
+            node-role.kubernetes.io/worker= --overwrite >/dev/null
+        echo "  ✅ ${WORKER_CONTAINER} Ready, role applied"
+    done
+    rm -f "$KUBECONFIG_TMP"
+    echo "✅ All workers joined"
+fi
 
 echo
 echo "✅ Deployment complete!"

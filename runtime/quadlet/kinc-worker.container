@@ -1,13 +1,13 @@
 [Unit]
-Description=kinc Kubernetes Control Plane Container (Quadlet Backend)
+Description=kinc Kubernetes Worker Node Container (Quadlet Backend)
 Documentation=https://github.com/T0MASD/kinc
 After=network-online.target kinc-var-data-volume.service kinc-config-volume.service
 Wants=network-online.target kinc-var-data-volume.service kinc-config-volume.service
 
 [Container]
 Image=localhost/kinc/node:v1.36.4
-ContainerName=kinc-control-plane
-HostName=kinc-control-plane
+ContainerName=kinc-NODE_NAME_PLACEHOLDER
+HostName=kinc-NODE_NAME_PLACEHOLDER
 
 SecurityLabelType=container_runtime_t
 
@@ -35,10 +35,12 @@ Tmpfs=/run/lock:rw,rprivate,nosuid,nodev,tmpcopyup
 # /var but it is not a shared or slave mount".
 Volume=kinc-var-data:/var:Z,rslave
 Volume=kinc-config:/etc/kinc/config:ro,Z
-# The cluster CA, minted before this container starts so that every join config
-# can state its hash. kinc-preflight copies it into /etc/kubernetes/pki, and
-# kubeadm uses it as-is rather than creating one of its own.
-Volume=CA_DIR_PLACEHOLDER:/etc/kinc/ca:ro,Z
+# The join config, and the drop-ins that turn this node's kubeadm-init into a
+# join and its postinit into a no-op. Mounted twice because systemd wants a
+# drop-in under a .d directory named for its unit.
+Volume=JOIN_DIR_PLACEHOLDER:/etc/kinc/join:ro,Z
+Volume=JOIN_DROPIN_DIR_PLACEHOLDER:/etc/systemd/system/kubeadm-init.service.d:ro,Z
+Volume=POSTINIT_DROPIN_DIR_PLACEHOLDER:/etc/systemd/system/kinc-postinit.service.d:ro,Z
 # Share host container storage to cache images across all clusters
 Volume=%h/.local/share/containers/storage:/root/.local/share/containers/storage:rw,Z
 # Antrea's OVS looks up its kernel module here. The module is loaded by the
@@ -49,14 +51,10 @@ Volume=%h/.local/share/containers/storage:/root/.local/share/containers/storage:
 Volume=/lib/modules:/lib/modules:ro
 
 # Network configuration
-#
-# Two ports that are easy to confuse, named apart on purpose. The published
-# port is how kubectl on the host reaches this cluster, chosen so two clusters
-# do not collide. What a node inside the cluster dials is controlPlaneEndpoint,
-# whose port is the one the API server binds - 6443, always.
-# Port must be sequential (6443, 6444, 6445...) because subnet IDs are derived from last 2 digits
-PublishPort=127.0.0.1:CLUSTER_PORT:6443/tcp
-# The cluster's own network, so other nodes resolve this one by name.
+# A worker publishes nothing. It is reached over the cluster network by the
+# control plane and by other nodes, and kubectl reaches the cluster through the
+# control plane's published port. A published port here would also answer
+# before the node had joined anything, which is not a signal worth having.
 Network=NETWORK_UNIT_PLACEHOLDER
 
 # Environment variables
