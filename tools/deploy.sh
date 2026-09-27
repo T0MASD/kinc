@@ -463,7 +463,13 @@ max_wait=1500  # 25 minutes max for initialization
 waited=0
 while [ $waited -lt $max_wait ]; do
     # Check if container is still running
-    if ! podman ps --filter "name=kinc-${CLUSTER_NAME}-control-plane" --format "{{.Names}}" | grep -q "kinc-${CLUSTER_NAME}-control-plane"; then
+    # Ask podman for the running state directly, rather than grepping a list:
+    # grep -q exits on its first match and SIGPIPEs podman, which pipefail
+    # turns into a false negative. 'container exists' is not the same check -
+    # it is true for a stopped container too.
+    running=$(podman container inspect -f '{{.State.Running}}' \
+        "kinc-${CLUSTER_NAME}-control-plane" 2>/dev/null || echo false)
+    if [ "$running" != "true" ]; then
         echo "❌ Container is not running"
         systemctl --user status kinc-${CLUSTER_NAME}-control-plane.service --no-pager
         exit 1

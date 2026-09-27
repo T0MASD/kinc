@@ -40,7 +40,10 @@ echo "🏷️  Image built: $IMAGE_NAME"
 # Verify the image
 echo
 echo "🔍 Verifying image..."
-if ! podman images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${IMAGE_NAME}$"; then
+# podman answers this exactly. Piping the image list into grep -q made the
+# reader exit early, SIGPIPE the producer, and pipefail report 141 - a build
+# that had tagged its image fine failed verification.
+if ! podman image exists "$IMAGE_NAME"; then
     echo "❌ Image verification failed"
     exit 1
 fi
