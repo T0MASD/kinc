@@ -37,18 +37,26 @@ for cluster in "$@"; do
     continue
   fi
 
-  pod="faro-bootstrap-${node}"
-  phase=$(kubectl -n kube-system get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-  if [ "$phase" != "Running" ]; then
-    echo "❌ ${cluster}: Faro was enabled but its pod is ${phase:-absent}"
-    kubectl -n kube-system logs "$pod" --tail=10 2>&1 | sed 's/^/     /'
+  # Asked of the node, not the API server. The gate has to work the same in a
+  # job that runs two clusters, where each has its own kubeconfig and none is
+  # ambient - the first version used kubectl and failed on localhost:8080. It
+  # also means a Faro that died because the API server is unwell still reports
+  # as Faro being down, rather than the gate being unable to ask.
+  state=$(podman exec "$node" sh -c \
+            'crictl ps -a --name faro -o json 2>/dev/null | jq -r ".containers[0].state // \"ABSENT\""' \
+          2>/dev/null || echo "ABSENT")
+  if [ "$state" != "CONTAINER_RUNNING" ]; then
+    echo "❌ ${cluster}: Faro was enabled but its container is ${state}"
+    podman exec "$node" sh -c \
+      'id=$(crictl ps -a --name faro -q 2>/dev/null | head -1); [ -n "$id" ] && crictl logs --tail 10 "$id" 2>&1' \
+      2>/dev/null | sed 's/^/     /'
     status=1
     continue
   fi
-  echo "✅ ${cluster}: Faro pod Running"
+  echo "✅ ${cluster}: Faro container running"
 
   # Written something, not merely started. The events land on the cluster's own
-  # /var, so this reads the file rather than asking the pod.
+  # /var, so this reads the file rather than asking anything.
   events=/var/lib/kinc/faro-events/logs
   deadline=$(( $(date +%s) + 60 ))
   n=0
@@ -59,9 +67,10 @@ for cluster in "$@"; do
   done
 
   if [ "${n:-0}" -eq 0 ]; then
-    echo "❌ ${cluster}: Faro pod is Running but has captured nothing in 60s"
-    echo "   its own log:"
-    kubectl -n kube-system logs "$pod" --tail=10 2>&1 | sed 's/^/     /'
+    echo "❌ ${cluster}: Faro is running but has captured nothing in 60s"
+    podman exec "$node" sh -c \
+      'id=$(crictl ps -a --name faro -q 2>/dev/null | head -1); [ -n "$id" ] && crictl logs --tail 10 "$id" 2>&1' \
+      2>/dev/null | sed 's/^/     /'
     podman exec "$node" sh -c "ls -la ${events} 2>&1" | sed 's/^/     /'
     status=1
     continue
