@@ -65,6 +65,18 @@ RUN mkdir -p /etc/kubernetes/manifests \
 # Copy in static files (adapted for Fedora/CRI-O)
 # all scripts and directories are 0755 (rwx r-x r-x)
 # all non-scripts are 0644 (rw- r-- r--)
+# A digest of everything under base/ and kinc/, computed by tools/build.sh.
+#
+# The COPY layers below were served from cache after their sources changed, so
+# a build reported success while shipping the previous run's scripts - a config
+# placeholder went unsubstituted and the cluster failed on a fix that was
+# already written. Recording the digest puts the content itself in the cache
+# key, so any edit under those trees invalidates what follows, and the recorded
+# value is what build.sh asserts the image against afterwards.
+ARG KINC_CONTENT_DIGEST=unset
+RUN mkdir -p /etc/kinc \
+    && echo "$KINC_CONTENT_DIGEST" > /etc/kinc/.content-digest
+
 COPY --chmod=0644 base/etc/* /etc/
 COPY --chmod=0644 base/etc/containers/ /etc/containers/
 COPY --chmod=0644 base/etc/crio/ /etc/crio/
@@ -131,7 +143,12 @@ RUN chmod -R 755 /kinc/manifests/
 RUN crio --version \
     && echo "CRI-O resolves the helpers named in its effective config:" \
     && pinns=$(crio config 2>/dev/null | sed -n 's/^[[:space:]]*pinns_path[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' | tail -1) \
-    && test -x "$pinns" \
+    && { test -x "$pinns" || { \
+         echo "pinns_path names '$pinns', which this image does not carry."; \
+         echo "cri-o versions before 1.36.5 ship no pinns at all, so a cached"; \
+         echo "package layer reaches here and fails. Rebuild the packages:"; \
+         echo "  CACHE_BUST=\$(date +%s) ./tools/build.sh"; \
+         exit 1; }; } \
     && echo "  pinns_path=$pinns" \
     && /usr/bin/crun.orig --version \
     && echo "crun wrapper installed:" \
