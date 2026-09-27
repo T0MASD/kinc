@@ -129,6 +129,10 @@ RUN chmod -R 755 /kinc/manifests/
 
 # Verify installation and configuration
 RUN crio --version \
+    && echo "CRI-O resolves the helpers named in its effective config:" \
+    && pinns=$(crio config 2>/dev/null | sed -n 's/^[[:space:]]*pinns_path[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' | tail -1) \
+    && test -x "$pinns" \
+    && echo "  pinns_path=$pinns" \
     && /usr/bin/crun.orig --version \
     && echo "crun wrapper installed:" \
     && ls -la /usr/bin/crun /usr/bin/crun.orig /usr/local/bin/crun-wrapper.sh \
