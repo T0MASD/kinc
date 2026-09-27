@@ -23,7 +23,7 @@ CONFIG=/tmp/kubeadm-final.conf
 # API server treats as cluster-admin directly, so it works before RBAC exists.
 ADMIN=/etc/kubernetes/super-admin.conf
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+log() { echo "[$(date -u +%FT%T.%6NZ)] $*"; }
 phase() { log "phase: $*"; kubeadm init phase "$@" --config="$CONFIG"; }
 
 log "=== kubeadm init, phased ==="

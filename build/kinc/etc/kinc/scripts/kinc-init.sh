@@ -10,7 +10,7 @@ set -euo pipefail
 KINC_LOG="${KINC_LOG:-/var/log/kinc/$(basename "$0" .sh).log}"
 mkdir -p "$(dirname "$KINC_LOG")" 2>/dev/null || true
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$KINC_LOG" >&2
+    echo "[$(date -u +%FT%T.%6NZ)] $1" | tee -a "$KINC_LOG" >&2
 }
 
 # Start overall timing
