@@ -21,24 +21,6 @@ spec:
     image: ghcr.io/t0masd/faro-operator:latest
     imagePullPolicy: IfNotPresent
 
-    # Faro writes its events to a hostPath on the node, which the kubelet
-    # creates root-owned, and the image declares USER faro. So it needs root,
-    # and now says so.
-    #
-    # It did not used to. The crun wrapper deleted process.user from every OCI
-    # spec, which made every container root whatever it asked for, and this
-    # manifest worked by accident. When that stopped - so that runAsUser means
-    # something again - Faro started failing with
-    #
-    #   failed to create log directory: mkdir /var/faro/events/logs: permission denied
-    #
-    # and capturing nothing, while the deploy still reported it enabled. A
-    # requirement satisfied by a runtime hack nobody could see is a requirement
-    # waiting to break; this one is declared.
-    securityContext:
-      runAsUser: 0
-      runAsGroup: 0
-    
     # Wait for API server before starting Faro
     # Two-stage check: TCP port availability (fast) + HTTP healthz (verification)
     # Experiment proved both stages are necessary - TCP-only results in "unknown API groups" errors
@@ -70,7 +52,7 @@ spec:
     volumeMounts:
     # Kubeconfig for API server access
     - name: kubeconfig
-      mountPath: /etc/kubernetes/super-admin.conf
+      mountPath: /etc/kinc/faro/kubeconfig
       readOnly: true
     
     # Faro configuration
@@ -106,13 +88,13 @@ spec:
     # exists to capture.
     env:
     - name: KUBECONFIG
-      value: /etc/kubernetes/super-admin.conf
+      value: /etc/kinc/faro/kubeconfig
   
   volumes:
   # Kubeconfig from host
   - name: kubeconfig
     hostPath:
-      path: /etc/kubernetes/super-admin.conf
+      path: /etc/kinc/faro/kubeconfig
       type: File
   
   # Faro configuration from host
