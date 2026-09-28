@@ -12,6 +12,19 @@
 # Sourced, not executed. It defines functions and sets no shell options, so the
 # caller's `set -euo pipefail` stays in force.
 
+# Timestamps are compared as strings, which is only valid while they are the
+# same ISO-8601 shape. They are not: the CRI writes pod logs with a "+00:00"
+# offset because CRI-O formats time.Now() in time.Local, and Go emits "Z" only
+# for the time.UTC location itself - the node is UTC and it makes no difference,
+# nor does any CRI-O setting, since it is a property of the call. kinc's own
+# logs use "Z". Same instant, and "+" sorts below "Z", so a mixed capture would
+# order every pod line before every kinc line regardless of when they happened.
+#
+# So the offset is folded to Z before any comparison. Sub-second digits differ
+# too - seconds, microseconds, nanoseconds - but those compare correctly as
+# strings once the suffix matches, because the fraction is left-aligned.
+kinc_iso() { sed -E 's/\+00:00$/Z/; s/\+00:00([^0-9])/Z\1/g'; }
+
 # Every kinc node container, one per line, or just one cluster's when named.
 # Empty output means none are running, which every caller must treat as an error
 # rather than an empty result.
@@ -112,7 +125,7 @@ kinc_first_seen() {
   #
   # Done inside awk rather than `sort | head -1`, which SIGPIPEs sort under
   # `set -o pipefail` and turns a healthy read into a failure.
-  t0="$(awk 'NF { if (min == "" || $1 < min) min = $1 } END { print min }' "$1")"
+  t0="$(kinc_iso < "$1" | awk 'NF { if (min == "" || $1 < min) min = $1 } END { print min }')"
   [ -z "$t0" ] && return 1
   date -d "$t0" +%s 2>/dev/null
 }
@@ -149,7 +162,7 @@ kinc_record_end() {
   fi
   { for f in "$dir"/*; do
       [ -s "$f" ] || continue
-      awk 'NF { if ($1 > max) max = $1 } END { if (max != "") print max }' "$f"
+      kinc_iso < "$f" | awk 'NF { if ($1 > max) max = $1 } END { if (max != "") print max }' 
     done; } | sort | awk 'END { print }' | {
       read -r t || return 1
       [ -z "$t" ] && return 1

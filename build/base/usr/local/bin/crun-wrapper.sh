@@ -1,79 +1,121 @@
 #!/bin/bash
-# JSON-safe crun wrapper using jq
-# This wrapper intercepts crun create commands and removes oomScoreAdj from OCI specs
-# to enable rootless container operation without OOM score adjustment failures
+# Strip oomScoreAdj from OCI specs before handing them to crun.
+#
+# Rootless cannot lower oom_score_adj below the floor its session inherited:
+# fs/proc/base.c checks capable(CAP_SYS_RESOURCE), which is against the initial
+# user namespace, so no capability a rootless container holds satisfies it.
+# crun does not treat that as advisory - it fails the create:
+#
+#   Container creation error: write to `/proc/self/oom_score_adj`: Permission denied
+#
+# The kubelet asks for -997 on Guaranteed pods and -999 on the control plane's
+# static ones, so without this the API server never starts and the cluster does
+# not come up. Verified by removing the wrapper: etcd, kube-apiserver and
+# kube-controller-manager all fail to create, and kubeadm times out waiting for
+# an API server that never arrives.
+#
+# It removes nothing else. Earlier versions also deleted process.user, which
+# made every container run as root whatever its image or securityContext said,
+# and deleted capabilities from any spec whose JSON happened to contain the
+# string "helper" - which matches local-path's helper pod and anything else
+# that mentions the word. Neither was needed to start a cluster.
+#
+# Every invocation is recorded in /tmp/crun-debug.log: what CRI-O asked for, and
+# what was done to the spec. This is the only account of a step that happens
+# between the kubelet's intent and the container that results, so when a create
+# fails it is the difference between "Permission denied" and knowing which spec
+# was rewritten and whether the rewrite worked.
+#
+# ci-collect-diagnostics.sh copies it into the per-node diagnostics, so it is in
+# the artifacts of every CI run. It lives on tmpfs and grows with container
+# churn - about 12K for a two-node bootstrap - so it is memory, and a
+# long-running cluster with heavy churn will keep adding to it.
+set -euo pipefail
 
-# Debug logging
-echo "$(date): crun called with: $*" >> /tmp/crun-debug.log
+DEBUG_LOG=/tmp/crun-debug.log
 
-# Check if this is a container create command
+# Always succeeds, deliberately. This runs under `set -e` on the path that
+# creates every container in the cluster, so a full disk or an unwritable /tmp
+# must not be able to stop one starting. The record is worth having; it is not
+# worth a node that cannot run pods.
+note() {
+    # The guard is what makes it non-fatal: under `set -e` a failed redirection
+    # aborts the function before any `return 0` could run, and the container
+    # never gets created. Verified by pointing DEBUG_LOG at a directory that
+    # does not exist - without this, crun is never reached.
+    # RFC 3339 with nanoseconds and a literal Z, matching the API audit log and
+    # the CRI's pod logs exactly, so all three merge on one timeline without
+    # being reformatted. Not `date -Is`, which stops at seconds - container
+    # creates arrive in bursts and whole seconds lose their order. Not
+    # `date -Ins` either: it writes the fraction with a comma, which is not
+    # RFC 3339 and does not sort against the others.
+    if ! printf '%s: %s\n' "$(date -u +%FT%T.%9NZ)" "$*" >> "$DEBUG_LOG" 2>/dev/null; then
+        return 0
+    fi
+}
+
+note "called with: $*"
+
 if [[ "$*" == *"create"* ]]; then
-    BUNDLE_DIR=""
-    # Parse arguments to find --bundle directory
-    for ((i=1; i<=$#; i++)); do
+    bundle=""
+    for ((i = 1; i <= $#; i++)); do
         if [[ "${!i}" == "--bundle" ]]; then
-            j=$((i+1))
-            BUNDLE_DIR="${!j}"
+            j=$((i + 1))
+            bundle="${!j}"
             break
         fi
     done
-    
-    # Process config.json if bundle directory exists
-    if [[ -n "$BUNDLE_DIR" && -f "$BUNDLE_DIR/config.json" ]]; then
-        # Create backup
-        cp "$BUNDLE_DIR/config.json" "$BUNDLE_DIR/config.json.bak"
-        MODIFIED=false
-        
-        # Remove oomScoreAdj if present
-        if grep -q "oomScoreAdj" "$BUNDLE_DIR/config.json"; then
-            echo "$(date): Using jq to safely remove oomScoreAdj" >> /tmp/crun-debug.log
-            jq "del(.process.oomScoreAdj)" "$BUNDLE_DIR/config.json.bak" > "$BUNDLE_DIR/config.json.tmp"
-            if [[ $? -eq 0 ]]; then
-                mv "$BUNDLE_DIR/config.json.tmp" "$BUNDLE_DIR/config.json"
-                cp "$BUNDLE_DIR/config.json" "$BUNDLE_DIR/config.json.bak"
-                echo "$(date): Successfully removed oomScoreAdj with jq" >> /tmp/crun-debug.log
-                MODIFIED=true
-            else
-                echo "$(date): jq failed to remove oomScoreAdj" >> /tmp/crun-debug.log
-                rm -f "$BUNDLE_DIR/config.json.tmp"
+
+    if [[ -z "$bundle" ]]; then
+        note "create with no --bundle, nothing to rewrite"
+    elif [[ ! -f "$bundle/config.json" ]]; then
+        note "create with no config.json under ${bundle}"
+    fi
+
+    if [[ -n "$bundle" && -f "$bundle/config.json" ]]; then
+        if jq -e '.process.oomScoreAdj' "$bundle/config.json" >/dev/null 2>&1; then
+            want=$(jq -r '.process.oomScoreAdj' "$bundle/config.json")
+
+            # Only what cannot be set. Lowering oom_score_adj below the floor
+            # this process inherited is what needs CAP_SYS_RESOURCE in the
+            # initial user namespace; raising it is always allowed.
+            #
+            # Stripping everything, as this used to, removed the positive
+            # values as well - the kubelet asks for 997, 998 and 1000 on
+            # Burstable and BestEffort pods precisely so they are killed before
+            # anything else. With those gone every pod sat at the inherited
+            # floor and the cluster had no OOM ordering at all: under memory
+            # pressure the kernel was as likely to take etcd as a BestEffort
+            # job. Leaving them alone costs nothing, because they succeed.
+            floor=$(cat /proc/self/oom_score_adj 2>/dev/null || echo 0)
+            if [[ "$want" -ge "$floor" ]]; then
+                note "kept oomScoreAdj=${want} (>= floor ${floor}, crun can set it)"
+                exec /usr/bin/crun.orig "$@"
             fi
-        fi
-        
-        # Remove user settings that cause capset issues in rootless mode
-        if grep -q '"user"' "$BUNDLE_DIR/config.json"; then
-            echo "$(date): Removing user settings to avoid capset issues in rootless mode" >> /tmp/crun-debug.log
-            jq 'del(.process.user)' "$BUNDLE_DIR/config.json.bak" > "$BUNDLE_DIR/config.json.tmp"
-            if [[ $? -eq 0 ]]; then
-                mv "$BUNDLE_DIR/config.json.tmp" "$BUNDLE_DIR/config.json"
-                cp "$BUNDLE_DIR/config.json" "$BUNDLE_DIR/config.json.bak"
-                echo "$(date): Successfully removed user settings" >> /tmp/crun-debug.log
-                MODIFIED=true
+            # Written to a temporary file and moved, so a failed jq leaves the
+            # original spec intact rather than a truncated one.
+            if jq 'del(.process.oomScoreAdj)' "$bundle/config.json" > "$bundle/config.json.tmp"; then
+                mv "$bundle/config.json.tmp" "$bundle/config.json"
+                note "stripped oomScoreAdj=${want} from ${bundle}/config.json"
             else
-                echo "$(date): jq failed to remove user settings" >> /tmp/crun-debug.log
-                rm -f "$BUNDLE_DIR/config.json.tmp"
+                note "FAILED to strip oomScoreAdj=${want} from ${bundle}/config.json"
+                rm -f "$bundle/config.json.tmp"
+                # Say so, because the alternative is silence followed by a
+                # container that will not create. crun rejects the spec this
+                # left in place, and CRI-O reports only "write to
+                # /proc/self/oom_score_adj: Permission denied" - true, and no
+                # help in finding the rewrite that was supposed to prevent it.
+                #
+                # The journal rather than a file: journald bounds it, and the
+                # diagnostics collector already takes the whole boot journal,
+                # so this reaches a CI artifact without anything being wired up
+                # for it. `journalctl -t crun-wrapper` on a node, or grep the
+                # collected journal.txt.
+                logger -t crun-wrapper -p daemon.err \
+                    "failed to strip oomScoreAdj from ${bundle}/config.json; crun will refuse it"
             fi
-        fi
-        
-        # For helper containers, remove all capabilities to avoid capset issues
-        if grep -q "helper" "$BUNDLE_DIR/config.json"; then
-            echo "$(date): Removing all capabilities from helper container to avoid capset issues" >> /tmp/crun-debug.log
-            jq 'del(.process.capabilities)' "$BUNDLE_DIR/config.json.bak" > "$BUNDLE_DIR/config.json.tmp"
-            if [[ $? -eq 0 ]]; then
-                mv "$BUNDLE_DIR/config.json.tmp" "$BUNDLE_DIR/config.json"
-                cp "$BUNDLE_DIR/config.json" "$BUNDLE_DIR/config.json.bak"
-                echo "$(date): Successfully removed capabilities from helper container" >> /tmp/crun-debug.log
-                MODIFIED=true
-            else
-                echo "$(date): jq failed to remove capabilities from helper container" >> /tmp/crun-debug.log
-                rm -f "$BUNDLE_DIR/config.json.tmp"
-            fi
-        fi
-        
-        if [[ "$MODIFIED" == "false" ]]; then
-            echo "$(date): No modifications needed" >> /tmp/crun-debug.log
         fi
     fi
 fi
 
-# Execute the original crun binary with all arguments
 exec /usr/bin/crun.orig "$@"
