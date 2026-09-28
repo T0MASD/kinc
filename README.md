@@ -17,7 +17,7 @@
 - 🌐 **Isolated networking:** Sequential port allocation with subnet derivation
 - 🧩 **Multi-node:** A cluster has as many nodes as you ask for, on one host
 - 📊 **Multi-cluster:** Run multiple clusters concurrently
-- 🔍 **Observability:** Optional Faro event capture for bootstrap analysis (enabled in CI by default)
+- 🔍 **Observability:** Optional Faro event capture for what changed, and API-server audit for what was read and deleted (both enabled in CI)
 - ✅ **Production-grade:** Uses official Kubernetes tools (kubeadm, kubectl, CRI-O)
 
 ---
@@ -119,29 +119,6 @@ by name. Pod traffic between nodes travels Antrea's geneve tunnel, which is
 what the `openvswitch` and `geneve` modules are required for.
 
 `KINC_WORKERS` defaults to 0, which is a single-node cluster.
-
-### API-Server Audit Logging
-
-```bash
-# Record reads of the resources you name. Off unless set.
-KINC_AUDIT_RESOURCES="/pods,fleet.example.com/widgets" ./tools/deploy.sh
-```
-
-Each entry is `<group>/<resource>`; the core group is empty, so `/pods`. Reads
-are logged at `Metadata` level for `get`, `list` and `watch` — user,
-impersonated user, verb, objectRef, source IPs and timestamps, no bodies.
-Everything else on the cluster is not logged.
-
-A GET or LIST changes nothing, so it raises no watch event and is invisible to
-every informer: the audit log is the only place a read is recorded. The policy
-is narrow on purpose — auditing everything is a volume problem, and naming the
-resources is the point.
-
-The log is at `/var/log/kubernetes/audit/audit.log` inside the control-plane
-container, on the cluster's own volume, so it survives a container restart and
-is readable from the host. It is capped at 100MB × 10 files × 30 days.
-
-Unset, the API server starts with no audit flags at all and nothing is written.
 
 ### Deploy Multiple Clusters
 
@@ -320,6 +297,8 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=myapp ./tools/deploy.sh
 - `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.37.0`)
 - `KINC_SKIP_SYSCTL_CHECKS`: Bypass inotify/keyring checks (default: `false`)
 - `KINC_ENABLE_FARO`: Enable Faro event capture (default: `false`, CI: `true`)
+- `KINC_AUDIT_RESOURCES`: Comma-separated `<group>/<resource>` to audit reads and deletes of (default: unset, no audit flags at all)
+- `KINC_WORKERS`: Worker nodes to join (default: `0`, a single-node cluster)
 
 ### `cleanup.sh`
 Remove a kinc cluster and clean up all resources.
@@ -416,6 +395,51 @@ Then deploy with mounted config:
 ```bash
 CLUSTER_NAME=custom ./tools/deploy.sh
 ```
+
+### API-Server Audit Logging (Optional)
+
+**API-server audit** records what was read and what was deleted. Off unless
+asked for, like Faro, and narrow on purpose: you name the resources.
+
+**Enable audit:**
+
+```bash
+# Record the resources you name. Off unless set.
+KINC_AUDIT_RESOURCES="/pods,fleet.example.com/widgets" ./tools/deploy.sh
+```
+
+Each entry is `<group>/<resource>`; the core group is empty, so `/pods`.
+
+**Why both, and what each answers:**
+
+Faro records what *changed* — it watches, so it sees creates, updates and
+deletes as they happen. Audit answers the two questions a watch cannot:
+
+- **Who read this?** A GET or LIST changes nothing, raises no watch event and
+  is invisible to every informer. The audit log is the only place a read exists.
+- **Who deleted this?** A watch says an object is gone, never who removed it,
+  and the object is past tense by the time anything can ask.
+
+Entries are `Metadata` level for `get`, `list`, `watch` and `delete` — user,
+impersonated user, verb, objectRef, source IPs and timestamps, no bodies.
+Everything else on the cluster is not logged, because auditing everything is a
+volume problem and naming the resources is the point.
+
+**Access audit events:**
+
+```bash
+# Inside the control-plane container, on the cluster's own volume
+AUDIT_PATH="$HOME/.local/share/containers/storage/volumes/kinc-${CLUSTER_NAME}-var-data/_data/log/kubernetes/audit"
+
+# Who read what
+jq -r 'select(.verb=="get") | "\(.user.username) \(.objectRef.resource)"' $AUDIT_PATH/audit.log | sort | uniq -c | sort -rn
+
+# Who deleted what
+jq -r 'select(.verb=="delete") | "\(.requestReceivedTimestamp) \(.user.username) \(.objectRef.resource)/\(.objectRef.name)"' $AUDIT_PATH/audit.log
+```
+
+It survives a container restart and is capped at 100MB × 10 files × 30 days.
+Unset, the API server starts with no audit flags at all and nothing is written.
 
 ### Faro Event Capture (Optional)
 
