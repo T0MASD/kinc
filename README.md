@@ -609,7 +609,7 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=cluster02 ./tools/deploy.sh
 ## Components
 
 - **Kubernetes:** v1.37.0
-- **CRI-O:** v1.37.1 (Fedora 44 updates-testing until its Bodhi update is stable)
+- **CRI-O:** v1.37.1
 - **kubeadm:** v1.37.0
 - **kubectl:** v1.37.0
 - **CNI:** Antrea v2.7.0 (Open vSwitch datapath, geneve between nodes)
