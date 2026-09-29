@@ -141,25 +141,35 @@ one cluster's nodes cannot see another's.
 
 ### Image Store
 
-kinc keeps its own image store at `~/.local/share/kinc/storage`, shared by every
-node of every cluster on the host. Sharing is deliberate: a joining node needs
-no pull, because the control plane has already fetched what the cluster runs.
+Each node has its own image store, at
+`~/.local/share/kinc/<cluster>/stores/<node>`.
 
-It is separate from your podman store. Mounting that one instead made the
-cluster's runtime and your podman two writers of one store, let the cluster run
-any image on the host without pulling, and left cluster images where you prune
-for your own reasons.
+One per node, not one shared. `containers/storage` is single-writer: point two
+CRI-O daemons at one directory and each garbage-collects the layers the other
+still references, so the second node to start wins and the first is left
+running containers whose lower layers are gone. It does not fail loudly —
+lookups still resolve from cache while `readdir` returns nothing, so a
+container reports an empty rootfs and a binary it shipped with becomes "no such
+file or directory".
 
-`cleanup.sh` leaves the store alone — it is a cache shared across clusters. To
-clear it, note that layer contents belong to a mapped root and plain `rm` will
-refuse:
+They are also separate from your podman store, for a different reason: mounting
+that one made the cluster's runtime and your podman two writers of one store,
+let the cluster run any image on the host without pulling, and left cluster
+images where you prune for your own reasons.
+
+The stores live under the cluster's state directory, so `cleanup.sh` removes
+them with everything else. It does that through `podman unshare`, because layer
+directories are owned by a mapped root and a plain `rm` stops at "Permission
+denied":
 
 ```bash
-podman unshare rm -rf ~/.local/share/kinc/storage
+# cleanup.sh does this for you; by hand it is
+podman unshare rm -rf ~/.local/share/kinc/<cluster>
 ```
 
-A cold store costs one pull of the control-plane images, which kinc does before
-`kubeadm init` rather than during it.
+The cost is one pull per node rather than per cluster. kinc pulls the
+control-plane images before `kubeadm init` rather than during it, so the pull
+does not race kubeadm's deadline.
 
 ### Cleanup
 
@@ -358,9 +368,15 @@ The host still needs what Antrea's datapath needs - `openvswitch` and `geneve`
 loaded, and the volume's mount shared. `deploy.sh` checks both and says so;
 here they are your responsibility.
 
+Give the node its own image store rather than mounting your podman store into
+it — see [Image Store](#image-store) for why that matters — and a volume for
+PersistentVolumes, which are otherwise tmpfs-backed and lost on restart.
+
 ```bash
-# Create volume
+# Create volumes and this node's own image store
 podman volume create kinc-var-data
+podman volume create kinc-manual-storage
+mkdir -p ~/.local/share/kinc/manual/stores/kinc-cluster
 
 # Run cluster
 podman run -d --name kinc-cluster \
@@ -373,7 +389,8 @@ podman run -d --name kinc-cluster \
   --tmpfs /run/lock:rw,rprivate,nosuid,nodev,tmpcopyup \
   --volume kinc-var-data:/var:rw,rslave \
   --volume /lib/modules:/lib/modules:ro \
-  --volume $HOME/.local/share/containers/storage:/root/.local/share/containers/storage:rw \
+  --volume $HOME/.local/share/kinc/manual/stores/kinc-cluster:/root/.local/share/containers/storage:rw \
+  --volume kinc-manual-storage:/tmp/kinc-storage:rw \
   --sysctl net.ipv6.conf.all.disable_ipv6=0 \
   --sysctl net.ipv6.conf.all.keep_addr_on_down=1 \
   --sysctl net.netfilter.nf_conntrack_tcp_timeout_established=86400 \
@@ -521,22 +538,54 @@ podman exec kinc-default-control-plane test -f /var/lib/kinc-initialized && echo
 
 ### View Logs
 
+Every kinc script writes a file under `/var/log/kinc/`, and that is the place
+to look — `kubeadm-init` in particular writes only there, so `journalctl -u
+kubeadm-init.service` shows two lines of systemd bookkeeping and nothing else.
+
 ```bash
-# Preflight logs (config validation, CRI-O check)
-podman exec kinc-default-control-plane journalctl -u kinc-preflight.service
-
-# kubeadm init logs
-podman exec kinc-default-control-plane journalctl -u kubeadm-init.service
-
-# Postinit logs (CNI, storage, waits)
-podman exec kinc-default-control-plane journalctl -u kinc-postinit.service
-
-# CRI-O logs
-podman exec kinc-default-control-plane journalctl -u crio.service
-
-# Kubelet logs
-podman exec kinc-default-control-plane journalctl -u kubelet.service
+# What the three init scripts said, in order
+podman exec kinc-default-control-plane sh -c 'cat /var/log/kinc/kinc-preflight.log'
+podman exec kinc-default-control-plane sh -c 'cat /var/log/kinc/kubeadm-init.log'
+podman exec kinc-default-control-plane sh -c 'cat /var/log/kinc/kinc-postinit.log'
 ```
+
+preflight and postinit also go to the journal; the runtime and the kubelet only
+go there:
+
+```bash
+podman exec kinc-default-control-plane journalctl -u kinc-preflight.service
+podman exec kinc-default-control-plane journalctl -u kinc-postinit.service
+podman exec kinc-default-control-plane journalctl -u crio.service
+podman exec kinc-default-control-plane journalctl -u kubelet.service
+
+# Everything any unit logged above warning, in order
+podman exec kinc-default-control-plane sh -c \
+  'journalctl --no-pager --boot | grep -E " [EF][0-9]{4} "'
+```
+
+Pod logs are on the node's filesystem too, which is where to read them when the
+API server is the thing that is broken:
+
+```bash
+podman exec kinc-default-control-plane sh -c 'ls /var/log/pods'
+podman exec kinc-default-control-plane sh -c 'cat /var/log/pods/kube-system_etcd-*/etcd/*.log'
+```
+
+### Logs from a CI run
+
+CI collects all of the above into artifacts on every run, passing or failing,
+so a red build does not need reproducing to be read. From a run page, under
+**Artifacts**:
+
+| Artifact | Contains |
+|---|---|
+| `kinc-diagnostics-<job>-<n>` | Per node: `kubelet.log`, `crio.log`, full boot `journal.txt`, `errors.log` (every line above warning), `kinc-scripts.log` (all three `/var/log/kinc/*.log`), failed units, `inspect.json`. Plus every pod's log, Antrea's `agentinfo`/`podinterface`/`ovsflows`, cluster state, and the host contract kinc was given. |
+| `audit-log-<job>-<n>` | The API-server audit log, if the cluster was deployed with `KINC_AUDIT_RESOURCES`. |
+| `faro-events-<job>-<n>` | Faro's captured events, if deployed with `KINC_ENABLE_FARO=true`. |
+| `run-summary-<job>-<n>` | Every error class in the run: how far into its component's life it last appeared, how often, how long since, and whether it is startup noise, a one-off, stopped or still going. |
+
+The summary is also printed into the job log and the job summary, so it needs
+no download to read.
 
 ### Common Issues
 
