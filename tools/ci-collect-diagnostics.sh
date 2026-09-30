@@ -161,8 +161,19 @@ collect() {
       elif grep -qw "$m" "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null; then echo builtin
       else echo MISSING; fi
     done
+    # Each node's store, since every node has its own.
+    #
+    # This asked about $HOME/.local/share/kinc/storage, the one shared store
+    # that existed before the stores were split per node. That path stopped
+    # existing with the split, findmnt printed nothing for it, and the section
+    # has been empty in every run since - a diagnostic reporting nothing about
+    # the thing its own comment says has caused a failure here.
     echo "# mount propagation"
-    findmnt -no TARGET,PROPAGATION --target "$HOME/.local/share/kinc/storage" 2>/dev/null
+    for store in "$HOME/.local/share/kinc/${cluster}/stores"/*; do
+        [ -d "$store" ] || continue
+        printf '%s: %s\n' "$(basename "$store")" \
+            "$(findmnt -no TARGET,PROPAGATION --target "$store" 2>/dev/null || echo unknown)"
+    done
     echo "# kernel"; uname -a
   } > "$h/host-contract.txt" 2>&1
 
