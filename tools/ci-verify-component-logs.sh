@@ -168,7 +168,13 @@ for f in "${CAP}"/*; do
   label="$(kinc_label "$(basename "$f")")"
 
   # One line per error: its timestamp and its class.
-  kinc_class_lines "$f" > "${CAP}.errors"
+  #
+  # E and F only. kinc_class_lines also returns warnings, for the summary to
+  # report, but a warning is a component saying something it expected to be
+  # able to say - every apiserver logs "Skipping API
+  # apiextensions.k8s.io/v1beta1 because it has no resources" on every start -
+  # and judging those here would fail every build.
+  kinc_class_lines "$f" | awk -F'\t' '$3 != "W"' > "${CAP}.errors"
 
   [ -s "${CAP}.errors" ] || continue
 

@@ -107,18 +107,29 @@ kinc_capture_pod_logs() {
 # recently.
 kinc_mark_capture_end() { date +%s > "${1}/.captured-at"; }
 
-# Every error line in <file> as "<timestamp>\t<source site>".
+# Every W, E and F line in <file> as "<timestamp>\t<source site>\t<severity>".
 #
-# klog writes E and F at the start of its own field, after the capture's
-# timestamp. The source site (file.go:line) is the class: it groups the same
+# klog writes the severity letter at the start of its own field, after the
+# capture's timestamp. The source site (file.go:line) is the class: it groups the same
 # fault across occurrences without matching on a message body that carries pod
-# names, UIDs and addresses. Interval expressions are spelled out because mawk,
+# names, UIDs and addresses.
+#
+# W is included and reported separately, so callers choose. The gate judges E
+# and F only: a warning is a component saying something it expected to be able
+# to say, and failing a build on one would fail it on "Skipping API
+# apiextensions.k8s.io/v1beta1 because it has no resources", which every
+# apiserver logs on every start. The summary shows warnings, because leaving
+# them out is how "v1 Endpoints is deprecated" printed on every run in this
+# repo without anyone reading it. Interval expressions are spelled out because mawk,
 # which is awk on some runners, has not always supported them.
 kinc_class_lines() {
   awk '
-    /[EF][0-9][0-9][0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\./ {
+    /[WEF][0-9][0-9][0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\./ {
       if (match($0, /[A-Za-z_0-9]+\.go:[0-9]+\]/)) {
-        print $1 "\t" substr($0, RSTART, RLENGTH - 1)
+        site = substr($0, RSTART, RLENGTH - 1)
+        if (match($0, /[WEF][0-9][0-9][0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\./)) {
+          print $1 "\t" site "\t" substr($0, RSTART, 1)
+        }
       }
     }' "$1"
 }

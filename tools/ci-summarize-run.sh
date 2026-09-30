@@ -104,8 +104,8 @@ if [ "${KINC_UNREAD:-0}" -gt 0 ]; then
   echo "${KINC_UNREAD} pod director(ies) held no readable log at capture time."
   echo
 fi
-echo '| component | class | count | first | last | widest gap | quiet | state |'
-echo '|---|---|---:|---:|---:|---:|---:|---|'
+echo '| component | class | level | count | first | last | widest gap | quiet | state |'
+echo '|---|---|:-:|---:|---:|---:|---:|---:|---|'
 
 for f in "${CAP}"/*; do
   [ -s "$f" ] || continue
@@ -120,6 +120,12 @@ for f in "${CAP}"/*; do
     [ -z "$cls" ] && continue
     awk -F'\t' -v c="$cls" '$2==c { print $1 }' "${CAP}.errors" \
       | while read -r ts; do date -d "$ts" +%s; done | sort -n -u > "${CAP}.times"
+
+    # The highest severity this class was ever logged at, so a site that logs
+    # both is reported by the worse of the two.
+    sev=$(awk -F'\t' -v c="$cls" '$2==c { print $3 }' "${CAP}.errors" \
+          | sort -u | awk '/F/{f=1} /E/{e=1} /W/{w=1}
+                           END { print (f ? "F" : e ? "E" : w ? "W" : "?") }')
 
     count=$(wc -l < "${CAP}.times")
     first=$(head -1 "${CAP}.times")
@@ -151,8 +157,8 @@ for f in "${CAP}"/*; do
       thin=''
     fi
 
-    printf '| %s%s | `%s` | %s | +%ss | +%ss | %ss | %ss | %s |\n' \
-      "$label" "$thin" "$cls" "$count" "$(( first - t0_epoch ))" "$into" "$maxgap" "$quiet" "$state"
+    printf '| %s%s | `%s` | %s | %s | +%ss | +%ss | %ss | %ss | %s |\n' \
+      "$label" "$thin" "$cls" "$sev" "$count" "$(( first - t0_epoch ))" "$into" "$maxgap" "$quiet" "$state"
   done < <(cut -f2 "${CAP}.errors" | sort -u)
 done
 echo
