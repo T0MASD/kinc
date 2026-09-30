@@ -198,9 +198,12 @@ collect() {
     # What the crun wrapper was asked to do and what it did. It sits between
     # the kubelet's intent and the container that results, and nothing else
     # records that step: a create that fails reports only the kernel's refusal,
-    # not whether the rewrite meant to prevent it ran. On tmpfs inside the node,
-    # so it is gone the moment the container is, which is why it is taken here.
-    podman exec "$n" sh -c 'cat /tmp/crun-debug.log' > "$d/crun-wrapper.log" 2>/dev/null
+    # not whether the rewrite meant to prevent it ran. On the node's /var
+    # volume, which cleanup.sh removes with the cluster, so it is taken here.
+    # Oldest first, so the rotated half reads before the current one and the
+    # file is in time order however many rotations it has been through.
+    podman exec "$n" sh -c 'cat /var/log/crun-wrapper.log.1 /var/log/crun-wrapper.log 2>/dev/null' \
+      > "$d/crun-wrapper.log" 2>/dev/null
     [ -s "$d/crun-wrapper.log" ] || rm -f "$d/crun-wrapper.log"
     podman inspect "$n" > "$d/inspect.json" 2>&1
   done
