@@ -75,7 +75,7 @@ namespaces:
     resources:
       "v1/pods": {}
       "v1/services": {}
-      "v1/endpoints": {}
+      "discovery.k8s.io/v1/endpointslices": {}
       "v1/events": {}
       "v1/configmaps": {}
       "v1/serviceaccounts": {}

@@ -105,18 +105,26 @@ else
     echo "⚠️  Could not validate YAML (yq/python not available), but config exists"
 fi
 
-# Check that enhanced init script exists and has our new functions
-if podman run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c "grep -q 'validate_configuration' /etc/kinc/scripts/kinc-init.sh"; then
-    echo "✅ Enhanced init script with validation functions"
-else
-    echo "❌ Init script missing validation functions"
-    exit 1
-fi
+# The units that bring the cluster up, checked against systemd's own answer
+# rather than against the file being present.
+for unit in kinc-preflight kubeadm-init kinc-postinit kinc-cgroup-setup; do
+    state=$(podman run --rm --entrypoint /bin/sh "$IMAGE_NAME" \
+        -c "systemctl is-enabled ${unit}.service 2>&1" || true)
+    if [ "$state" = "enabled" ]; then
+        echo "✅ ${unit}.service enabled"
+    else
+        echo "❌ ${unit}.service is '${state}', expected 'enabled'"
+        exit 1
+    fi
+done
 
-if podman run --rm --entrypoint /bin/sh "$IMAGE_NAME" -c "grep -q 'setup_configuration' /etc/kinc/scripts/kinc-init.sh"; then
-    echo "✅ Enhanced init script with configuration setup"
+# Preflight resolves and validates the config before kubeadm sees it.
+if podman run --rm --entrypoint /bin/sh "$IMAGE_NAME" \
+    -c "grep -q 'validate_configuration' /etc/kinc/scripts/kinc-preflight.sh \
+     && grep -q 'setup_configuration'    /etc/kinc/scripts/kinc-preflight.sh"; then
+    echo "✅ Preflight resolves and validates the configuration"
 else
-    echo "❌ Init script missing configuration setup functions"
+    echo "❌ Preflight is missing configuration resolution or validation"
     exit 1
 fi
 

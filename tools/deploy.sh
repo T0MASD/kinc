@@ -630,10 +630,14 @@ if [ $waited -ge $max_wait ]; then
     echo "❌ Timeout waiting for cluster initialization"
     echo
     echo "Service status inside container:"
-    podman exec kinc-${CLUSTER_NAME}-control-plane systemctl status kinc-init.service --no-pager || true
-    echo
+    for unit in kinc-preflight kubeadm-init kinc-postinit; do
+        podman exec kinc-${CLUSTER_NAME}-control-plane \
+            systemctl status ${unit}.service --no-pager || true
+        echo
+    done
     echo "Recent logs:"
-    podman exec kinc-${CLUSTER_NAME}-control-plane journalctl -u kinc-init.service --no-pager -n 50 || true
+    podman exec kinc-${CLUSTER_NAME}-control-plane journalctl --no-pager -n 100 \
+        -u kinc-preflight.service -u kubeadm-init.service -u kinc-postinit.service || true
     exit 1
 fi
 
@@ -739,6 +743,41 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
             echo "❌ ${WORKER_CONTAINER} registered but did not become Ready"
             kubectl --kubeconfig="$KUBECONFIG_TMP" describe node "${WORKER_CONTAINER}" || true
             podman exec ${WORKER_CONTAINER} cat /var/log/kinc/kubeadm-init.log || true
+            rm -f "$KUBECONFIG_TMP"
+            exit 1
+        fi
+
+        # Then the agent that gives the node its datapath.
+        #
+        # A node is Ready once its kubelet sees a usable CNI config, and Antrea
+        # writes 10-antrea.conflist from an init container, before the agent
+        # container starts. So Ready arrives first: measured at 09:32:43, with
+        # the agent starting at 09:32:56. Returning there hands back a worker
+        # that answers `kubectl get nodes` and cannot yet move a packet, and
+        # whatever runs next puts pods on it.
+        #
+        # Existence first, then readiness, for the reason above: `kubectl wait`
+        # on a selector matching nothing fails rather than waits.
+        agent=""
+        for _ in $(seq 1 60); do
+            agent=$(kubectl --kubeconfig="$KUBECONFIG_TMP" get pod -n kube-system \
+                    -l app=antrea,component=antrea-agent \
+                    --field-selector "spec.nodeName=${WORKER_CONTAINER}" \
+                    -o name 2>/dev/null | head -1)
+            [ -n "$agent" ] && break
+            sleep 5
+        done
+        if [ -z "$agent" ]; then
+            echo "❌ no antrea-agent was ever scheduled onto ${WORKER_CONTAINER}"
+            kubectl --kubeconfig="$KUBECONFIG_TMP" get pod -n kube-system \
+                -l app=antrea,component=antrea-agent -o wide || true
+            rm -f "$KUBECONFIG_TMP"
+            exit 1
+        fi
+        if ! kubectl --kubeconfig="$KUBECONFIG_TMP" wait --for=condition=Ready \
+             "$agent" -n kube-system --timeout=300s; then
+            echo "❌ ${WORKER_CONTAINER} is Ready but its antrea-agent is not"
+            kubectl --kubeconfig="$KUBECONFIG_TMP" describe "$agent" -n kube-system || true
             rm -f "$KUBECONFIG_TMP"
             exit 1
         fi

@@ -60,13 +60,15 @@ echo "✅ xnode-server on ${server_node}, xnode-client on ${client_node}"
 if ! raw=$(kubectl -n "$NS" exec xnode-client -- \
            sh -c 'wget -qO- --timeout=15 http://xnode-service:8080/hostname' 2>&1); then
   echo "❌ cross-node request could not be made: ${raw}"
-  kubectl -n "$NS" get endpoints xnode-service -o json | jq -r '.subsets // "no endpoints"'
+  kubectl -n "$NS" get endpointslices -l kubernetes.io/service-name=xnode-service \
+    -o json | jq -r '[.items[].endpoints[]? | {addresses, node: .nodeName}] | if length == 0 then "no endpoints" else . end'
   exit 1
 fi
 got=$(printf '%s' "$raw" | tr -d '[:space:]')
 if [ "$got" != "xnode-server" ]; then
   echo "❌ cross-node Service request returned '${got}' (wanted 'xnode-server')"
-  kubectl -n "$NS" get endpoints xnode-service -o json | jq -r '.subsets // "no endpoints"'
+  kubectl -n "$NS" get endpointslices -l kubernetes.io/service-name=xnode-service \
+    -o json | jq -r '[.items[].endpoints[]? | {addresses, node: .nodeName}] | if length == 0 then "no endpoints" else . end'
   exit 1
 fi
 echo "✅ client on ${client_node} reached the Service on ${server_node}"

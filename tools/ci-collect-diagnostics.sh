@@ -25,7 +25,57 @@ collect() {
   local kubeconfig="${HOME}/.kube/kinc-${cluster}-config"
 
   echo "=== ${cluster} ==="
-  mkdir -p "$out"/{cluster,podlogs,antrea,nodes}
+  mkdir -p "$out"/{cluster,componentlogs,antrea,nodes}
+
+  # Let the cluster reach an age its logs can be judged at, before reading them.
+  #
+  # ci-verify-component-logs asks whether anything is still logging errors after
+  # its first 90 seconds, and it can only answer that about a component it
+  # observed past 90 seconds. Captured younger, every class it finds is inside
+  # the grace, nothing is eligible to fail, and the gate reports that it could
+  # not reach a verdict - correctly, because it could not.
+  #
+  # Measured on run 159: clusters were captured at node ages of 78s, 95s, 104s
+  # and 135s, and only the 135s one could be judged. A node is older than its
+  # pods by the time it takes them to start, so the node has to clear the grace
+  # by that margin for any component to clear it at all.
+  #
+  # The gate's failure text names this knob. It named it before it existed,
+  # which is how a run could fail with instructions to turn a dial that was not
+  # there.
+  # Nothing to wait for when the cluster is not up: kinc_cluster_age has no
+  # node to read and never returns one, so without this a collect run against a
+  # torn-down or misnamed cluster blocks for the whole deadline before
+  # capturing the nothing it was always going to capture.
+  #
+  # One line, after the fact. This printed a progress counter each time round
+  # with a leading \r, which overwrites itself on a terminal and does not in a
+  # log file - so a CI run carried a ladder of them per cluster:
+  #
+  #   capture age: 121s/150s
+  #   capture age: 126s/150s
+  #   capture age: 131s/150s
+  #
+  # for a wait whose only interesting output is how long it was.
+  local age waited=0 deadline gave_up=0
+  deadline=$(( $(date +%s) + 300 ))
+  while [ -n "$(kinc_nodes "$cluster")" ]; do
+    age=$(kinc_cluster_age "$cluster" 2>/dev/null) || age=""
+    [ -n "$age" ] && [ "$age" -ge "${KINC_CAPTURE_AGE:-150}" ] && break
+    if [ "$(date +%s)" -ge "$deadline" ]; then gave_up=1; break; fi
+    sleep 5
+    waited=$(( waited + 5 ))
+  done
+  if [ -z "$(kinc_nodes "$cluster")" ]; then
+    echo "  capture age: no nodes running for cluster '${cluster}'"
+  elif [ "$gave_up" -eq 1 ]; then
+    echo "  capture age: gave up at ${age:-unknown}s after waiting ${waited}s" \
+         "(want >= ${KINC_CAPTURE_AGE:-150}s)"
+  elif [ "$waited" -gt 0 ]; then
+    echo "  capture age: ${age}s, waited ${waited}s for it (want >= ${KINC_CAPTURE_AGE:-150}s)"
+  else
+    echo "  capture age: ${age}s (want >= ${KINC_CAPTURE_AGE:-150}s)"
+  fi
 
   # --- cluster state -------------------------------------------------------
   # A kubeconfig carries a client certificate, so it is written outside the
@@ -89,9 +139,14 @@ collect() {
     done
   } > "$out/nodes.tsv" 2>/dev/null
 
-  mkdir -p "$out/podlogs"
-  kinc_capture_pod_logs "$out/podlogs" "$cluster"
-  echo "  pod logs: $(ls "$out/podlogs" 2>/dev/null | wc -l) captured, ${KINC_UNREAD:-0} unreadable"
+  # Pods and nodes into one directory, because they are analysed together:
+  # the summary and the gate both read every file here as one component's log.
+  # A node's journal belongs in that set - a sandbox that was never created has
+  # no Pod log, and the kubelet's account of why is the only record of it.
+  mkdir -p "$out/componentlogs"
+  kinc_capture_pod_logs  "$out/componentlogs" "$cluster"
+  echo "  pod logs: $(ls "$out/componentlogs" 2>/dev/null | wc -l) captured, ${KINC_UNREAD:-0} unreadable"
+  kinc_capture_node_logs "$out/componentlogs" "$cluster"
 
   # --- Antrea's own view ---------------------------------------------------
   # The gates ask antctl these questions and then discard the answers, so a red
@@ -111,7 +166,11 @@ collect() {
   # --- per node ------------------------------------------------------------
   for n in $(podman ps --format '{{.Names}}' 2>/dev/null | grep "^kinc-${cluster}-" || true); do
     d="$out/nodes/$n"; mkdir -p "$d"
-    podman exec "$n" systemctl list-units --state=failed --no-pager > "$d/failed-units.txt" 2>&1
+    # --no-legend, so the file is unit rows and nothing else: with the header
+    # and the "N loaded units listed." footer, a healthy node's file is four
+    # non-empty lines that have to be parsed to learn they mean "none".
+    podman exec "$n" systemctl list-units --state=failed --no-legend --plain --no-pager \
+      > "$d/failed-units.txt" 2>&1
     podman exec "$n" systemctl status kinc-preflight kubeadm-init kinc-postinit crio kubelet \
       --no-pager > "$d/unit-status.txt" 2>&1
     podman exec "$n" journalctl --no-pager --boot > "$d/journal.txt" 2>&1
@@ -139,9 +198,12 @@ collect() {
     # What the crun wrapper was asked to do and what it did. It sits between
     # the kubelet's intent and the container that results, and nothing else
     # records that step: a create that fails reports only the kernel's refusal,
-    # not whether the rewrite meant to prevent it ran. On tmpfs inside the node,
-    # so it is gone the moment the container is, which is why it is taken here.
-    podman exec "$n" sh -c 'cat /tmp/crun-debug.log' > "$d/crun-wrapper.log" 2>/dev/null
+    # not whether the rewrite meant to prevent it ran. On the node's /var
+    # volume, which cleanup.sh removes with the cluster, so it is taken here.
+    # Oldest first, so the rotated half reads before the current one and the
+    # file is in time order however many rotations it has been through.
+    podman exec "$n" sh -c 'cat /var/log/crun-wrapper.log.1 /var/log/crun-wrapper.log 2>/dev/null' \
+      > "$d/crun-wrapper.log" 2>/dev/null
     [ -s "$d/crun-wrapper.log" ] || rm -f "$d/crun-wrapper.log"
     podman inspect "$n" > "$d/inspect.json" 2>&1
   done
@@ -161,8 +223,19 @@ collect() {
       elif grep -qw "$m" "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null; then echo builtin
       else echo MISSING; fi
     done
+    # Each node's store, since every node has its own.
+    #
+    # This asked about $HOME/.local/share/kinc/storage, the one shared store
+    # that existed before the stores were split per node. That path stopped
+    # existing with the split, findmnt printed nothing for it, and the section
+    # has been empty in every run since - a diagnostic reporting nothing about
+    # the thing its own comment says has caused a failure here.
     echo "# mount propagation"
-    findmnt -no TARGET,PROPAGATION --target "$HOME/.local/share/kinc/storage" 2>/dev/null
+    for store in "$HOME/.local/share/kinc/${cluster}/stores"/*; do
+        [ -d "$store" ] || continue
+        printf '%s: %s\n' "$(basename "$store")" \
+            "$(findmnt -no TARGET,PROPAGATION --target "$store" 2>/dev/null || echo unknown)"
+    done
     echo "# kernel"; uname -a
   } > "$h/host-contract.txt" 2>&1
 

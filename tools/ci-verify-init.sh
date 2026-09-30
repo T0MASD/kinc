@@ -41,12 +41,25 @@ for cluster in "$@"; do
   wait_for_marker "$cluster" kinc-preflight.service "Configuration validated"
   echo "✅ Configuration validated by kinc-preflight.service"
 
-  # We skip the show-join-command phase, so check for addon installation
-  wait_for_marker "$cluster" kubeadm-init.service "Applied essential addon: kube-proxy"
+  # kubeadm-init's own last line, rather than an addon it no longer creates.
+  #
+  # This used to wait for "Applied essential addon: kube-proxy", which was in
+  # kubeadm-init's log only because `phase addon all` ran there. The addons now
+  # run in postinit, each once the thing it needs exists - kube-proxy early
+  # because it is hostNetwork, CoreDNS after the CNI - so that string moved and
+  # this failed while the cluster was fine. A unit is best asserted on
+  # something it will always say itself.
+  wait_for_marker "$cluster" kubeadm-init.service "kubeadm init complete"
   echo "✅ kubeadm init completed successfully (as systemd service)"
 
   wait_for_marker "$cluster" kinc-postinit.service "Installing CNI"
   echo "✅ CNI installed by kinc-postinit.service"
+
+  # Both addons, where they are created now. kube-proxy before the patch that
+  # edits its DaemonSet, CoreDNS after the CNI DaemonSet is available.
+  wait_for_marker "$cluster" kinc-postinit.service "kube-proxy addon created"
+  wait_for_marker "$cluster" kinc-postinit.service "CoreDNS addon created"
+  echo "✅ addons created after their dependencies, by kinc-postinit.service"
 
   echo "✅ Cluster '$cluster': All configuration validations passed"
 done

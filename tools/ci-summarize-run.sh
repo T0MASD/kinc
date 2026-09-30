@@ -91,7 +91,13 @@ if [ -n "$NODES_TSV" ] && [ -s "$NODES_TSV" ]; then
 fi
 
 # --- error classes -------------------------------------------------------
-[ "$OWN_CAP" -eq 1 ] && kinc_capture_pod_logs "$CAP" "$CLUSTER"
+# Pods and the nodes under them. A node's kubelet and CRI-O journal is where a
+# fault lives that no Pod log can hold: a sandbox that was never created has no
+# Pod to log to.
+if [ "$OWN_CAP" -eq 1 ]; then
+  kinc_capture_pod_logs  "$CAP" "$CLUSTER"
+  kinc_capture_node_logs "$CAP" "$CLUSTER"
+fi
 
 if ! NOW=$(kinc_record_end "$CAP"); then
   echo "_No readable capture for this cluster._"
@@ -104,8 +110,8 @@ if [ "${KINC_UNREAD:-0}" -gt 0 ]; then
   echo "${KINC_UNREAD} pod director(ies) held no readable log at capture time."
   echo
 fi
-echo '| component | class | count | first | last | widest gap | quiet | state |'
-echo '|---|---|---:|---:|---:|---:|---:|---|'
+echo '| component | class | level | count | first | last | widest gap | quiet | state |'
+echo '|---|---|:-:|---:|---:|---:|---:|---:|---|'
 
 for f in "${CAP}"/*; do
   [ -s "$f" ] || continue
@@ -121,6 +127,12 @@ for f in "${CAP}"/*; do
     awk -F'\t' -v c="$cls" '$2==c { print $1 }' "${CAP}.errors" \
       | while read -r ts; do date -d "$ts" +%s; done | sort -n -u > "${CAP}.times"
 
+    # The highest severity this class was ever logged at, so a site that logs
+    # both is reported by the worse of the two.
+    sev=$(awk -F'\t' -v c="$cls" '$2==c { print $3 }' "${CAP}.errors" \
+          | sort -u | awk '/F/{f=1} /E/{e=1} /W/{w=1}
+                           END { print (f ? "F" : e ? "E" : w ? "W" : "?") }')
+
     count=$(wc -l < "${CAP}.times")
     first=$(head -1 "${CAP}.times")
     last=$(tail -1 "${CAP}.times")
@@ -132,10 +144,16 @@ for f in "${CAP}"/*; do
     # The gate's rule, reported rather than enforced: noisy while coming up is
     # allowed, still noisy afterwards is not, and "still" is measured against
     # the class's own cadence rather than a constant.
+    # Same states the gate uses, including its floor on what counts as a
+    # cadence: one interval between two events is an observation, not a rate,
+    # so two occurrences are reported as two rather than extrapolated into
+    # "still going". The gate fails on ONGOING, so the two must agree.
     if [ "$into" -le "$STARTUP" ]; then
       state='startup'
-    elif [ "$count" -le 1 ]; then
+    elif [ "$count" -eq 1 ]; then
       state='once'
+    elif [ "$count" -eq 2 ]; then
+      state='twice'
     elif [ "$quiet" -le $(( 3 * maxgap )) ]; then
       state='**ONGOING**'
     else
@@ -151,10 +169,58 @@ for f in "${CAP}"/*; do
       thin=''
     fi
 
-    printf '| %s%s | `%s` | %s | +%ss | +%ss | %ss | %ss | %s |\n' \
-      "$label" "$thin" "$cls" "$count" "$(( first - t0_epoch ))" "$into" "$maxgap" "$quiet" "$state"
+    printf '| %s%s | `%s` | %s | %s | +%ss | +%ss | %ss | %ss | %s |\n' \
+      "$label" "$thin" "$cls" "$sev" "$count" "$(( first - t0_epoch ))" "$into" "$maxgap" "$quiet" "$state"
   done < <(cut -f2 "${CAP}.errors" | sort -u)
 done
+echo
+
+# --- failed units --------------------------------------------------------
+# What systemd itself thinks failed, per node.
+#
+# Nothing reported this, and three units failed on every node of every run:
+# sys-kernel-config, -debug and -tracing, which a rootless container is not
+# permitted to mount. They are masked now, so this is expected to be empty -
+# which is the point. An empty list is only worth printing because a name in it
+# means something.
+#
+# A failed unit leaves no klog line, so the table above cannot see it however
+# wide it gets: systemd's verdict is not in any component's log.
+echo "### Failed units"
+echo
+units_found=0
+units_out=""
+if [ "$OWN_CAP" -eq 1 ]; then
+  for n in $(kinc_nodes "$CLUSTER"); do
+    u=$(podman exec "$n" systemctl list-units --state=failed --no-legend --no-pager 2>/dev/null \
+        | awk '{ print $2 }')
+    if [ -n "$u" ]; then
+      units_found=1
+      units_out="${units_out}${n}:"$'\n'"$(printf '%s\n' "$u" | sed 's/^/  /')"$'\n'
+    fi
+  done
+else
+  for uf in "$(dirname "$CAP")"/nodes/*/failed-units.txt; do
+    [ -s "$uf" ] || continue
+    n=$(basename "$(dirname "$uf")")
+    # A unit name, wherever it sits on the line: older captures carry
+    # systemd's header and legend, and "UNIT LOAD ACTIVE SUB" parsed by column
+    # reports a failed unit called LOAD.
+    u=$(grep -oE '[A-Za-z0-9@:_.\\-]+\.(service|mount|socket|target|timer|path)' "$uf" \
+        | sort -u || true)
+    if [ -n "$u" ]; then
+      units_found=1
+      units_out="${units_out}${n}:"$'\n'"$(printf '%s\n' "$u" | sed 's/^/  /')"$'\n'
+    fi
+  done
+fi
+if [ "$units_found" -eq 1 ]; then
+  echo '```'
+  printf '%s' "$units_out"
+  echo '```'
+else
+  echo "None on any node."
+fi
 echo
 
 # --- audit ---------------------------------------------------------------

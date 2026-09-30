@@ -183,10 +183,10 @@ jobs:
       - name: Verify the finished record
         run: |
           set -euo pipefail
-          KINC_LOG_CAPTURE=artifacts/diagnostics/test/podlogs ./tools/ci-verify-component-logs.sh
+          KINC_LOG_CAPTURE=artifacts/diagnostics/test/componentlogs ./tools/ci-verify-component-logs.sh
           ./tools/ci-verify-denials.sh test
           mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/test/podlogs ./tools/ci-summarize-run.sh test \
+          KINC_LOG_CAPTURE=artifacts/diagnostics/test/componentlogs ./tools/ci-summarize-run.sh test \
             | tee "artifacts/summary/test.md" | tee -a "$GITHUB_STEP_SUMMARY"
         shell: bash
 
