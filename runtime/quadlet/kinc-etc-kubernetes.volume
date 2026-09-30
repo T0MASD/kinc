@@ -1,0 +1,23 @@
+[Unit]
+Description=kinc Kubernetes Configuration Volume
+Documentation=https://github.com/T0MASD/kinc
+
+# Everything kubeadm writes that a node needs again to be the same node: the
+# PKI, the kubeconfigs, and the static pod manifests that are the control plane.
+#
+# Without it a container restart is fatal and silent. systemd restarts the unit
+# - Restart=always - the new container starts from the image, and
+# /etc/kubernetes is empty: no pki, no manifests, so no API server, while
+# kubelet and crio are active and the unit reports success. The init units do
+# not repair it either, because their guards live on /var and /var survived, so
+# they correctly decline to initialise a cluster that has already been
+# initialised.
+#
+# A named volume is seeded from the image's own /etc/kubernetes on first use, so
+# the config, kubelet and manifests directories it ships are preserved.
+
+[Volume]
+VolumeName=kinc-etc-kubernetes
+
+[Install]
+WantedBy=multi-user.target

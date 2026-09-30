@@ -34,6 +34,7 @@ Tmpfs=/run/lock:rw,rprivate,nosuid,nodev,tmpcopyup
 # which refuses to start on a private mount: "path /var/run/netns is mounted on
 # /var but it is not a shared or slave mount".
 Volume=kinc-var-data:/var:Z,rslave
+Volume=kinc-etc-kubernetes:/etc/kubernetes:Z
 Volume=kinc-config:/etc/kinc/config:ro,Z
 # The cluster CA, minted before this container starts so that every join config
 # can state its hash. kinc-preflight copies it into /etc/kubernetes/pki, and
@@ -77,6 +78,12 @@ Volume=/lib/modules:/lib/modules:ro
 PublishPort=127.0.0.1:CLUSTER_PORT:6443/tcp
 # The cluster's own network, so other nodes resolve this one by name.
 Network=NETWORK_UNIT_PLACEHOLDER
+
+# Fixed, because this node's identity is written down in terms of it - the
+# API server's serving certificate, every kubeconfig, and --advertise-address.
+# A restart that changes it makes all of those describe a node that no longer
+# exists.
+IP=CONTROL_PLANE_IP_PLACEHOLDER
 
 # Environment variables
 Environment=container=podman

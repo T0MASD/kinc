@@ -16,3 +16,13 @@ Description=kinc Cluster Network
 # create collisions between clusters.
 [Network]
 NetworkName=NETWORK_NAME_PLACEHOLDER
+
+# A fixed subnet, so each node can be given a fixed address in it.
+#
+# Left to allocate, podman gives a restarted container whatever is free: a
+# control plane came back on .3 having been .2, and the API server's serving
+# certificate is signed for the address it had. Every kubeconfig, the etcd peer
+# URL and --advertise-address name it too, so the node comes back as a
+# different node and nothing it wrote about itself is true any more.
+Subnet=NODE_SUBNET_PLACEHOLDER
+Gateway=NODE_GATEWAY_PLACEHOLDER
