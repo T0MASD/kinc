@@ -158,9 +158,14 @@ for component in "${components[@]}"; do
     fi
 done
 
-# Additional stability check - ensure all control plane components are stable
-log "Verifying control plane stability..."
-sleep 5
+# The four waits above each assert Ready, so the control plane is already
+# verified by the time this is reached. What stood here was an unconditional
+# five-second sleep labelled as a stability check, which asserted nothing and
+# delayed every bootstrap by five seconds - including the storage provisioner,
+# which is the phase this chain is measured by.
+#
+# If a component can report Ready and then not be, that is a condition to assert,
+# not a duration to wait out.
 
 # Remove control plane taint so storage provisioner can be scheduled
 log "Removing control plane taint to allow workload scheduling..."
@@ -172,6 +177,18 @@ fi
 
 # Now install storage class with fully stable control plane
 log "Installing storage class..."
+# The static shared volume, alongside the dynamic provisioner rather than
+# instead of it.
+if [[ -f /kinc/manifests/shared-storage.yaml ]]; then
+    log "Installing the shared storage class..."
+    if kubectl apply -f /kinc/manifests/shared-storage.yaml; then
+        log "✅ Shared storage installed"
+    else
+        log "❌ Failed to install shared storage"
+        exit 1
+    fi
+fi
+
 if [[ -f /kinc/manifests/default-storage.yaml ]]; then
     if kubectl apply -f /kinc/manifests/default-storage.yaml; then
         log "✅ Storage class installed successfully"

@@ -115,14 +115,25 @@ metadata:
   name: local-path-config
   namespace: local-path-storage
 data:
+  # sharedFileSystemPath, not nodePathMap.
+  #
+  # Every node mounts the same host directory at /tmp/kinc-storage, so a volume
+  # is reachable from any of them and the PV needs no node affinity. It also
+  # means a PV outlives its container: /tmp is a tmpfs here, so volumes under a
+  # per-node path were RAM-backed and lost on restart.
+  #
+  # It does NOT remove the helper pod. The provisioner still creates one to run
+  # mkdir - verified in its log, with this config applied - so the Node
+  # authorizer race that denies the kubelet GET on that pod for about a second
+  # is unchanged. That was the reason this was tried; it was not the reason it
+  # is kept.
+  #
+  # The trade: a volume written on one node is readable from another, which
+  # local path storage would not normally give you. On one host, for a
+  # throwaway cluster, that is what a shared filesystem means.
   config.json: |-
     {
-            "nodePathMap":[
-            {
-                    "node":"DEFAULT_PATH_FOR_NON_LISTED_NODES",
-                    "paths":["/tmp/kinc-storage"]
-            }
-            ]
+            "sharedFileSystemPath": "/tmp/kinc-storage/dynamic"
     }
   setup: |-
     #!/bin/sh

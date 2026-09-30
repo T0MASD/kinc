@@ -52,7 +52,7 @@ spec:
     volumeMounts:
     # Kubeconfig for API server access
     - name: kubeconfig
-      mountPath: /etc/kubernetes/admin.conf
+      mountPath: /etc/kubernetes/super-admin.conf
       readOnly: true
     
     # Faro configuration
@@ -72,16 +72,29 @@ spec:
         cpu: 200m
         memory: 256Mi
     
-    # Use kubeconfig from admin.conf
+    # super-admin.conf, not admin.conf.
+    #
+    # Faro is a static pod so that it watches from the moment the API server
+    # answers, which is before the API server's RBAC bootstrap has made
+    # admin.conf's user a cluster-admin. With admin.conf it was denied its first
+    # ten list calls - events, daemonsets, storageclasses, pods,
+    # persistentvolumes, endpoints - and retried until the binding appeared.
+    #
+    # super-admin.conf's user is in system:masters, which the API server
+    # authorises directly rather than through RBAC, so it is authorised from the
+    # first request. This is the same effective access admin.conf grants once
+    # RBAC catches up; the difference is only that it does not have to wait.
+    # Delaying Faro instead would remove the denials by giving up the window it
+    # exists to capture.
     env:
     - name: KUBECONFIG
-      value: /etc/kubernetes/admin.conf
+      value: /etc/kubernetes/super-admin.conf
   
   volumes:
   # Kubeconfig from host
   - name: kubeconfig
     hostPath:
-      path: /etc/kubernetes/admin.conf
+      path: /etc/kubernetes/super-admin.conf
       type: File
   
   # Faro configuration from host
