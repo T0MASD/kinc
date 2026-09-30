@@ -47,22 +47,34 @@ collect() {
   # node to read and never returns one, so without this a collect run against a
   # torn-down or misnamed cluster blocks for the whole deadline before
   # capturing the nothing it was always going to capture.
-  local age deadline
+  #
+  # One line, after the fact. This printed a progress counter each time round
+  # with a leading \r, which overwrites itself on a terminal and does not in a
+  # log file - so a CI run carried a ladder of them per cluster:
+  #
+  #   capture age: 121s/150s
+  #   capture age: 126s/150s
+  #   capture age: 131s/150s
+  #
+  # for a wait whose only interesting output is how long it was.
+  local age waited=0 deadline gave_up=0
   deadline=$(( $(date +%s) + 300 ))
   while [ -n "$(kinc_nodes "$cluster")" ]; do
     age=$(kinc_cluster_age "$cluster" 2>/dev/null) || age=""
     [ -n "$age" ] && [ "$age" -ge "${KINC_CAPTURE_AGE:-150}" ] && break
-    if [ "$(date +%s)" -ge "$deadline" ]; then
-      echo "  capture age: gave up waiting at ${age:-unknown}s"
-      break
-    fi
-    printf '\r  capture age: %ss/%ss ' "${age:-0}" "${KINC_CAPTURE_AGE:-150}"
+    if [ "$(date +%s)" -ge "$deadline" ]; then gave_up=1; break; fi
     sleep 5
+    waited=$(( waited + 5 ))
   done
-  if [ -n "$(kinc_nodes "$cluster")" ]; then
-    echo "  capture age: ${age:-unknown}s (want >= ${KINC_CAPTURE_AGE:-150}s)"
-  else
+  if [ -z "$(kinc_nodes "$cluster")" ]; then
     echo "  capture age: no nodes running for cluster '${cluster}'"
+  elif [ "$gave_up" -eq 1 ]; then
+    echo "  capture age: gave up at ${age:-unknown}s after waiting ${waited}s" \
+         "(want >= ${KINC_CAPTURE_AGE:-150}s)"
+  elif [ "$waited" -gt 0 ]; then
+    echo "  capture age: ${age}s, waited ${waited}s for it (want >= ${KINC_CAPTURE_AGE:-150}s)"
+  else
+    echo "  capture age: ${age}s (want >= ${KINC_CAPTURE_AGE:-150}s)"
   fi
 
   # --- cluster state -------------------------------------------------------
