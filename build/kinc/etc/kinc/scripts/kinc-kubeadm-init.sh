@@ -77,7 +77,19 @@ phase upload-config all
 phase mark-control-plane
 phase bootstrap-token
 phase kubelet-finalize all
-phase addon all
+
+# Not `phase addon all`. CoreDNS is a workload, and at this point the cluster
+# has no CNI - Antrea is installed by postinit, after this unit finishes.
+# Creating it here schedules a pod into a cluster with no network provider, and
+# it fails sandbox creation until Antrea writes its config:
+#
+#   no CNI configuration file in /etc/cni/net.d/. Has your network provider
+#   started?
+#
+# Measured at 19 seconds and six errors. It recovers on its own, which is why
+# it read as noise rather than as the ordering mistake it is: the same shape as
+# starting the scheduler before its RBAC exists. postinit runs the phase once
+# Antrea is ready.
 
 # Last: its permissions now exist, so it starts into a cluster that will answer
 # it.
