@@ -319,6 +319,14 @@ jobs:
       # A component still logging at error level once the cluster has settled
       # is failing at something no other gate here sees. Startup errors are
       # expected and excluded by the window, not by an allowlist.
+      # Faro reports success by being applied, not by working. Its pod can die
+      # a second later and the deploy never knows - which is what happened when
+      # runAsUser started being honoured and Faro could no longer write its
+      # hostPath. It captured nothing, and CI stayed green.
+      - name: Verify Faro is capturing
+        run: ./tools/ci-verify-faro.sh default
+        shell: bash
+
       - name: Collect diagnostics
         if: always()
         run: ./tools/ci-collect-diagnostics.sh default
@@ -464,6 +472,14 @@ jobs:
       # A component still logging at error level once the cluster has settled
       # is failing at something no other gate here sees. Startup errors are
       # expected and excluded by the window, not by an allowlist.
+      # Faro reports success by being applied, not by working. Its pod can die
+      # a second later and the deploy never knows - which is what happened when
+      # runAsUser started being honoured and Faro could no longer write its
+      # hostPath. It captured nothing, and CI stayed green.
+      - name: Verify Faro is capturing
+        run: ./tools/ci-verify-faro.sh default
+        shell: bash
+
       - name: Collect diagnostics
         if: always()
         run: ./tools/ci-collect-diagnostics.sh default
@@ -803,6 +819,14 @@ jobs:
       # A component still logging at error level once the cluster has settled
       # is failing at something no other gate here sees. Startup errors are
       # expected and excluded by the window, not by an allowlist.
+      # Faro reports success by being applied, not by working. Its pod can die
+      # a second later and the deploy never knows - which is what happened when
+      # runAsUser started being honoured and Faro could no longer write its
+      # hostPath. It captured nothing, and CI stayed green.
+      - name: Verify Faro is capturing
+        run: ./tools/ci-verify-faro.sh default cluster01
+        shell: bash
+
       - name: Collect diagnostics
         if: always()
         run: ./tools/ci-collect-diagnostics.sh default cluster01
