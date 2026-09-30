@@ -249,6 +249,25 @@ else
     log "⚠️  Storage provisioner not ready after ${wait_elapsed}s, but continuing..."
 fi
 
+# DNS last, and as a barrier rather than a note.
+#
+# Nothing waited for CoreDNS before, because it was created during kubeadm init
+# and had the whole of postinit to come up. It is created here now, so the
+# marker that says the cluster is ready was being written while CoreDNS was
+# still pulling, and the first thing to resolve a Service name got
+# "bad address" from a cluster that had reported itself ready.
+#
+# A cluster that cannot resolve a Service is not ready, so this is a hard
+# failure: postinit does not write the marker and deploy.sh says why.
+log "Waiting for cluster DNS to be ready..."
+wait_start=$(date +%s)
+if kubectl rollout status deployment/coredns -n kube-system --timeout=180s; then
+    log "✅ Cluster DNS is ready (waited $(($(date +%s) - wait_start))s)"
+else
+    log "❌ Cluster DNS not ready after $(($(date +%s) - wait_start))s"
+    exit 1
+fi
+
 log "=== kinc Post-Initialization Complete ==="
 
 # Calculate and log total post-initialization time
