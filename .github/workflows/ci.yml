@@ -554,6 +554,20 @@ jobs:
           path: artifacts/audit/
           retention-days: 30
 
+      # Asserts the default, which is that nothing is limited.
+      #
+      # The limited path is not exercised here. A runner is 2 vCPU and about
+      # 7GB, and a control plane reserves 2Gi for its own static pods, so any
+      # node limit small enough to fit two nodes on a runner is one preflight
+      # correctly refuses as leaving nothing to schedule. Squeezing it to fit
+      # would test the squeeze rather than the feature.
+      #
+      # What this does catch is the direction that matters for everyone who
+      # sets nothing: a limit appearing where none was asked for.
+      - name: Verify no node resource limits by default
+        run: ./tools/ci-verify-node-resources.sh default
+        shell: bash
+
       # Last, and before teardown, so every capture above describes a cluster
       # that had not been restarted - and so the thing being tested is the
       # second boot, which no other job reaches. Only here: this is the job
