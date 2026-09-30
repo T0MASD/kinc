@@ -43,7 +43,13 @@ note() {
     # aborts the function before any `return 0` could run, and the container
     # never gets created. Verified by pointing DEBUG_LOG at a directory that
     # does not exist - without this, crun is never reached.
-    if ! printf '%s: %s\n' "$(date -Is)" "$*" >> "$DEBUG_LOG" 2>/dev/null; then
+    # RFC 3339 with nanoseconds and a literal Z, matching the API audit log and
+    # the CRI's pod logs exactly, so all three merge on one timeline without
+    # being reformatted. Not `date -Is`, which stops at seconds - container
+    # creates arrive in bursts and whole seconds lose their order. Not
+    # `date -Ins` either: it writes the fraction with a comma, which is not
+    # RFC 3339 and does not sort against the others.
+    if ! printf '%s: %s\n' "$(date -u +%FT%T.%9NZ)" "$*" >> "$DEBUG_LOG" 2>/dev/null; then
         return 0
     fi
 }
