@@ -630,10 +630,14 @@ if [ $waited -ge $max_wait ]; then
     echo "❌ Timeout waiting for cluster initialization"
     echo
     echo "Service status inside container:"
-    podman exec kinc-${CLUSTER_NAME}-control-plane systemctl status kinc-init.service --no-pager || true
-    echo
+    for unit in kinc-preflight kubeadm-init kinc-postinit; do
+        podman exec kinc-${CLUSTER_NAME}-control-plane \
+            systemctl status ${unit}.service --no-pager || true
+        echo
+    done
     echo "Recent logs:"
-    podman exec kinc-${CLUSTER_NAME}-control-plane journalctl -u kinc-init.service --no-pager -n 50 || true
+    podman exec kinc-${CLUSTER_NAME}-control-plane journalctl --no-pager -n 100 \
+        -u kinc-preflight.service -u kubeadm-init.service -u kinc-postinit.service || true
     exit 1
 fi
 

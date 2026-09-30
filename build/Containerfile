@@ -99,8 +99,6 @@ COPY kinc/etc/systemd/system/kinc-preflight.service /etc/systemd/system/kinc-pre
 COPY kinc/etc/systemd/system/kubeadm-init.service /etc/systemd/system/kubeadm-init.service
 COPY kinc/etc/systemd/system/kinc-postinit.service /etc/systemd/system/kinc-postinit.service
 COPY kinc/etc/systemd/system/kinc-cgroup-setup.service /etc/systemd/system/kinc-cgroup-setup.service
-# Keep old kinc-init.service for backward compatibility (disabled by default)
-COPY kinc/etc/systemd/system/kinc-init.service /etc/systemd/system/kinc-init.service
 COPY --chmod=0755 kinc/etc/kinc/scripts/* /etc/kinc/scripts/
 COPY kinc/kinc/manifests/ /kinc/manifests/
 
