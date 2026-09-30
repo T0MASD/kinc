@@ -1,0 +1,21 @@
+[Unit]
+Description=kinc Cluster Storage Volume
+Documentation=https://github.com/T0MASD/kinc
+
+# One podman volume holding every PersistentVolume of this cluster, mounted by
+# every node at /tmp/kinc-storage.
+#
+# A podman volume rather than a host directory, because it is what the rest of
+# kinc's node state already is, and because migrating storage becomes
+# first-class: 'podman volume export' and 'import' move a cluster's data, where
+# a bare path needs a tar and knowledge of a layout kinc chose.
+#
+# Two subtrees inside it, so the dynamic and static paths cannot read each
+# other: dynamic/ is local-path's sharedFileSystemPath, shared/ backs the
+# cluster's static ReadWriteMany PV.
+
+[Volume]
+VolumeName=kinc-storage
+
+[Install]
+WantedBy=multi-user.target

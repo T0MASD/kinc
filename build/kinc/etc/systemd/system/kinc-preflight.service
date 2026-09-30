@@ -12,8 +12,12 @@ RemainAfterExit=yes
 TimeoutStartSec=120
 Restart=no
 
-# Pass environment variables from container to service
-PassEnvironment=KINC_ENABLE_FARO
+# Pass environment variables from container to service.
+#
+# An allowlist, not a pass-through: systemd gives a service a clean environment,
+# so a variable set on the container reaches PID 1 and stops there unless it is
+# named here. A variable missing from this line is silently empty in the script.
+PassEnvironment=KINC_ENABLE_FARO KINC_AUDIT_RESOURCES
 
 # Run preflight checks and setup
 ExecStart=/etc/kinc/scripts/kinc-preflight.sh

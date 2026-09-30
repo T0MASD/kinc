@@ -5,7 +5,7 @@ After=network-online.target kinc-var-data-volume.service kinc-config-volume.serv
 Wants=network-online.target kinc-var-data-volume.service kinc-config-volume.service
 
 [Container]
-Image=localhost/kinc/node:v1.36.4
+Image=localhost/kinc/node:v1.37.0
 ContainerName=kinc-NODE_NAME_PLACEHOLDER
 HostName=kinc-NODE_NAME_PLACEHOLDER
 
@@ -41,13 +41,32 @@ Volume=kinc-config:/etc/kinc/config:ro,Z
 Volume=JOIN_DIR_PLACEHOLDER:/etc/kinc/join:ro,Z
 Volume=JOIN_DROPIN_DIR_PLACEHOLDER:/etc/systemd/system/kubeadm-init.service.d:ro,Z
 Volume=POSTINIT_DROPIN_DIR_PLACEHOLDER:/etc/systemd/system/kinc-postinit.service.d:ro,Z
-# Share host container storage to cache images across all clusters
-Volume=%h/.local/share/containers/storage:/root/.local/share/containers/storage:rw,Z
+# kinc's own image store, shared by every node of every cluster on this host.
+#
+# Shared, because a joining node then needs no pull: the control plane has
+# already fetched what the cluster runs, and a worker starts with zero pull
+# events. Separate from the user's podman store, which this used to mount
+# directly - that made the cluster's runtime and the host's podman two writers
+# of one store, let the cluster run any image on the host without pulling, and
+# left cluster images in a store the user prunes for their own reasons.
+#
+# One store per node, for the same reason. containers/storage is single-writer:
+# each CRI-O keeps its own layers.json and garbage-collects whatever it does not
+# find referenced there. Point two nodes at one directory and each deletes the
+# other's layers - the second node to start wins, and the first is left running
+# containers whose lower layers are gone. It does not fail loudly: paths still
+# resolve from cache while readdir returns nothing, so a container reports an
+# empty rootfs and a binary it shipped with becomes "no such file or directory".
+Volume=NODE_STORE_PLACEHOLDER:/root/.local/share/containers/storage:rw,Z
 # Antrea's OVS looks up its kernel module here. The module is loaded by the
 # host, and this mount is what lets the agent find and confirm it: modprobe
 # reads /lib/modules/$(uname -r), which the container does not otherwise have,
 # and install-cni exits non-zero when the lookup fails even though the module
 # is already loaded and visible at /sys/module/openvswitch.
+# Cluster storage, shared by every node so local-path's sharedFileSystemPath is
+# true rather than merely configured. Also makes a PV survive a restart: /tmp is
+# a tmpfs in this container, so a volume under it was RAM-backed.
+Volume=STORAGE_VOLUME_PLACEHOLDER:/tmp/kinc-storage:rw,Z
 Volume=/lib/modules:/lib/modules:ro
 
 # Network configuration
