@@ -22,9 +22,11 @@ echo "🧩 Nodes: ${NODES[*]}"
 
 echo "Stopping user services..."
 for node in "${NODES[@]}"; do
-    systemctl --user stop ${node}.service ${node}-var-data-volume.service 2>/dev/null || true
+    systemctl --user stop ${node}.service ${node}-var-data-volume.service \
+        ${node}-etc-kubernetes-volume.service 2>/dev/null || true
 done
-systemctl --user stop kinc-${CLUSTER_NAME}-var-data-volume.service kinc-${CLUSTER_NAME}-config-volume.service 2>/dev/null || true
+systemctl --user stop kinc-${CLUSTER_NAME}-var-data-volume.service kinc-${CLUSTER_NAME}-config-volume.service \
+    kinc-${CLUSTER_NAME}-etc-kubernetes-volume.service 2>/dev/null || true
 # The network outlives its containers, so it is stopped after them.
 systemctl --user stop kinc-${CLUSTER_NAME}-network.service 2>/dev/null || true
 
@@ -50,9 +52,10 @@ echo "✅ Containers removed"
 
 echo "Removing volumes..."
 for node in "${NODES[@]}"; do
-    podman volume rm "${node}-var-data" 2>/dev/null || true
+    podman volume rm "${node}-var-data" "${node}-etc-kubernetes" 2>/dev/null || true
 done
-podman volume rm kinc-${CLUSTER_NAME}-var-data kinc-${CLUSTER_NAME}-config 2>/dev/null || true
+podman volume rm kinc-${CLUSTER_NAME}-var-data kinc-${CLUSTER_NAME}-config \
+    kinc-${CLUSTER_NAME}-etc-kubernetes 2>/dev/null || true
 
 # The cluster's PersistentVolumes. Removed with the cluster, like its other
 # volumes - export it first if the data matters:
@@ -97,7 +100,7 @@ echo
 echo "🎯 Complete cleanup commands (for reference):"
 echo "  systemctl --user stop kinc-${CLUSTER_NAME}-control-plane.service kinc-${CLUSTER_NAME}-var-data-volume.service kinc-${CLUSTER_NAME}-config-volume.service"
 echo "  podman rm -f kinc-${CLUSTER_NAME}-control-plane"
-echo "  podman volume rm kinc-${CLUSTER_NAME}-var-data kinc-${CLUSTER_NAME}-config"
+echo "  podman volume rm kinc-${CLUSTER_NAME}-var-data kinc-${CLUSTER_NAME}-config kinc-${CLUSTER_NAME}-etc-kubernetes"
 echo "  rm -f ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-*.*"
 echo "  systemctl --user daemon-reload"
 echo

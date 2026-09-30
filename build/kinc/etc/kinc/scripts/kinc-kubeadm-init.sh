@@ -30,28 +30,6 @@ log "=== kubeadm init, phased ==="
 
 phase certs all
 phase kubeconfig all
-
-# A copy of super-admin.conf that Faro's own user can read.
-#
-# kubeadm writes it 0600 root:root, and Faro runs as uid 65532 - the image says
-# so - which means as itself it cannot open the file and dies with "permission
-# denied", capturing nothing. The obvious fix is to run Faro as root. That is
-# the wrong one: kinc is rootless and nothing it ships should need uid 0 where
-# it has a choice, and running as root is what the crun wrapper used to do to
-# every container, which is the habit this branch is removing.
-#
-# So the credential is copied to the user that needs it, still 0600, readable by
-# one uid and no other. Same privilege, no root.
-#
-# It is super-admin rather than admin because Faro starts before kubeadm has
-# created the RBAC bindings admin.conf depends on; super-admin's user is in
-# system:masters and is authorized directly. Here rather than in preflight
-# because preflight runs before kubeadm, when this file does not yet exist.
-if [ -f /etc/kubernetes/super-admin.conf ]; then
-    install -m 0600 -o 65532 -g 65532 \
-        /etc/kubernetes/super-admin.conf /etc/kinc/faro/kubeconfig
-    log "faro kubeconfig staged for uid 65532"
-fi
 phase etcd local
 phase control-plane apiserver
 phase control-plane controller-manager

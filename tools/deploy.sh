@@ -235,6 +235,28 @@ get_cluster_service_subnet() {
     echo "10.${subnet_id}.0.0/16"
 }
 
+# The subnet the node containers themselves sit on, keyed the same way.
+#
+# Fixed rather than allocated, because each node is then given a fixed address
+# in it, and a node's address is written into its own serving certificate.
+# 10.89 is podman's own range for named networks and the third octet is the
+# cluster id, so two clusters never share one: port 6443 is 10.89.43.0/24.
+#
+# Distinct from both of the above - services are 10.<id>.0.0/16 and pods are
+# 10.244.<block>.0/21 - so nothing here overlaps anything inside the cluster.
+get_cluster_node_subnet() {
+    local port=$1
+    local subnet_id=${port: -2}
+    echo "10.89.${subnet_id}.0/24"
+}
+
+# .1 is the gateway, .2 is the control plane, workers count up from .3.
+get_cluster_node_ip() {
+    local port=$1 index=$2      # index 0 = control plane, 1 = w1, ...
+    local subnet_id=${port: -2}
+    echo "10.89.${subnet_id}.$(( index + 2 ))"
+}
+
 # Port allocation
 if [[ -n "$FORCE_PORT" ]]; then
     CLUSTER_PORT="$FORCE_PORT"
@@ -247,10 +269,14 @@ fi
 # CIDR allocation based on port
 CLUSTER_POD_SUBNET=$(get_cluster_pod_subnet "$CLUSTER_PORT")
 CLUSTER_SERVICE_SUBNET=$(get_cluster_service_subnet "$CLUSTER_PORT")
+CLUSTER_NODE_SUBNET=$(get_cluster_node_subnet "$CLUSTER_PORT")
+CLUSTER_NODE_GATEWAY="${CLUSTER_NODE_SUBNET%.*/*}.1"
+CONTROL_PLANE_IP=$(get_cluster_node_ip "$CLUSTER_PORT" 0)
 
 echo "🌐 API Server will be available at: https://127.0.0.1:${CLUSTER_PORT}"
 echo "🔗 Pod subnet: $CLUSTER_POD_SUBNET"
 echo "🔗 Service subnet: $CLUSTER_SERVICE_SUBNET"
+echo "🔗 Node subnet: $CLUSTER_NODE_SUBNET (control plane ${CONTROL_PLANE_IP})"
 
 # Check for conflicts with existing clusters
 if systemctl --user is-active kinc-${CLUSTER_NAME}-control-plane.service >/dev/null 2>&1; then
@@ -342,7 +368,9 @@ mkdir -p ~/.config/containers/systemd/
 
 # The cluster's own podman network. A worker resolves the control plane by name
 # on it; the default rootless network has no DNS at all.
-sed "s/NETWORK_NAME_PLACEHOLDER/${NETWORK_NAME}/g" \
+sed -e "s/NETWORK_NAME_PLACEHOLDER/${NETWORK_NAME}/g" \
+    -e "s|NODE_SUBNET_PLACEHOLDER|${CLUSTER_NODE_SUBNET}|g" \
+    -e "s|NODE_GATEWAY_PLACEHOLDER|${CLUSTER_NODE_GATEWAY}|g" \
     runtime/quadlet/kinc-cluster.network > ~/.config/containers/systemd/${NETWORK_UNIT}
 
 # Copy and customize volume files
@@ -354,6 +382,11 @@ sed "s/VolumeName=kinc-config/VolumeName=kinc-${CLUSTER_NAME}-config/g" \
 
 sed "s/VolumeName=kinc-storage/VolumeName=${CLUSTER_STORAGE}/g" \
     runtime/quadlet/kinc-storage.volume > ~/.config/containers/systemd/${CLUSTER_STORAGE}.volume
+
+# What kubeadm wrote about this node, so a restart comes back as the same node.
+sed "s/VolumeName=kinc-etc-kubernetes/VolumeName=kinc-${CLUSTER_NAME}-etc-kubernetes/g" \
+    runtime/quadlet/kinc-etc-kubernetes.volume \
+    > ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-etc-kubernetes.volume
 
 # Copy and customize container file
 sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-control-plane/g" \
@@ -367,6 +400,9 @@ sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-co
     -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
     -e "s|STORAGE_VOLUME_PLACEHOLDER|${CLUSTER_STORAGE}|g" \
     -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${CONTROL_PLANE_NAME}")|g" \
+    -e "s|CONTROL_PLANE_IP_PLACEHOLDER|${CONTROL_PLANE_IP}|g" \
+    -e "s/Volume=kinc-etc-kubernetes:/Volume=kinc-${CLUSTER_NAME}-etc-kubernetes:/g" \
+    -e "s/kinc-etc-kubernetes-volume.service/kinc-${CLUSTER_NAME}-etc-kubernetes-volume.service/g" \
     runtime/quadlet/kinc-control-plane.container > ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 
 echo "✅ Quadlet files installed"
@@ -692,10 +728,17 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
             -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
             -e "s|STORAGE_VOLUME_PLACEHOLDER|${CLUSTER_STORAGE}|g" \
             -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${WORKER_CONTAINER}")|g" \
+            -e "s|WORKER_IP_PLACEHOLDER|$(get_cluster_node_ip "$CLUSTER_PORT" "$i")|g" \
+            -e "s/Volume=kinc-etc-kubernetes:/Volume=${WORKER_CONTAINER}-etc-kubernetes:/g" \
+            -e "s/kinc-etc-kubernetes-volume.service/${WORKER_CONTAINER}-etc-kubernetes-volume.service/g" \
             runtime/quadlet/kinc-worker.container > ~/.config/containers/systemd/${WORKER_CONTAINER}.container
 
         sed "s/VolumeName=kinc-var-data/VolumeName=${WORKER_CONTAINER}-var-data/g" \
             runtime/quadlet/kinc-var-data.volume > ~/.config/containers/systemd/${WORKER_CONTAINER}-var-data.volume
+
+        sed "s/VolumeName=kinc-etc-kubernetes/VolumeName=${WORKER_CONTAINER}-etc-kubernetes/g" \
+            runtime/quadlet/kinc-etc-kubernetes.volume \
+            > ~/.config/containers/systemd/${WORKER_CONTAINER}-etc-kubernetes.volume
 
         if [[ "${USE_BAKED_IN_CONFIG:-}" == "true" ]]; then
             sed -i '/kinc-config-volume.service/d' ~/.config/containers/systemd/${WORKER_CONTAINER}.container
