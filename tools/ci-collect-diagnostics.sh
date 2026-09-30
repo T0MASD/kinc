@@ -116,7 +116,11 @@ collect() {
   # --- per node ------------------------------------------------------------
   for n in $(podman ps --format '{{.Names}}' 2>/dev/null | grep "^kinc-${cluster}-" || true); do
     d="$out/nodes/$n"; mkdir -p "$d"
-    podman exec "$n" systemctl list-units --state=failed --no-pager > "$d/failed-units.txt" 2>&1
+    # --no-legend, so the file is unit rows and nothing else: with the header
+    # and the "N loaded units listed." footer, a healthy node's file is four
+    # non-empty lines that have to be parsed to learn they mean "none".
+    podman exec "$n" systemctl list-units --state=failed --no-legend --plain --no-pager \
+      > "$d/failed-units.txt" 2>&1
     podman exec "$n" systemctl status kinc-preflight kubeadm-init kinc-postinit crio kubelet \
       --no-pager > "$d/unit-status.txt" 2>&1
     podman exec "$n" journalctl --no-pager --boot > "$d/journal.txt" 2>&1

@@ -169,6 +169,54 @@ for f in "${CAP}"/*; do
 done
 echo
 
+# --- failed units --------------------------------------------------------
+# What systemd itself thinks failed, per node.
+#
+# Nothing reported this, and three units failed on every node of every run:
+# sys-kernel-config, -debug and -tracing, which a rootless container is not
+# permitted to mount. They are masked now, so this is expected to be empty -
+# which is the point. An empty list is only worth printing because a name in it
+# means something.
+#
+# A failed unit leaves no klog line, so the table above cannot see it however
+# wide it gets: systemd's verdict is not in any component's log.
+echo "### Failed units"
+echo
+units_found=0
+units_out=""
+if [ "$OWN_CAP" -eq 1 ]; then
+  for n in $(kinc_nodes "$CLUSTER"); do
+    u=$(podman exec "$n" systemctl list-units --state=failed --no-legend --no-pager 2>/dev/null \
+        | awk '{ print $2 }')
+    if [ -n "$u" ]; then
+      units_found=1
+      units_out="${units_out}${n}:"$'\n'"$(printf '%s\n' "$u" | sed 's/^/  /')"$'\n'
+    fi
+  done
+else
+  for uf in "$(dirname "$CAP")"/nodes/*/failed-units.txt; do
+    [ -s "$uf" ] || continue
+    n=$(basename "$(dirname "$uf")")
+    # A unit name, wherever it sits on the line: older captures carry
+    # systemd's header and legend, and "UNIT LOAD ACTIVE SUB" parsed by column
+    # reports a failed unit called LOAD.
+    u=$(grep -oE '[A-Za-z0-9@:_.\\-]+\.(service|mount|socket|target|timer|path)' "$uf" \
+        | sort -u || true)
+    if [ -n "$u" ]; then
+      units_found=1
+      units_out="${units_out}${n}:"$'\n'"$(printf '%s\n' "$u" | sed 's/^/  /')"$'\n'
+    fi
+  done
+fi
+if [ "$units_found" -eq 1 ]; then
+  echo '```'
+  printf '%s' "$units_out"
+  echo '```'
+else
+  echo "None on any node."
+fi
+echo
+
 # --- audit ---------------------------------------------------------------
 # Only when the cluster was deployed with auditing on; its absence is a
 # configuration, not a problem.
