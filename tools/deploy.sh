@@ -743,6 +743,41 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
             exit 1
         fi
 
+        # Then the agent that gives the node its datapath.
+        #
+        # A node is Ready once its kubelet sees a usable CNI config, and Antrea
+        # writes 10-antrea.conflist from an init container, before the agent
+        # container starts. So Ready arrives first: measured at 09:32:43, with
+        # the agent starting at 09:32:56. Returning there hands back a worker
+        # that answers `kubectl get nodes` and cannot yet move a packet, and
+        # whatever runs next puts pods on it.
+        #
+        # Existence first, then readiness, for the reason above: `kubectl wait`
+        # on a selector matching nothing fails rather than waits.
+        agent=""
+        for _ in $(seq 1 60); do
+            agent=$(kubectl --kubeconfig="$KUBECONFIG_TMP" get pod -n kube-system \
+                    -l app=antrea,component=antrea-agent \
+                    --field-selector "spec.nodeName=${WORKER_CONTAINER}" \
+                    -o name 2>/dev/null | head -1)
+            [ -n "$agent" ] && break
+            sleep 5
+        done
+        if [ -z "$agent" ]; then
+            echo "❌ no antrea-agent was ever scheduled onto ${WORKER_CONTAINER}"
+            kubectl --kubeconfig="$KUBECONFIG_TMP" get pod -n kube-system \
+                -l app=antrea,component=antrea-agent -o wide || true
+            rm -f "$KUBECONFIG_TMP"
+            exit 1
+        fi
+        if ! kubectl --kubeconfig="$KUBECONFIG_TMP" wait --for=condition=Ready \
+             "$agent" -n kube-system --timeout=300s; then
+            echo "❌ ${WORKER_CONTAINER} is Ready but its antrea-agent is not"
+            kubectl --kubeconfig="$KUBECONFIG_TMP" describe "$agent" -n kube-system || true
+            rm -f "$KUBECONFIG_TMP"
+            exit 1
+        fi
+
         # NodeRestriction refuses every kubernetes.io and k8s.io label a kubelet
         # sets for itself, so the role is applied here, with the cluster's own
         # credentials, after the node has registered.
