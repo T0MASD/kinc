@@ -135,6 +135,14 @@ collect() {
 
     # kubeadm writes to a file, not the journal.
     podman exec "$n" sh -c 'cat /var/log/kinc/*.log' > "$d/kinc-scripts.log" 2>&1
+
+    # What the crun wrapper was asked to do and what it did. It sits between
+    # the kubelet's intent and the container that results, and nothing else
+    # records that step: a create that fails reports only the kernel's refusal,
+    # not whether the rewrite meant to prevent it ran. On tmpfs inside the node,
+    # so it is gone the moment the container is, which is why it is taken here.
+    podman exec "$n" sh -c 'cat /tmp/crun-debug.log' > "$d/crun-wrapper.log" 2>/dev/null
+    [ -s "$d/crun-wrapper.log" ] || rm -f "$d/crun-wrapper.log"
     podman inspect "$n" > "$d/inspect.json" 2>&1
   done
 

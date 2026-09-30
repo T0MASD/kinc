@@ -20,7 +20,7 @@ spec:
   - name: faro
     image: ghcr.io/t0masd/faro-operator:latest
     imagePullPolicy: IfNotPresent
-    
+
     # Wait for API server before starting Faro
     # Two-stage check: TCP port availability (fast) + HTTP healthz (verification)
     # Experiment proved both stages are necessary - TCP-only results in "unknown API groups" errors
@@ -52,7 +52,7 @@ spec:
     volumeMounts:
     # Kubeconfig for API server access
     - name: kubeconfig
-      mountPath: /etc/kubernetes/super-admin.conf
+      mountPath: /etc/kinc/faro/kubeconfig
       readOnly: true
     
     # Faro configuration
@@ -88,13 +88,13 @@ spec:
     # exists to capture.
     env:
     - name: KUBECONFIG
-      value: /etc/kubernetes/super-admin.conf
+      value: /etc/kinc/faro/kubeconfig
   
   volumes:
   # Kubeconfig from host
   - name: kubeconfig
     hostPath:
-      path: /etc/kubernetes/super-admin.conf
+      path: /etc/kinc/faro/kubeconfig
       type: File
   
   # Faro configuration from host
