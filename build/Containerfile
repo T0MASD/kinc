@@ -132,6 +132,26 @@ RUN echo "Setting up crun wrapper for rootless operation ..." \
     && ln -sf /usr/local/bin/crun-wrapper.sh /usr/bin/crun \
     && echo "crun wrapper installed"
 
+# Remove CRI-O's default bridge CNI config.
+#
+# Antrea is the cluster network, and its installer deletes this file when it
+# writes 10-antrea.conflist. Until the agent gets that far, CRI-O picks the
+# bridge as the only config present and tries to create pod networks with it,
+# which cannot work here:
+#
+#   plugin type="bridge" failed (add): failed to enable keep_addr_on_down for
+#   interface "eth0": open /proc/sys/net/ipv6/conf/eth0/keep_addr_on_down:
+#   read-only file system
+#
+# Every pod scheduled in that window fails sandbox creation, retries, and
+# succeeds once Antrea is ready - five errors across a bootstrap, describing a
+# path that was never going to work rather than anything wrong.
+#
+# Without it there is no CNI config until Antrea writes one, so those pods wait
+# in ContainerCreating instead, which is what is actually happening.
+RUN rm -f /etc/cni/net.d/100-crio-bridge.conflist \
+    && echo "removed CRI-O's default bridge CNI config; Antrea provides the only one"
+
 # Enable kinc services now that service files are copied
 # New: Multi-service architecture (preflight → kubeadm-init → postinit)
 RUN echo "Enabling kinc services ..." \
