@@ -208,8 +208,22 @@ for f in "${CAP}"/*; do
     # Said nothing since this component finished coming up.
     [ "$into_life" -le "$STARTUP" ] && continue
 
-    if [ "$count" -le 1 ]; then
-      late_singletons="${late_singletons}${label}: ${cls} (once, at +${into_life}s)"$'\n'
+    # A cadence needs two intervals to be one. Below that there is a gap
+    # between two events and no way to tell a rate from a coincidence.
+    #
+    # The DaemonSet controller says "read version: 622 is not as new as written
+    # version: 778" whenever a DaemonSet is written and its informer has not
+    # caught up. That happens at bootstrap, and again when a worker joins,
+    # which on a two-node cluster is after the startup grace by definition.
+    # Two events 84 seconds apart, and the single interval between them read as
+    # "recurring every 84s, still going" - a component reacting to a node join
+    # reported as a fault.
+    #
+    # Reported either way, so nothing is hidden; not failed on, because the
+    # evidence does not support the claim. A fault that really is recurring
+    # produces a third occurrence and is failed on then.
+    if [ "$count" -le 2 ]; then
+      late_singletons="${late_singletons}${label}: ${cls} (x${count}, last at +${into_life}s)"$'\n'
       continue
     fi
 
@@ -236,7 +250,7 @@ fi
 
 if [ -n "$late_singletons" ]; then
   echo ""
-  echo "   logged once after settling, not treated as a failure:"
+  echo "   logged once or twice after settling, too few to be a cadence:"
   printf '%s' "$late_singletons" | sed 's/^/     /'
 fi
 

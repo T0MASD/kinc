@@ -144,10 +144,16 @@ for f in "${CAP}"/*; do
     # The gate's rule, reported rather than enforced: noisy while coming up is
     # allowed, still noisy afterwards is not, and "still" is measured against
     # the class's own cadence rather than a constant.
+    # Same states the gate uses, including its floor on what counts as a
+    # cadence: one interval between two events is an observation, not a rate,
+    # so two occurrences are reported as two rather than extrapolated into
+    # "still going". The gate fails on ONGOING, so the two must agree.
     if [ "$into" -le "$STARTUP" ]; then
       state='startup'
-    elif [ "$count" -le 1 ]; then
+    elif [ "$count" -eq 1 ]; then
       state='once'
+    elif [ "$count" -eq 2 ]; then
+      state='twice'
     elif [ "$quiet" -le $(( 3 * maxgap )) ]; then
       state='**ONGOING**'
     else
