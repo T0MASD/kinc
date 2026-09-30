@@ -1,79 +1,47 @@
 #!/bin/bash
-# JSON-safe crun wrapper using jq
-# This wrapper intercepts crun create commands and removes oomScoreAdj from OCI specs
-# to enable rootless container operation without OOM score adjustment failures
+# Strip oomScoreAdj from OCI specs before handing them to crun.
+#
+# Rootless cannot lower oom_score_adj below the floor its session inherited:
+# fs/proc/base.c checks capable(CAP_SYS_RESOURCE), which is against the initial
+# user namespace, so no capability a rootless container holds satisfies it.
+# crun does not treat that as advisory - it fails the create:
+#
+#   Container creation error: write to `/proc/self/oom_score_adj`: Permission denied
+#
+# The kubelet asks for -997 on Guaranteed pods and -999 on the control plane's
+# static ones, so without this the API server never starts and the cluster does
+# not come up. Verified by removing the wrapper: etcd, kube-apiserver and
+# kube-controller-manager all fail to create, and kubeadm times out waiting for
+# an API server that never arrives.
+#
+# It removes nothing else. Earlier versions also deleted process.user, which
+# made every container run as root whatever its image or securityContext said,
+# and deleted capabilities from any spec whose JSON happened to contain the
+# string "helper" - which matches local-path's helper pod and anything else
+# that mentions the word. Neither was needed to start a cluster.
+set -euo pipefail
 
-# Debug logging
-echo "$(date): crun called with: $*" >> /tmp/crun-debug.log
-
-# Check if this is a container create command
 if [[ "$*" == *"create"* ]]; then
-    BUNDLE_DIR=""
-    # Parse arguments to find --bundle directory
-    for ((i=1; i<=$#; i++)); do
+    bundle=""
+    for ((i = 1; i <= $#; i++)); do
         if [[ "${!i}" == "--bundle" ]]; then
-            j=$((i+1))
-            BUNDLE_DIR="${!j}"
+            j=$((i + 1))
+            bundle="${!j}"
             break
         fi
     done
-    
-    # Process config.json if bundle directory exists
-    if [[ -n "$BUNDLE_DIR" && -f "$BUNDLE_DIR/config.json" ]]; then
-        # Create backup
-        cp "$BUNDLE_DIR/config.json" "$BUNDLE_DIR/config.json.bak"
-        MODIFIED=false
-        
-        # Remove oomScoreAdj if present
-        if grep -q "oomScoreAdj" "$BUNDLE_DIR/config.json"; then
-            echo "$(date): Using jq to safely remove oomScoreAdj" >> /tmp/crun-debug.log
-            jq "del(.process.oomScoreAdj)" "$BUNDLE_DIR/config.json.bak" > "$BUNDLE_DIR/config.json.tmp"
-            if [[ $? -eq 0 ]]; then
-                mv "$BUNDLE_DIR/config.json.tmp" "$BUNDLE_DIR/config.json"
-                cp "$BUNDLE_DIR/config.json" "$BUNDLE_DIR/config.json.bak"
-                echo "$(date): Successfully removed oomScoreAdj with jq" >> /tmp/crun-debug.log
-                MODIFIED=true
+
+    if [[ -n "$bundle" && -f "$bundle/config.json" ]]; then
+        if jq -e '.process.oomScoreAdj' "$bundle/config.json" >/dev/null 2>&1; then
+            # Written to a temporary file and moved, so a failed jq leaves the
+            # original spec intact rather than a truncated one.
+            if jq 'del(.process.oomScoreAdj)' "$bundle/config.json" > "$bundle/config.json.tmp"; then
+                mv "$bundle/config.json.tmp" "$bundle/config.json"
             else
-                echo "$(date): jq failed to remove oomScoreAdj" >> /tmp/crun-debug.log
-                rm -f "$BUNDLE_DIR/config.json.tmp"
+                rm -f "$bundle/config.json.tmp"
             fi
-        fi
-        
-        # Remove user settings that cause capset issues in rootless mode
-        if grep -q '"user"' "$BUNDLE_DIR/config.json"; then
-            echo "$(date): Removing user settings to avoid capset issues in rootless mode" >> /tmp/crun-debug.log
-            jq 'del(.process.user)' "$BUNDLE_DIR/config.json.bak" > "$BUNDLE_DIR/config.json.tmp"
-            if [[ $? -eq 0 ]]; then
-                mv "$BUNDLE_DIR/config.json.tmp" "$BUNDLE_DIR/config.json"
-                cp "$BUNDLE_DIR/config.json" "$BUNDLE_DIR/config.json.bak"
-                echo "$(date): Successfully removed user settings" >> /tmp/crun-debug.log
-                MODIFIED=true
-            else
-                echo "$(date): jq failed to remove user settings" >> /tmp/crun-debug.log
-                rm -f "$BUNDLE_DIR/config.json.tmp"
-            fi
-        fi
-        
-        # For helper containers, remove all capabilities to avoid capset issues
-        if grep -q "helper" "$BUNDLE_DIR/config.json"; then
-            echo "$(date): Removing all capabilities from helper container to avoid capset issues" >> /tmp/crun-debug.log
-            jq 'del(.process.capabilities)' "$BUNDLE_DIR/config.json.bak" > "$BUNDLE_DIR/config.json.tmp"
-            if [[ $? -eq 0 ]]; then
-                mv "$BUNDLE_DIR/config.json.tmp" "$BUNDLE_DIR/config.json"
-                cp "$BUNDLE_DIR/config.json" "$BUNDLE_DIR/config.json.bak"
-                echo "$(date): Successfully removed capabilities from helper container" >> /tmp/crun-debug.log
-                MODIFIED=true
-            else
-                echo "$(date): jq failed to remove capabilities from helper container" >> /tmp/crun-debug.log
-                rm -f "$BUNDLE_DIR/config.json.tmp"
-            fi
-        fi
-        
-        if [[ "$MODIFIED" == "false" ]]; then
-            echo "$(date): No modifications needed" >> /tmp/crun-debug.log
         fi
     fi
 fi
 
-# Execute the original crun binary with all arguments
 exec /usr/bin/crun.orig "$@"
