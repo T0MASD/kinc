@@ -343,6 +343,13 @@ jobs:
         with:
           name: kinc-diagnostics-baked-in-${{ github.run_number }}
           path: artifacts/
+          # .captured-at records when observation ended, and every later
+          # reading of this capture measures "how long has this class been
+          # quiet" against it. upload-artifact drops dotfiles unless told
+          # otherwise, so a downloaded capture fell back to its newest log
+          # line - a floor on the end, not the end, which throws away real
+          # quiet and makes the same artifact answer differently later.
+          include-hidden-files: true
           retention-days: 30
 
       - name: Extract Faro events
@@ -496,6 +503,13 @@ jobs:
         with:
           name: kinc-diagnostics-multi-node-${{ github.run_number }}
           path: artifacts/
+          # .captured-at records when observation ended, and every later
+          # reading of this capture measures "how long has this class been
+          # quiet" against it. upload-artifact drops dotfiles unless told
+          # otherwise, so a downloaded capture fell back to its newest log
+          # line - a floor on the end, not the end, which throws away real
+          # quiet and makes the same artifact answer differently later.
+          include-hidden-files: true
           retention-days: 30
 
       - name: Extract Faro events
@@ -843,6 +857,13 @@ jobs:
         with:
           name: kinc-diagnostics-mounted-${{ github.run_number }}
           path: artifacts/
+          # .captured-at records when observation ended, and every later
+          # reading of this capture measures "how long has this class been
+          # quiet" against it. upload-artifact drops dotfiles unless told
+          # otherwise, so a downloaded capture fell back to its newest log
+          # line - a floor on the end, not the end, which throws away real
+          # quiet and makes the same artifact answer differently later.
+          include-hidden-files: true
           retention-days: 30
 
       - name: Extract Faro events from both clusters
