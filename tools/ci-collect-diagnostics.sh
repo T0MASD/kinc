@@ -27,6 +27,44 @@ collect() {
   echo "=== ${cluster} ==="
   mkdir -p "$out"/{cluster,componentlogs,antrea,nodes}
 
+  # Let the cluster reach an age its logs can be judged at, before reading them.
+  #
+  # ci-verify-component-logs asks whether anything is still logging errors after
+  # its first 90 seconds, and it can only answer that about a component it
+  # observed past 90 seconds. Captured younger, every class it finds is inside
+  # the grace, nothing is eligible to fail, and the gate reports that it could
+  # not reach a verdict - correctly, because it could not.
+  #
+  # Measured on run 159: clusters were captured at node ages of 78s, 95s, 104s
+  # and 135s, and only the 135s one could be judged. A node is older than its
+  # pods by the time it takes them to start, so the node has to clear the grace
+  # by that margin for any component to clear it at all.
+  #
+  # The gate's failure text names this knob. It named it before it existed,
+  # which is how a run could fail with instructions to turn a dial that was not
+  # there.
+  # Nothing to wait for when the cluster is not up: kinc_cluster_age has no
+  # node to read and never returns one, so without this a collect run against a
+  # torn-down or misnamed cluster blocks for the whole deadline before
+  # capturing the nothing it was always going to capture.
+  local age deadline
+  deadline=$(( $(date +%s) + 300 ))
+  while [ -n "$(kinc_nodes "$cluster")" ]; do
+    age=$(kinc_cluster_age "$cluster" 2>/dev/null) || age=""
+    [ -n "$age" ] && [ "$age" -ge "${KINC_CAPTURE_AGE:-150}" ] && break
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "  capture age: gave up waiting at ${age:-unknown}s"
+      break
+    fi
+    printf '\r  capture age: %ss/%ss ' "${age:-0}" "${KINC_CAPTURE_AGE:-150}"
+    sleep 5
+  done
+  if [ -n "$(kinc_nodes "$cluster")" ]; then
+    echo "  capture age: ${age:-unknown}s (want >= ${KINC_CAPTURE_AGE:-150}s)"
+  else
+    echo "  capture age: no nodes running for cluster '${cluster}'"
+  fi
+
   # --- cluster state -------------------------------------------------------
   # A kubeconfig carries a client certificate, so it is written outside the
   # artifact tree: these are uploaded, and a throwaway cluster's credentials are

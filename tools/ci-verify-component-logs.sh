@@ -255,7 +255,8 @@ if [ "$judged" -eq 0 ]; then
   echo ""
   echo "❌ no component outlived the ${STARTUP}s startup grace, so nothing could be"
   echo "   judged - this run proves nothing. Let the cluster run longer before"
-  echo "   capturing (KINC_CAPTURE_AGE in ci-collect-diagnostics.sh)."
+  echo "   capturing: raise KINC_CAPTURE_AGE, which ci-collect-diagnostics.sh"
+  echo "   waits for (default ${KINC_CAPTURE_AGE:-150}s of cluster age)."
   VERDICT=1
   exit 1
 fi

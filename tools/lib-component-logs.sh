@@ -42,13 +42,17 @@ kinc_nodes() {
 }
 
 # Seconds since the earliest-started node container, i.e. the cluster's age.
+# Takes an optional cluster name, like kinc_nodes.
 #
 # Read through jq rather than --format: podman's Go template prints a time with
 # a trailing zone name ("+0300 EEST") that date(1) refuses, while the JSON field
 # is RFC 3339, which both date(1) and a string comparison understand.
 kinc_cluster_age() {
-  local oldest="" started n
-  for n in $(kinc_nodes); do
+  local cluster="${1:-}" oldest="" started n
+  # Filtered, like kinc_nodes: with two clusters up, an unfiltered age is the
+  # older cluster's, and a caller waiting for the younger one to mature stops
+  # waiting immediately.
+  for n in $(kinc_nodes "$cluster"); do
     started=$(podman inspect "$n" 2>/dev/null | jq -r '.[0].State.StartedAt')
     [ -z "$started" ] && continue
     if [ -z "$oldest" ] || [[ "$started" < "$oldest" ]]; then oldest="$started"; fi
