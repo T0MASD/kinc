@@ -141,6 +141,9 @@ log "Templating kubeadm configuration with container IP..."
 CONTROL_PLANE_NAME="$(hostname)"
 log "Control-plane endpoint: ${CONTROL_PLANE_NAME}:6443"
 
+# Rendered onto tmpfs deliberately. This carries the node's current IP, so it is
+# only ever valid for the boot that produced it: kept across a restart, a node
+# that came back on a different address would initialise against the old one.
 sed -e "s/CONTAINER_IP_PLACEHOLDER/$CONTAINER_IP/g" \
     -e "s/CONTROL_PLANE_NAME_PLACEHOLDER/${CONTROL_PLANE_NAME}/g" \
     -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${CONTROL_PLANE_NAME}:6443/g" \

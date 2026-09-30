@@ -23,6 +23,11 @@ jobs:
         run: ./tools/ci-prepare-host.sh
         shell: bash
 
+      # A repo-wide lint, so it runs once and needs nothing deployed.
+      - name: Check for deprecated Kubernetes APIs
+        run: ./tools/ci-verify-no-deprecated-apis.sh
+        shell: bash
+
       - name: Build kinc image
         run: |
           echo "=== Building kinc image with multi-service architecture ==="
@@ -338,6 +343,13 @@ jobs:
         with:
           name: kinc-diagnostics-baked-in-${{ github.run_number }}
           path: artifacts/
+          # .captured-at records when observation ended, and every later
+          # reading of this capture measures "how long has this class been
+          # quiet" against it. upload-artifact drops dotfiles unless told
+          # otherwise, so a downloaded capture fell back to its newest log
+          # line - a floor on the end, not the end, which throws away real
+          # quiet and makes the same artifact answer differently later.
+          include-hidden-files: true
           retention-days: 30
 
       - name: Extract Faro events
@@ -374,6 +386,22 @@ jobs:
           systemctl --user reset-failed || true
           echo "✅ Cleanup complete"
         shell: bash
+      # Judged after teardown, from the capture taken while the cluster ran.
+      #
+      # This gate only ran in release.yml, so a pull request could not break it
+      # visibly and its first real exercise was the release. It could not have
+      # run here before: it needs a component observed past its 90s startup
+      # grace, and captures were taken at 78-135s of cluster age, so it would
+      # have reported - correctly - that it could reach no verdict. The
+      # collector waits for KINC_CAPTURE_AGE now, which is what makes this
+      # answerable.
+      - name: Verify component logs settled
+        if: always()
+        run: |
+          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs \
+            ./tools/ci-verify-component-logs.sh
+        shell: bash
+
       # After teardown, against the archived audit log. Whether a denial has
       # stopped only becomes visible once enough silence has accumulated to
       # outlast its own period, and asked while the cluster runs the newest one
@@ -388,7 +416,7 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/podlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
         shell: bash
 
       # Separate from the diagnostics upload, which ran before teardown: the
@@ -491,6 +519,13 @@ jobs:
         with:
           name: kinc-diagnostics-multi-node-${{ github.run_number }}
           path: artifacts/
+          # .captured-at records when observation ended, and every later
+          # reading of this capture measures "how long has this class been
+          # quiet" against it. upload-artifact drops dotfiles unless told
+          # otherwise, so a downloaded capture fell back to its newest log
+          # line - a floor on the end, not the end, which throws away real
+          # quiet and makes the same artifact answer differently later.
+          include-hidden-files: true
           retention-days: 30
 
       - name: Extract Faro events
@@ -525,6 +560,22 @@ jobs:
           CLUSTER_NAME=default ./tools/cleanup.sh || true
           systemctl --user reset-failed || true
         shell: bash
+      # Judged after teardown, from the capture taken while the cluster ran.
+      #
+      # This gate only ran in release.yml, so a pull request could not break it
+      # visibly and its first real exercise was the release. It could not have
+      # run here before: it needs a component observed past its 90s startup
+      # grace, and captures were taken at 78-135s of cluster age, so it would
+      # have reported - correctly - that it could reach no verdict. The
+      # collector waits for KINC_CAPTURE_AGE now, which is what makes this
+      # answerable.
+      - name: Verify component logs settled
+        if: always()
+        run: |
+          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs \
+            ./tools/ci-verify-component-logs.sh
+        shell: bash
+
       # After teardown, against the archived audit log. Whether a denial has
       # stopped only becomes visible once enough silence has accumulated to
       # outlast its own period, and asked while the cluster runs the newest one
@@ -539,7 +590,7 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/podlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
         shell: bash
 
       # Separate from the diagnostics upload, which ran before teardown: the
@@ -838,6 +889,13 @@ jobs:
         with:
           name: kinc-diagnostics-mounted-${{ github.run_number }}
           path: artifacts/
+          # .captured-at records when observation ended, and every later
+          # reading of this capture measures "how long has this class been
+          # quiet" against it. upload-artifact drops dotfiles unless told
+          # otherwise, so a downloaded capture fell back to its newest log
+          # line - a floor on the end, not the end, which throws away real
+          # quiet and makes the same artifact answer differently later.
+          include-hidden-files: true
           retention-days: 30
 
       - name: Extract Faro events from both clusters
@@ -875,6 +933,24 @@ jobs:
           systemctl --user reset-failed || true
           echo "✅ Cleanup complete"
         shell: bash
+      # Judged after teardown, from the capture taken while the cluster ran.
+      #
+      # This gate only ran in release.yml, so a pull request could not break it
+      # visibly and its first real exercise was the release. It could not have
+      # run here before: it needs a component observed past its 90s startup
+      # grace, and captures were taken at 78-135s of cluster age, so it would
+      # have reported - correctly - that it could reach no verdict. The
+      # collector waits for KINC_CAPTURE_AGE now, which is what makes this
+      # answerable.
+      - name: Verify component logs settled
+        if: always()
+        run: |
+          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs \
+            ./tools/ci-verify-component-logs.sh
+          KINC_LOG_CAPTURE=artifacts/diagnostics/cluster01/componentlogs \
+            ./tools/ci-verify-component-logs.sh
+        shell: bash
+
       # After teardown, against the archived audit log. Whether a denial has
       # stopped only becomes visible once enough silence has accumulated to
       # outlast its own period, and asked while the cluster runs the newest one
@@ -889,8 +965,8 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/podlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
-          KINC_LOG_CAPTURE=artifacts/diagnostics/cluster01/podlogs ./tools/ci-summarize-run.sh cluster01 | tee "artifacts/summary/cluster01.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          KINC_LOG_CAPTURE=artifacts/diagnostics/cluster01/componentlogs ./tools/ci-summarize-run.sh cluster01 | tee "artifacts/summary/cluster01.md" | tee -a "$GITHUB_STEP_SUMMARY"
         shell: bash
 
       # Separate from the diagnostics upload, which ran before teardown: the

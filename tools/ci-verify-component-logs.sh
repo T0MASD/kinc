@@ -143,6 +143,21 @@ fi
 
 for f in "${CAP}"/*; do
   [ -s "$f" ] || continue
+
+  # Pods only. A capture also holds each node's kubelet and CRI-O journal,
+  # which the summary describes and this cannot judge: the kubelet logs at E
+  # level every time a connection to :10250 closes, and the gates themselves
+  # open those - ci-verify-crossnode and ci-verify-faro both exec into
+  # containers. Judged here, a node fails on
+  #
+  #   conn.go:353  x2, every 3s at widest, still going at +314s
+  #
+  # which is this suite's own footprint, arriving after startup by definition
+  # because the gates run after the cluster is up. The same reasoning is why
+  # kinc_capture_pod_logs reads files off the nodes instead of using
+  # `kubectl logs`.
+  case "$(basename "$f")" in node_*) continue ;; esac
+
   # Kubernetes names never contain an underscore, so it separates the parts of
   # the capture's filename unambiguously and reads back as ns/pod.
   # The component's own first line: a pod that started late is judged from when
@@ -168,7 +183,13 @@ for f in "${CAP}"/*; do
   label="$(kinc_label "$(basename "$f")")"
 
   # One line per error: its timestamp and its class.
-  kinc_class_lines "$f" > "${CAP}.errors"
+  #
+  # E and F only. kinc_class_lines also returns warnings, for the summary to
+  # report, but a warning is a component saying something it expected to be
+  # able to say - every apiserver logs "Skipping API
+  # apiextensions.k8s.io/v1beta1 because it has no resources" on every start -
+  # and judging those here would fail every build.
+  kinc_class_lines "$f" | awk -F'\t' '$3 != "W"' > "${CAP}.errors"
 
   [ -s "${CAP}.errors" ] || continue
 
@@ -187,8 +208,22 @@ for f in "${CAP}"/*; do
     # Said nothing since this component finished coming up.
     [ "$into_life" -le "$STARTUP" ] && continue
 
-    if [ "$count" -le 1 ]; then
-      late_singletons="${late_singletons}${label}: ${cls} (once, at +${into_life}s)"$'\n'
+    # A cadence needs two intervals to be one. Below that there is a gap
+    # between two events and no way to tell a rate from a coincidence.
+    #
+    # The DaemonSet controller says "read version: 622 is not as new as written
+    # version: 778" whenever a DaemonSet is written and its informer has not
+    # caught up. That happens at bootstrap, and again when a worker joins,
+    # which on a two-node cluster is after the startup grace by definition.
+    # Two events 84 seconds apart, and the single interval between them read as
+    # "recurring every 84s, still going" - a component reacting to a node join
+    # reported as a fault.
+    #
+    # Reported either way, so nothing is hidden; not failed on, because the
+    # evidence does not support the claim. A fault that really is recurring
+    # produces a third occurrence and is failed on then.
+    if [ "$count" -le 2 ]; then
+      late_singletons="${late_singletons}${label}: ${cls} (x${count}, last at +${into_life}s)"$'\n'
       continue
     fi
 
@@ -215,7 +250,7 @@ fi
 
 if [ -n "$late_singletons" ]; then
   echo ""
-  echo "   logged once after settling, not treated as a failure:"
+  echo "   logged once or twice after settling, too few to be a cadence:"
   printf '%s' "$late_singletons" | sed 's/^/     /'
 fi
 
@@ -234,7 +269,8 @@ if [ "$judged" -eq 0 ]; then
   echo ""
   echo "❌ no component outlived the ${STARTUP}s startup grace, so nothing could be"
   echo "   judged - this run proves nothing. Let the cluster run longer before"
-  echo "   capturing (KINC_CAPTURE_AGE in ci-collect-diagnostics.sh)."
+  echo "   capturing: raise KINC_CAPTURE_AGE, which ci-collect-diagnostics.sh"
+  echo "   waits for (default ${KINC_CAPTURE_AGE:-150}s of cluster age)."
   VERDICT=1
   exit 1
 fi

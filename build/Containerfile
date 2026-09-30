@@ -36,10 +36,28 @@ RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
     && dnf clean all
 
 # Configure systemd (separate layer for better caching)
+# The kernel API filesystems a rootless container is not allowed to mount.
+#
+# dev-hugepages and sys-fs-fuse-connections were already masked. The three
+# sys-kernel mounts were not, so systemd tried them on every node, was refused,
+# and left them failed for the life of the container:
+#
+#   mount: /sys/kernel/tracing: permission denied.
+#
+# Three permanently failed units is a baseline, and a baseline is not a signal:
+# a fourth failure - a real one - sits in that list looking like the others.
+# Masked, `systemctl --failed` is empty on a healthy node, so anything in it
+# means something.
+#
+# Nothing here reads debugfs, configfs or tracefs: Antrea talks to OVS over
+# OVSDB and netlink, and the mounts fail today with no effect but the noise.
 RUN echo "Configuring systemd..." \
     && systemctl mask \
         dev-hugepages.mount \
         sys-fs-fuse-connections.mount \
+        sys-kernel-config.mount \
+        sys-kernel-debug.mount \
+        sys-kernel-tracing.mount \
         systemd-update-utmp.service \
         systemd-tmpfiles-setup.service \
         console-getty.service \
@@ -99,8 +117,6 @@ COPY kinc/etc/systemd/system/kinc-preflight.service /etc/systemd/system/kinc-pre
 COPY kinc/etc/systemd/system/kubeadm-init.service /etc/systemd/system/kubeadm-init.service
 COPY kinc/etc/systemd/system/kinc-postinit.service /etc/systemd/system/kinc-postinit.service
 COPY kinc/etc/systemd/system/kinc-cgroup-setup.service /etc/systemd/system/kinc-cgroup-setup.service
-# Keep old kinc-init.service for backward compatibility (disabled by default)
-COPY kinc/etc/systemd/system/kinc-init.service /etc/systemd/system/kinc-init.service
 COPY --chmod=0755 kinc/etc/kinc/scripts/* /etc/kinc/scripts/
 COPY kinc/kinc/manifests/ /kinc/manifests/
 
@@ -131,6 +147,26 @@ RUN echo "Setting up crun wrapper for rootless operation ..." \
     && mv /usr/bin/crun /usr/bin/crun.orig \
     && ln -sf /usr/local/bin/crun-wrapper.sh /usr/bin/crun \
     && echo "crun wrapper installed"
+
+# Remove CRI-O's default bridge CNI config.
+#
+# Antrea is the cluster network, and its installer deletes this file when it
+# writes 10-antrea.conflist. Until the agent gets that far, CRI-O picks the
+# bridge as the only config present and tries to create pod networks with it,
+# which cannot work here:
+#
+#   plugin type="bridge" failed (add): failed to enable keep_addr_on_down for
+#   interface "eth0": open /proc/sys/net/ipv6/conf/eth0/keep_addr_on_down:
+#   read-only file system
+#
+# Every pod scheduled in that window fails sandbox creation, retries, and
+# succeeds once Antrea is ready - five errors across a bootstrap, describing a
+# path that was never going to work rather than anything wrong.
+#
+# Without it there is no CNI config until Antrea writes one, so those pods wait
+# in ContainerCreating instead, which is what is actually happening.
+RUN rm -f /etc/cni/net.d/100-crio-bridge.conflist \
+    && echo "removed CRI-O's default bridge CNI config; Antrea provides the only one"
 
 # Enable kinc services now that service files are copied
 # New: Multi-service architecture (preflight → kubeadm-init → postinit)
