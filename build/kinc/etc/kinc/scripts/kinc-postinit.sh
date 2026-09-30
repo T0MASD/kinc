@@ -180,6 +180,26 @@ log "Installing storage class..."
 # The static shared volume, alongside the dynamic provisioner rather than
 # instead of it.
 if [[ -f /kinc/manifests/shared-storage.yaml ]]; then
+    # The directory the shared PV points at, created here rather than left to
+    # the kubelet.
+    #
+    # hostPath with DirectoryOrCreate makes it the first time a pod mounts the
+    # volume, owned by root and mode 0755 - so a consumer that is not root
+    # cannot write to its own subPath, and finds that out at runtime. It is the
+    # same shape as the fault that stopped Faro capturing: a directory created
+    # by one identity for another to use.
+    #
+    # 1777, the semantics of a shared scratch area: every consumer can create
+    # its subPath, and the sticky bit stops one removing another's. The volume
+    # is deliberately shared by components that are not known here and do not
+    # share a uid, so a single owner would have to be guessed.
+    #
+    # The dynamic subtree next door already behaves this way - local-path
+    # creates each PV directory 0777 - so both halves of the volume are usable
+    # by a non-root pod, which is the point.
+    install -d -m 1777 /tmp/kinc-storage/shared
+    log "📁 Shared storage directory ready (1777, usable by non-root consumers)"
+
     log "Installing the shared storage class..."
     if kubectl apply -f /kinc/manifests/shared-storage.yaml; then
         log "✅ Shared storage installed"

@@ -323,6 +323,26 @@ fi
 if [[ "${KINC_ENABLE_FARO:-false}" == "true" ]]; then
     log "🔍 KINC_ENABLE_FARO=true detected, deploying Faro bootstrap observer..."
     
+    # Faro's events directory, owned by the user Faro actually runs as.
+    #
+    # The manifest mounts it as a hostPath with DirectoryOrCreate, and the
+    # kubelet creates it root-owned - while the image declares USER faro, uid
+    # 65532. Faro then dies on startup with "failed to create log directory:
+    # mkdir /var/faro/events/logs: permission denied" and captures nothing,
+    # while the deploy still reports it enabled.
+    #
+    # It went unnoticed because it used to work by accident: the crun wrapper
+    # deleted process.user from every OCI spec, so Faro ran as root like
+    # everything else. Creating the directory here is what the accident was
+    # standing in for, and it keeps Faro running as itself.
+    #
+    # DirectoryOrCreate leaves an existing directory alone, ownership included,
+    # so preparing it first is enough. The uid is the image's; if it ever
+    # changes, ci-verify-faro.sh fails on an observer that captures nothing
+    # rather than letting it pass silently again.
+    install -d -o 65532 -g 65532 -m 0755 /var/lib/kinc/faro-events
+    log "📁 Faro events directory ready, owned by uid 65532 (the image's faro user)"
+
     if [[ -f "/etc/kinc/faro/faro-bootstrap.yaml" ]]; then
         # Extract Faro image name from manifest using yq (proper YAML parsing)
         FARO_IMAGE=$(yq eval '.spec.containers[0].image' /etc/kinc/faro/faro-bootstrap.yaml)
