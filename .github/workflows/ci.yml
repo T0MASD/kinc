@@ -23,6 +23,11 @@ jobs:
         run: ./tools/ci-prepare-host.sh
         shell: bash
 
+      # A repo-wide lint, so it runs once and needs nothing deployed.
+      - name: Check for deprecated Kubernetes APIs
+        run: ./tools/ci-verify-no-deprecated-apis.sh
+        shell: bash
+
       - name: Build kinc image
         run: |
           echo "=== Building kinc image with multi-service architecture ==="
