@@ -36,10 +36,28 @@ RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
     && dnf clean all
 
 # Configure systemd (separate layer for better caching)
+# The kernel API filesystems a rootless container is not allowed to mount.
+#
+# dev-hugepages and sys-fs-fuse-connections were already masked. The three
+# sys-kernel mounts were not, so systemd tried them on every node, was refused,
+# and left them failed for the life of the container:
+#
+#   mount: /sys/kernel/tracing: permission denied.
+#
+# Three permanently failed units is a baseline, and a baseline is not a signal:
+# a fourth failure - a real one - sits in that list looking like the others.
+# Masked, `systemctl --failed` is empty on a healthy node, so anything in it
+# means something.
+#
+# Nothing here reads debugfs, configfs or tracefs: Antrea talks to OVS over
+# OVSDB and netlink, and the mounts fail today with no effect but the noise.
 RUN echo "Configuring systemd..." \
     && systemctl mask \
         dev-hugepages.mount \
         sys-fs-fuse-connections.mount \
+        sys-kernel-config.mount \
+        sys-kernel-debug.mount \
+        sys-kernel-tracing.mount \
         systemd-update-utmp.service \
         systemd-tmpfiles-setup.service \
         console-getty.service \
