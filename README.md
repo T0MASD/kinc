@@ -649,10 +649,14 @@ THE SOFTWARE IS AI GENERATED AND PROVIDED “AS IS”, WITHOUT CLAIM OF COPYRIGH
 
 ## Credits
 
+- **Fedora:** The base image, and every package kinc runs — kubernetes, kubeadm,
+  cri-tools and cri-o all come from Fedora's own builds rather than upstream
+  binaries, which is what makes the image a normal `dnf install`
 - **KIND (Kubernetes IN Docker):** Inspiration
 - **Antrea:** Cluster networking
-- **kubeadm:** v1.37.0
-- **CRI-O:** v1.37.1
+- **kubeadm:** Cluster bootstrap
+- **CRI-O:** Container runtime
 - **Podman:** Rootless containers
 - **systemd:** Service management
+- **local-path-provisioner:** Dynamic PersistentVolumes
 
