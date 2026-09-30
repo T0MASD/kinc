@@ -30,19 +30,11 @@ jobs:
         run: |
           echo "=== Setting up build environment ==="
           
-          # Enable IP forwarding for container builds
-          echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-          
-          # Set inotify limits for cluster testing
-          echo 524288 | sudo tee /proc/sys/fs/inotify/max_user_watches > /dev/null
-          echo 2048 | sudo tee /proc/sys/fs/inotify/max_user_instances > /dev/null
-          
-          # Set kernel keyring limits for cluster testing
-          echo 1000 | sudo tee /proc/sys/kernel/keys/maxkeys > /dev/null
-          echo 25000 | sudo tee /proc/sys/kernel/keys/maxbytes > /dev/null
-          
-          # Check Podman version
-          podman --version
+          # The same host preparation a PR run gets, from the same script.
+          # This carried its own inline subset of it until a release failed on
+          # the difference: it never loaded openvswitch and geneve, so every
+          # release since Antrea landed would have died in the deploy below.
+          ./tools/ci-prepare-host.sh
           
           # Determine tag
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -126,96 +118,77 @@ jobs:
           # Show image info
           podman images | grep kinc
 
+      # A release is verified the way a pull request is, by the same scripts,
+      # and then some. It used to be verified less: eighty-eight lines of
+      # inline shell that deployed a single node, waited for the marker and
+      # listed pods, running none of the gates. A release that is tested more
+      # weakly than the branch it came from is the wrong way round.
+      #
+      # Two nodes, because that is where the interesting faults are - a shared
+      # image store between two CRI-O daemons cannot happen on one node, and
+      # geneve is never exercised.
       - name: Test built image
         run: |
-          echo "=== Testing built image using kinc tools ==="
-          
+          set -euo pipefail
           IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
-          LOCAL_TEST_TAG="localhost/kinc/node:v${{ env.K8S_VERSION }}"
-          
-          # Basic image inspection
-          echo "Image details:"
+
+          echo "=== Image labels ==="
           podman inspect "$IMAGE_TAG" --format '{{json .Config.Labels}}' | jq .
-          
-          # Test the locally built image using kinc tools
-          echo "Testing locally built image with deployment..."
-          
-          export CLUSTER_NAME="test"
+
+          export CLUSTER_NAME=test
+          export KINC_IMAGE="localhost/kinc/node:v${{ env.K8S_VERSION }}"
           export KINC_ENABLE_FARO=true
-          export KINC_IMAGE="$LOCAL_TEST_TAG"
-          
-          echo "Using image for testing: $KINC_IMAGE"
-          
-          # Deploy cluster
-          echo "Deploying test cluster..."
+          export KINC_WORKERS=1
+          KINC_AUDIT_RESOURCES="$(./tools/faro-audit-resources.sh)"
+          export KINC_AUDIT_RESOURCES
+
+          echo "=== Deploying a two-node cluster on the built image ==="
           ./tools/deploy.sh
-          
-          # Wait for initialization (already done by deploy.sh, but verify)
-          echo "Waiting for cluster initialization..."
-          max_wait=30
-          waited=0
-          while [ $waited -lt $max_wait ]; do
-            if podman exec kinc-test-control-plane test -f /var/lib/kinc-initialized 2>/dev/null; then
-              echo "✅ Cluster initialized (${waited}s)"
-              break
-            fi
-            if [ $waited -ge $max_wait ]; then
-              echo "❌ Cluster initialization timeout"
-              exit 1
-            fi
-            sleep 2
-            waited=$((waited + 2))
-          done
-          
-          # Extract kubeconfig
-          echo "Extracting kubeconfig..."
+
           mkdir -p ~/.kube
           podman cp kinc-test-control-plane:/etc/kubernetes/admin.conf ~/.kube/kinc-test-config
-          
-          # Get cluster port
-          cluster_port=$(podman inspect kinc-test-control-plane --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}}{{end}}{{end}}' 2>/dev/null)
-          echo "Cluster port: $cluster_port"
-          
-          # Update kubeconfig with correct server address
-          sed -i "s|server: https://.*:6443|server: https://127.0.0.1:$cluster_port|g" ~/.kube/kinc-test-config
-          
-          # Verify cluster is functional
+          port=$(podman inspect kinc-test-control-plane \
+                 --format '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{.HostPort}}{{end}}{{end}}')
+          sed -i "s|server: https://.*:6443|server: https://127.0.0.1:${port}|g" ~/.kube/kinc-test-config
           export KUBECONFIG=~/.kube/kinc-test-config
-          kubectl get nodes
-          kubectl get pods -A
-          
-          echo "✅ kinc image validation passed - deployment successful!"
-          
-          # Extract Faro events
-          echo ""
-          echo "=== Extracting Faro Events ==="
-          
-          # Extract directly from data volume (no podman exec needed)
-          FARO_PATH="$HOME/.local/share/containers/storage/volumes/kinc-test-var-data/_data/lib/kinc/faro-events/logs"
-          
-          if [ -d "$FARO_PATH" ] && [ -n "$(ls -A $FARO_PATH/*.json 2>/dev/null)" ]; then
-            echo "✅ Faro events found in data volume"
-            
-            mkdir -p artifacts/faro
-            
-            # Copy events from volume
-            cp $FARO_PATH/*.json artifacts/faro/ 2>/dev/null || true
-            cp $FARO_PATH/*.log artifacts/faro/ 2>/dev/null || true
-            
-            # Count events
-            EVENT_COUNT=$(cat artifacts/faro/*.json 2>/dev/null | wc -l)
-            echo "✅ Captured $EVENT_COUNT events"
-            
-            # Show summary
-            echo ""
-            echo "Event Summary:"
-            cat artifacts/faro/*.json | jq -r '.gvr' | sort | uniq -c | sort -rn | head -10
-          else
-            echo "⚠️  Faro events not found - skipping extraction"
-          fi
-          
-          # Cleanup
-          CLUSTER_NAME=test ./tools/cleanup.sh || true
+
+          ./tools/ci-verify-init.sh test
+
+          kubectl apply -f runtime/manifests/test-workload.yaml
+          kubectl apply -f runtime/manifests/test-workload-crossnode.yaml
+          ./tools/ci-verify-crossnode.sh kinc-test-control-plane kinc-test-w1
+
+          ./tools/ci-verify-audit.sh test /pods /configmaps apps/deployments
+        shell: bash
+
+      # The one check a pull request cannot make. Judging whether a component
+      # is *still* logging errors needs it to outlive its startup by about two
+      # of whatever period you mean to catch; a PR cluster lives ~100 seconds
+      # and cannot answer that. A release can wait, and this is the place the
+      # rhythm analysis earns its cost.
+      - name: Soak, then judge the logs
+        run: |
+          set -euo pipefail
+          echo "=== Letting the cluster run so its record can be concluded from ==="
+          sleep 300
+          ./tools/ci-collect-diagnostics.sh test
+          ./tools/ci-collect-audit.sh test
+          ./tools/ci-collect-faro.sh test
+        shell: bash
+
+      - name: Tear down before parsing
+        run: CLUSTER_NAME=test ./tools/cleanup.sh
+        shell: bash
+
+      - name: Verify the finished record
+        run: |
+          set -euo pipefail
+          KINC_LOG_CAPTURE=artifacts/diagnostics/test/podlogs ./tools/ci-verify-component-logs.sh
+          ./tools/ci-verify-denials.sh test
+          mkdir -p artifacts/summary
+          KINC_LOG_CAPTURE=artifacts/diagnostics/test/podlogs ./tools/ci-summarize-run.sh test \
+            | tee "artifacts/summary/test.md" | tee -a "$GITHUB_STEP_SUMMARY"
+        shell: bash
 
       - name: Upload Faro events
         if: always()
