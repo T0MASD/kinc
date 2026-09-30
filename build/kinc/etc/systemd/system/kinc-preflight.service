@@ -17,7 +17,7 @@ Restart=no
 # An allowlist, not a pass-through: systemd gives a service a clean environment,
 # so a variable set on the container reaches PID 1 and stops there unless it is
 # named here. A variable missing from this line is silently empty in the script.
-PassEnvironment=KINC_ENABLE_FARO KINC_AUDIT_RESOURCES
+PassEnvironment=KINC_ENABLE_FARO KINC_AUDIT_RESOURCES KINC_NODE_MEMORY KINC_NODE_CPUS
 
 # Run preflight checks and setup
 ExecStart=/etc/kinc/scripts/kinc-preflight.sh
