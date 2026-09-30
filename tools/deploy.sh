@@ -288,6 +288,85 @@ fi
 
 # How many workers to join to this cluster. 0 keeps the single-node shape.
 KINC_WORKERS="${KINC_WORKERS:-0}"
+
+# What each node may use, and what the cluster may use in total.
+#
+# Unset means unlimited, which is what kinc has always done and stays the
+# default: on a workstation the host is also doing other things, and a limit
+# guessed on the user's behalf is worse than none.
+#
+# Set, they are systemd resource control on the node's own unit. podman nests
+# the container's payload cgroup under it, so the limit covers the kubelet,
+# CRI-O and every pod scheduled onto that node - not one process inside it.
+#
+#   KINC_NODE_MEMORY=2G      MemoryMax per node
+#   KINC_NODE_CPUS=1         CPUQuota per node, in cores
+#   KINC_CLUSTER_MEMORY=4G   MemoryMax across the whole cluster
+#   KINC_CLUSTER_CPUS=2      CPUQuota across the whole cluster
+#
+# A node reports capacity from /proc, which inside a container is the host's,
+# so a limit alone would leave the scheduler placing work the cgroup then
+# refuses to run. KINC_NODE_MEMORY and KINC_NODE_CPUS are therefore passed into
+# the node as well, where kinc-preflight turns them into systemReserved so that
+# allocatable matches what the node may actually have.
+NODE_LIMITS=""
+if [ -n "${KINC_NODE_MEMORY:-}" ]; then
+    # MemoryHigh is the limit; MemoryMax is a backstop above it.
+    #
+    # MemoryHigh throttles and reclaims, MemoryMax kills. Setting only the kill
+    # means a node that drifts over its budget loses a process rather than
+    # slowing down, and the kernel picks which - inside a node the control
+    # plane sits at the inherited oom_score_adj floor, so it survives ordinary
+    # pods, but nothing about that is graceful. Throttling first gives the
+    # kubelet and the workload a chance to give memory back.
+    #
+    # The backstop is 10% above, so the kill is a genuine last resort rather
+    # than the first thing that happens at the limit.
+    NODE_LIMITS="MemoryHigh=${KINC_NODE_MEMORY}"
+    _max=$(numfmt --from=iec "${KINC_NODE_MEMORY%i}" 2>/dev/null) \
+        && NODE_LIMITS="${NODE_LIMITS}\nMemoryMax=$(( _max * 110 / 100 ))"
+fi
+if [ -n "${KINC_NODE_CPUS:-}" ]; then
+    quota=$(awk -v c="${KINC_NODE_CPUS}" 'BEGIN { printf "%d", c * 100 }')
+    NODE_LIMITS="${NODE_LIMITS:+${NODE_LIMITS}\n}CPUQuota=${quota}%"
+fi
+
+CLUSTER_LIMITS=""
+if [ -n "${KINC_CLUSTER_MEMORY:-}" ]; then
+    CLUSTER_LIMITS="MemoryHigh=${KINC_CLUSTER_MEMORY}"
+    _max=$(numfmt --from=iec "${KINC_CLUSTER_MEMORY%i}" 2>/dev/null) \
+        && CLUSTER_LIMITS="${CLUSTER_LIMITS}\nMemoryMax=$(( _max * 110 / 100 ))"
+fi
+
+# A cluster budget below the sum of its nodes' is a contradiction, not a policy.
+#
+# Both are accepted and neither is wrong on its own, so nothing would notice:
+# the nodes would start, each believing it may have its share, and contend
+# inside a slice that cannot give it to them. Said here rather than discovered
+# under load.
+if [ -n "${KINC_CLUSTER_MEMORY:-}" ] && [ -n "${KINC_NODE_MEMORY:-}" ]; then
+    _c=$(numfmt --from=iec "${KINC_CLUSTER_MEMORY%i}")
+    _n=$(numfmt --from=iec "${KINC_NODE_MEMORY%i}")
+    _nodes=$(( KINC_WORKERS + 1 ))
+    if [ "$_c" -lt $(( _n * _nodes )) ]; then
+        echo "❌ KINC_CLUSTER_MEMORY=${KINC_CLUSTER_MEMORY} is below ${_nodes} nodes x KINC_NODE_MEMORY=${KINC_NODE_MEMORY}"
+        echo "   The nodes would contend inside a slice too small to hold them."
+        exit 1
+    fi
+fi
+if [ -n "${KINC_CLUSTER_CPUS:-}" ] && [ -n "${KINC_NODE_CPUS:-}" ]; then
+    _nodes=$(( KINC_WORKERS + 1 ))
+    if awk -v c="${KINC_CLUSTER_CPUS}" -v n="${KINC_NODE_CPUS}" -v k="$_nodes" \
+         'BEGIN { exit !(c < n * k) }'; then
+        echo "❌ KINC_CLUSTER_CPUS=${KINC_CLUSTER_CPUS} is below ${_nodes} nodes x KINC_NODE_CPUS=${KINC_NODE_CPUS}"
+        exit 1
+    fi
+fi
+if [ -n "${KINC_CLUSTER_CPUS:-}" ]; then
+    quota=$(awk -v c="${KINC_CLUSTER_CPUS}" 'BEGIN { printf "%d", c * 100 }')
+    CLUSTER_LIMITS="${CLUSTER_LIMITS:+${CLUSTER_LIMITS}\n}CPUQuota=${quota}%"
+fi
+CLUSTER_SLICE="kinc-${CLUSTER_NAME}.slice"
 CONTROL_PLANE_NAME="kinc-${CLUSTER_NAME}-control-plane"
 CONTROL_PLANE_ENDPOINT="${CONTROL_PLANE_NAME}:6443"
 NETWORK_NAME="kinc-${CLUSTER_NAME}"
@@ -383,6 +462,29 @@ sed "s/VolumeName=kinc-config/VolumeName=kinc-${CLUSTER_NAME}-config/g" \
 sed "s/VolumeName=kinc-storage/VolumeName=${CLUSTER_STORAGE}/g" \
     runtime/quadlet/kinc-storage.volume > ~/.config/containers/systemd/${CLUSTER_STORAGE}.volume
 
+# The node's share, passed in as well as enforced.
+#
+# The cgroup bounds what the node may use; this is how the kubelet learns the
+# same number, because a container cannot read a limit set on its parent. Both
+# halves are needed: without the cgroup nothing is enforced, and without this
+# the scheduler places work against the host's totals that the cgroup refuses.
+NODE_ENV=""
+[ -n "${KINC_NODE_MEMORY:-}" ] && NODE_ENV="${NODE_ENV}Environment=KINC_NODE_MEMORY=${KINC_NODE_MEMORY}\n"
+[ -n "${KINC_NODE_CPUS:-}" ]   && NODE_ENV="${NODE_ENV}Environment=KINC_NODE_CPUS=${KINC_NODE_CPUS}\n"
+
+# The cluster's cgroup. Written whether or not it carries limits, so every
+# node of a cluster is grouped under one slice and `systemd-cgls` shows a
+# cluster as a cluster.
+mkdir -p ~/.config/systemd/user
+sed "s|CLUSTER_LIMITS_PLACEHOLDER|${CLUSTER_LIMITS}|" \
+    runtime/quadlet/kinc-cluster.slice > ~/.config/systemd/user/${CLUSTER_SLICE}
+if [ -n "$CLUSTER_LIMITS" ]; then
+    echo "🧮 Cluster limits: $(printf '%b' "$CLUSTER_LIMITS" | tr '\n' ' ')"
+fi
+if [ -n "$NODE_LIMITS" ]; then
+    echo "🧮 Per-node limits: $(printf '%b' "$NODE_LIMITS" | tr '\n' ' ')"
+fi
+
 # What kubeadm wrote about this node, so a restart comes back as the same node.
 sed "s/VolumeName=kinc-etc-kubernetes/VolumeName=kinc-${CLUSTER_NAME}-etc-kubernetes/g" \
     runtime/quadlet/kinc-etc-kubernetes.volume \
@@ -402,8 +504,15 @@ sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-co
     -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${CONTROL_PLANE_NAME}")|g" \
     -e "s|CONTROL_PLANE_IP_PLACEHOLDER|${CONTROL_PLANE_IP}|g" \
     -e "s/Volume=kinc-etc-kubernetes:/Volume=kinc-${CLUSTER_NAME}-etc-kubernetes:/g" \
+    -e "s|CLUSTER_SLICE_PLACEHOLDER|${CLUSTER_SLICE}|g" \
+    -e "s|NODE_LIMITS_PLACEHOLDER|${NODE_LIMITS}|g" \
     -e "s/kinc-etc-kubernetes-volume.service/kinc-${CLUSTER_NAME}-etc-kubernetes-volume.service/g" \
     runtime/quadlet/kinc-control-plane.container > ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+
+if [ -n "$NODE_ENV" ]; then
+    sed -i "/^Environment=KUBECONFIG/a ${NODE_ENV%\\n}" \
+        ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+fi
 
 echo "✅ Quadlet files installed"
 
@@ -730,8 +839,14 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
             -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${WORKER_CONTAINER}")|g" \
             -e "s|WORKER_IP_PLACEHOLDER|$(get_cluster_node_ip "$CLUSTER_PORT" "$i")|g" \
             -e "s/Volume=kinc-etc-kubernetes:/Volume=${WORKER_CONTAINER}-etc-kubernetes:/g" \
+            -e "s|CLUSTER_SLICE_PLACEHOLDER|${CLUSTER_SLICE}|g" \
+            -e "s|NODE_LIMITS_PLACEHOLDER|${NODE_LIMITS}|g" \
             -e "s/kinc-etc-kubernetes-volume.service/${WORKER_CONTAINER}-etc-kubernetes-volume.service/g" \
             runtime/quadlet/kinc-worker.container > ~/.config/containers/systemd/${WORKER_CONTAINER}.container
+        if [ -n "$NODE_ENV" ]; then
+            sed -i "/^Environment=KUBECONFIG/a ${NODE_ENV%\\n}" \
+                ~/.config/containers/systemd/${WORKER_CONTAINER}.container
+        fi
 
         sed "s/VolumeName=kinc-var-data/VolumeName=${WORKER_CONTAINER}-var-data/g" \
             runtime/quadlet/kinc-var-data.volume > ~/.config/containers/systemd/${WORKER_CONTAINER}-var-data.volume
