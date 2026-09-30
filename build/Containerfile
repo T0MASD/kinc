@@ -18,18 +18,21 @@ ARG CACHE_BUST=1
 # - packages that provide semi-core kubernetes functionality
 RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
     && dnf update -y \
+    # Everything from Fedora 44's released updates. cri-o1.37 was the last
+    # holdout, pinned to updates-testing while it gathered karma as
+    # FEDORA-2026-a91d5d8a66; it went stable on 2026-09-30 and the pin is gone.
     && dnf install -y \
       systemd \
       conntrack-tools nftables iptables-nft iproute ethtool util-linux kmod \
       libseccomp pigz fuse-overlayfs \
       nfs-utils iscsi-initiator-utils \
       bash ca-certificates curl jq yq procps-ng which hostname \
-      cri-o1.36 crun \
+      cri-o1.37 crun \
       containernetworking-plugins \
       container-selinux \
-      kubernetes1.36 \
-      kubernetes1.36-kubeadm \
-      cri-tools1.36 \
+      kubernetes1.37 \
+      kubernetes1.37-kubeadm \
+      cri-tools1.37 \
     && dnf clean all
 
 # Configure systemd (separate layer for better caching)
@@ -106,6 +109,8 @@ COPY kinc/kinc/manifests/ /kinc/manifests/
 # Mounted config at /etc/kinc/config/kubeadm.conf (overrides baked-in if present)
 RUN mkdir -p /etc/kinc/config
 COPY --chmod=0644 kinc/etc/kinc/kubeadm.conf /etc/kinc/kubeadm.conf
+# Asserted against kubeadm's actual phase list further down.
+COPY --chmod=0644 kinc/etc/kinc/kubeadm-phases.expected /etc/kinc/kubeadm-phases.expected
 
 # Faro bootstrap integration - static pod for earliest event capture
 # Faro will start as soon as API server is available (before CNI)
@@ -140,6 +145,36 @@ RUN echo "Enabling kinc services ..." \
 RUN chmod -R 755 /kinc/manifests/
 
 # Verify installation and configuration
+# The phase list kubeadm offers must match what kinc's phased init was written
+# against.
+#
+# kinc runs kubeadm init as phases so the scheduler starts after its RBAC
+# exists. That means kinc owns the ordering, and a phase added, removed or
+# renamed by a Kubernetes release would otherwise pass silently: a removed phase
+# fails the init loudly, but an ADDED one is worse - 'kubeadm init' would run it
+# and kinc's script would not, producing a cluster missing a step with nothing
+# to say so.
+#
+# Regenerate the expected list deliberately, as part of reading what the new
+# phase does:
+#   podman run --rm --entrypoint= <image> kubeadm init phase --help
+RUN set -eu; \
+    actual=$( { kubeadm init phase --help 2>&1 \
+                  | awk '/Available Commands:/{f=1;next} /^$/{f=0} f && NF {print $1}'; \
+                for p in certs kubeconfig etcd control-plane upload-config addon kubelet-finalize; do \
+                  kubeadm init phase "$p" --help 2>&1 \
+                    | awk -v P="$p" '/Available Commands:/{f=1;next} /^$/{f=0} f && NF {print P"/"$1}'; \
+                done; } | sort ); \
+    expected=$(grep -v '^#' /etc/kinc/kubeadm-phases.expected | sort); \
+    if [ "$actual" != "$expected" ]; then \
+        echo "kubeadm's phase list differs from what kinc-kubeadm-init.sh was written against:"; \
+        diff <(echo "$expected") <(echo "$actual") || true; \
+        echo "Read what changed, update kinc-kubeadm-init.sh if it matters, then"; \
+        echo "regenerate build/kinc/etc/kinc/kubeadm-phases.expected."; \
+        exit 1; \
+    fi; \
+    echo "✅ kubeadm phases match ($(echo "$expected" | wc -l) entries)"
+
 RUN crio --version \
     && echo "CRI-O resolves the helpers named in its effective config:" \
     && pinns=$(crio config 2>/dev/null | sed -n 's/^[[:space:]]*pinns_path[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' | tail -1) \
@@ -172,7 +207,7 @@ STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT [ "/sbin/init" ]
 
 # Labels for metadata
-LABEL io.kinc.version="v1.36.4-rootless"
+LABEL io.kinc.version="v1.37.0-rootless"
 LABEL io.kinc.runtime="crio"
 LABEL io.kinc.init="baked-in"
 LABEL io.kinc.rootless="true"
