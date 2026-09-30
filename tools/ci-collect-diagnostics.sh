@@ -25,7 +25,7 @@ collect() {
   local kubeconfig="${HOME}/.kube/kinc-${cluster}-config"
 
   echo "=== ${cluster} ==="
-  mkdir -p "$out"/{cluster,podlogs,antrea,nodes}
+  mkdir -p "$out"/{cluster,componentlogs,antrea,nodes}
 
   # --- cluster state -------------------------------------------------------
   # A kubeconfig carries a client certificate, so it is written outside the
@@ -89,9 +89,14 @@ collect() {
     done
   } > "$out/nodes.tsv" 2>/dev/null
 
-  mkdir -p "$out/podlogs"
-  kinc_capture_pod_logs "$out/podlogs" "$cluster"
-  echo "  pod logs: $(ls "$out/podlogs" 2>/dev/null | wc -l) captured, ${KINC_UNREAD:-0} unreadable"
+  # Pods and nodes into one directory, because they are analysed together:
+  # the summary and the gate both read every file here as one component's log.
+  # A node's journal belongs in that set - a sandbox that was never created has
+  # no Pod log, and the kubelet's account of why is the only record of it.
+  mkdir -p "$out/componentlogs"
+  kinc_capture_pod_logs  "$out/componentlogs" "$cluster"
+  echo "  pod logs: $(ls "$out/componentlogs" 2>/dev/null | wc -l) captured, ${KINC_UNREAD:-0} unreadable"
+  kinc_capture_node_logs "$out/componentlogs" "$cluster"
 
   # --- Antrea's own view ---------------------------------------------------
   # The gates ask antctl these questions and then discard the answers, so a red

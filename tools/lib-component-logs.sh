@@ -134,6 +134,26 @@ kinc_class_lines() {
     }' "$1"
 }
 
+# Capture each node's kubelet and CRI-O journal into <dir>/node_<name>.
+#
+# A node's own units are where a fault lives that no Pod log can hold: a
+# sandbox that was never created has no Pod to log to, and the kubelet's
+# account of why is in the journal. Summarising pods alone described a cluster
+# by the components that managed to start and said nothing about the node
+# underneath them.
+#
+# short-iso, because everything downstream compares timestamps as ISO-8601
+# strings and journalctl's default ("Sep 30 09:55:11") is neither sortable nor
+# parseable by date(1) without a year. kinc_iso folds the "+00:00" it emits.
+kinc_capture_node_logs() {
+  local dir="$1" cluster="${2:-}" n
+  for n in $(kinc_nodes "$cluster"); do
+    podman exec "$n" journalctl --no-pager --boot -o short-iso \
+      -u kubelet -u crio > "${dir}/node_${n}" 2>/dev/null || true
+  done
+  kinc_mark_capture_end "$dir"
+}
+
 # The component's first log line as epoch seconds: when it started, as far as
 # its own record is concerned. A pod that started late is judged from when it
 # started, not from when the cluster did.

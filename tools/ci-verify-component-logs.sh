@@ -143,6 +143,21 @@ fi
 
 for f in "${CAP}"/*; do
   [ -s "$f" ] || continue
+
+  # Pods only. A capture also holds each node's kubelet and CRI-O journal,
+  # which the summary describes and this cannot judge: the kubelet logs at E
+  # level every time a connection to :10250 closes, and the gates themselves
+  # open those - ci-verify-crossnode and ci-verify-faro both exec into
+  # containers. Judged here, a node fails on
+  #
+  #   conn.go:353  x2, every 3s at widest, still going at +314s
+  #
+  # which is this suite's own footprint, arriving after startup by definition
+  # because the gates run after the cluster is up. The same reasoning is why
+  # kinc_capture_pod_logs reads files off the nodes instead of using
+  # `kubectl logs`.
+  case "$(basename "$f")" in node_*) continue ;; esac
+
   # Kubernetes names never contain an underscore, so it separates the parts of
   # the capture's filename unambiguously and reads back as ns/pod.
   # The component's own first line: a pod that started late is judged from when

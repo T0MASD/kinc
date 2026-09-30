@@ -91,7 +91,13 @@ if [ -n "$NODES_TSV" ] && [ -s "$NODES_TSV" ]; then
 fi
 
 # --- error classes -------------------------------------------------------
-[ "$OWN_CAP" -eq 1 ] && kinc_capture_pod_logs "$CAP" "$CLUSTER"
+# Pods and the nodes under them. A node's kubelet and CRI-O journal is where a
+# fault lives that no Pod log can hold: a sandbox that was never created has no
+# Pod to log to.
+if [ "$OWN_CAP" -eq 1 ]; then
+  kinc_capture_pod_logs  "$CAP" "$CLUSTER"
+  kinc_capture_node_logs "$CAP" "$CLUSTER"
+fi
 
 if ! NOW=$(kinc_record_end "$CAP"); then
   echo "_No readable capture for this cluster._"

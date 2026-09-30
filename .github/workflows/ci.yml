@@ -393,7 +393,7 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/podlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
         shell: bash
 
       # Separate from the diagnostics upload, which ran before teardown: the
@@ -544,7 +544,7 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/podlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
         shell: bash
 
       # Separate from the diagnostics upload, which ran before teardown: the
@@ -894,8 +894,8 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/podlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
-          KINC_LOG_CAPTURE=artifacts/diagnostics/cluster01/podlogs ./tools/ci-summarize-run.sh cluster01 | tee "artifacts/summary/cluster01.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
+          KINC_LOG_CAPTURE=artifacts/diagnostics/cluster01/componentlogs ./tools/ci-summarize-run.sh cluster01 | tee "artifacts/summary/cluster01.md" | tee -a "$GITHUB_STEP_SUMMARY"
         shell: bash
 
       # Separate from the diagnostics upload, which ran before teardown: the
