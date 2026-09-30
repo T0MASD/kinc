@@ -23,7 +23,8 @@
 # where NotFound would be the truth. A misconfigured component is denied the
 # same way and never stops. The difference is persistence, not presence.
 #
-#   still recurring when quiet <= 3 * median(gap), over distinct timestamps
+#   still recurring when quiet <= 3 * median(gap), over distinct timestamps,
+#   and only once there are enough of them for a median to mean anything
 #
 # No constant in it. Every fixed term tried here was wrong the same way: a 30s
 # grace called a simultaneous pair 28s old "recurring", because a widest gap of
@@ -85,8 +86,18 @@ for cluster in "$@"; do
     last=$(printf '%s\n' "$times" | tail -1)
     quiet=$(( end_epoch - last ))
 
-    if [ "$count" -le 1 ]; then
-      stopped="${stopped}${key}\t(once, ${quiet}s before the end)"$'\n'
+    # Two events give one interval, and one interval is an observation rather
+    # than a period. Extrapolating from it called the kubelet's Forbidden on a
+    # pod that had just been deleted - twice, 24 seconds apart, because two
+    # helper pods were deleted - "every 24s typically, still going at the end".
+    # The same shape caught ci-verify-component-logs.sh out, where a DaemonSet
+    # controller reacting to a worker join read as a recurring fault.
+    #
+    # Both are still listed, because two denials after the end are worth
+    # seeing; neither is failed on, because a period needs a repeat before it
+    # is one. A denial that really does persist produces a third and fails then.
+    if [ "$count" -le 2 ]; then
+      stopped="${stopped}${key}\t(x${count}, last ${quiet}s before the end)"$'\n'
       continue
     fi
 
