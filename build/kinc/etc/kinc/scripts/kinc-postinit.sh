@@ -24,7 +24,7 @@ export KUBECONFIG=/etc/kubernetes/admin.conf
 log "Waiting for node to register with API server..."
 timeout_counter=0
 max_timeout=60
-while ! kubectl get nodes 2>/dev/null | grep -q "Ready\|NotReady"; do
+while [ -z "$(kubectl get nodes -o name 2>/dev/null)" ]; do
     log "Waiting for node registration... (${timeout_counter}s/${max_timeout}s)"
     sleep 2
     timeout_counter=$((timeout_counter + 2))
@@ -65,35 +65,6 @@ if kubectl patch daemonset kube-proxy -n kube-system --type='json' -p='[{"op": "
 else
     log "❌ Failed to patch kube-proxy for rootless operation"
     exit 1
-fi
-
-# Wait for API server to be fully ready before installing any manifests
-log "Waiting for API server to be ready..."
-timeout_counter=0
-max_timeout=60
-while ! kubectl get --raw=/healthz >/dev/null 2>&1; do
-    log "Waiting for API server to respond... (${timeout_counter}s/${max_timeout}s)"
-    sleep 2
-    timeout_counter=$((timeout_counter + 2))
-    if [[ $timeout_counter -ge $max_timeout ]]; then
-        log "❌ API server failed to become ready within ${max_timeout} seconds"
-        exit 1
-    fi
-done
-
-# Additional check: ensure API server can handle requests properly
-log "Verifying API server functionality..."
-if kubectl get nodes >/dev/null 2>&1; then
-    log "✅ API server is ready and responsive"
-else
-    log "API server not fully ready, waiting additional 5 seconds..."
-    sleep 5
-    if kubectl get nodes >/dev/null 2>&1; then
-        log "✅ API server is now ready and responsive"
-    else
-        log "❌ API server functionality verification failed"
-        exit 1
-    fi
 fi
 
 # Install the CNI. Antrea is the cluster network: it reads each node's CIDR from
