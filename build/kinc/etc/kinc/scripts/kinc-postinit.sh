@@ -114,9 +114,22 @@ else
 fi
 
 # Wait for CNI to be ready before proceeding
-log "Waiting for CNI pods to be ready..."
+# Wait for the DaemonSet, not for pods matching a label.
+#
+# `kubectl wait --for=condition=Ready pods -l app=antrea` returns an error the
+# moment it finds nothing matching, and nothing matches in the instant after the
+# manifest is applied - the pods do not exist yet. So it returned in 39
+# milliseconds, logged "not ready yet, but continuing", and everything after it
+# ran against a cluster with no CNI. It never waited, on any run.
+#
+# `rollout status` waits for the DaemonSet to become available, which means its
+# pods exist, are scheduled and are ready - and since the agent writes
+# /etc/cni/net.d/10-antrea.conflist from an init container, an available
+# DaemonSet is also the point at which the node can actually give a pod an
+# address.
+log "Waiting for the CNI DaemonSet to become available..."
 wait_start=$(date +%s)
-if kubectl wait --for=condition=Ready pods -l app=antrea -n kube-system --timeout=180s; then
+if kubectl rollout status daemonset/antrea-agent -n kube-system --timeout=180s; then
     wait_end=$(date +%s)
     wait_elapsed=$((wait_end - wait_start))
     log "✅ CNI pods are ready (waited ${wait_elapsed}s)"
