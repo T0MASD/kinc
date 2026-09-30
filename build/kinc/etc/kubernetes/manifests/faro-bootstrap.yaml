@@ -18,7 +18,16 @@ spec:
   
   containers:
   - name: faro
-    image: ghcr.io/t0masd/faro-operator:latest
+    # Pinned by digest, because this is a static pod.
+    #
+    # A tag is resolved at pull time, so with :latest a node that restarts and
+    # re-pulls can come back running a different Faro than the one the cluster
+    # was built and tested with - and a static pod has no rollout, no history
+    # and nothing that records which image it got. kinc-preflight pre-pulls
+    # whatever this line names, so pinning here pins both.
+    #
+    # sha256:6ca4b95c is faro-operator:latest as of 2026-09-25.
+    image: ghcr.io/t0masd/faro-operator@sha256:6ca4b95ce496981fa50d8e6a20b5b8a3366381d61f525626c879f86901518f74
     imagePullPolicy: IfNotPresent
 
     # Wait for API server before starting Faro
