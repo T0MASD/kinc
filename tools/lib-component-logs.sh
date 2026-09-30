@@ -72,12 +72,6 @@ kinc_cluster_age() {
 kinc_capture_pod_logs() {
   local dir="$1" cluster="${2:-}" n pods d ns rest pod
   KINC_UNREAD=0
-  # When observation ended. Everything afterwards measures "how long has this
-  # been quiet" against this, so it has to be recorded while it is known - after
-  # teardown there is no way to recover it, and the newest surviving log line is
-  # not it: if every component fell silent a minute before capture, that minute
-  # is real quiet and inferring the end from the log would throw it away.
-  date +%s > "${dir}/.captured-at"
   for n in $(kinc_nodes "$cluster"); do
     pods=$(podman exec "$n" sh -c 'ls /var/log/pods 2>/dev/null') || pods=""
     for d in $pods; do
@@ -95,7 +89,23 @@ kinc_capture_pod_logs() {
       fi
     done
   done
+  kinc_mark_capture_end "$dir"
 }
+
+# When observation ended, recorded while it is known.
+#
+# Everything afterwards measures "how long has this been quiet" against this.
+# After teardown there is no way to recover it, and the newest surviving log
+# line is not it: if every component fell silent a minute before capture, that
+# minute is real quiet and inferring the end from the log would throw it away.
+#
+# Written after a capture finishes, not before it starts. Before, it names a
+# moment earlier than lines the same capture goes on to read, and a class whose
+# last occurrence is after the record supposedly ended gets a negative quiet
+# time - which compares less than every threshold and reads as ONGOING. Every
+# capture function calls this last, so the marker is whichever finished most
+# recently.
+kinc_mark_capture_end() { date +%s > "${1}/.captured-at"; }
 
 # Every error line in <file> as "<timestamp>\t<source site>".
 #
