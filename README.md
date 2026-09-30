@@ -187,13 +187,14 @@ Container Start
 │ - Config validation (yq)            │
 │ - CRI-O readiness check             │
 │ - kubeadm.conf templating           │
+│ - Control-plane images pre-pulled   │
 └─────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────┐
 │ kubeadm-init.service (oneshot)      │
-│ - kubeadm init (isolated)           │
-│ - No kubectl waits                  │
-│ - Clean systemd logs                │
+│ - kubeadm init phase by phase       │
+│ - Scheduler started last            │
+│ - Logs to a file, not the journal   │
 └─────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────┐
@@ -206,6 +207,18 @@ Container Start
 Initialization Complete
 Marker: /var/lib/kinc-initialized
 ```
+
+Not a plain `kubeadm init`. kinc drives the phases itself so it can hold the
+scheduler back until `system:kube-scheduler`'s ClusterRoleBindings exist —
+started with everything else, the scheduler comes up before kubeadm has created
+them and is denied 52 times before they appear. The phase list is asserted at
+build time against `kubeadm-phases.expected`, so a kubeadm release that adds or
+removes a phase fails the build rather than producing a cluster that came up
+subtly wrong.
+
+Workers take a different path: `kubeadm-init.service` is replaced by a join
+drop-in, so they run `kubeadm join` against the CA minted before any node
+started.
 
 ### Port and Network Allocation
 
