@@ -1062,6 +1062,9 @@ jobs:
           mkdir -p ~/.kube
           podman exec kinc-default-control-plane cat /etc/kubernetes/admin.conf \
             | sed "s|server: https://.*:6443|server: https://127.0.0.1:6443|" > ~/.kube/config
+          # Both: test-workload.yaml carries the kinc-validation Namespace that
+          # the cross-node manifest's pods are created in.
+          kubectl apply -f runtime/manifests/test-workload.yaml
           kubectl apply -f runtime/manifests/test-workload-crossnode.yaml
           ./tools/ci-verify-crossnode.sh kinc-default-control-plane kinc-default-w1
         shell: bash
