@@ -57,10 +57,16 @@ jobs:
           echo "KINC_PATCH=$KINC_PATCH" >> $GITHUB_ENV
           echo "kinc patch version: $KINC_PATCH"
           
-          # Extract version components for latest tags
-          # v1_33_5-0 -> v1_33_5 (patch level), v1_33 (minor level)
+          # Extract version components for the floating tags:
+          # v1.37.0-1 -> v1.37.0 (patch level), v1.37 (minor level)
+          #
+          # Split on both separators. Tags were once v1_33_5-0 and are now
+          # v1.37.0-0, and cutting on '_' alone returns a dotted version whole -
+          # so the minor tag came out as v1.37.0-latest, the same name as the
+          # patch tag, and v1.37-latest was never published at all. Cutting on
+          # each in turn is correct for either format.
           K8S_VERSION_UNDERSCORED=$(echo "$TAG" | sed 's/^v//' | cut -d'-' -f1)
-          K8S_MINOR_VERSION=$(echo "$K8S_VERSION_UNDERSCORED" | cut -d'_' -f1-2)
+          K8S_MINOR_VERSION=$(echo "$K8S_VERSION_UNDERSCORED" | cut -d'_' -f1-2 | cut -d'.' -f1-2)
           echo "K8S_VERSION_UNDERSCORED=$K8S_VERSION_UNDERSCORED" >> $GITHUB_ENV
           echo "K8S_MINOR_VERSION=$K8S_MINOR_VERSION" >> $GITHUB_ENV
           echo "Patch-level tag: v${K8S_VERSION_UNDERSCORED}"
