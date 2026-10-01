@@ -1112,17 +1112,59 @@ jobs:
 
   # Clusters that already exist, which no other job covers.
   #
-  # Separate from the matrix because these are genuinely sequential: each builds
-  # a cluster and then does something to that same cluster.
+  # Each leg builds a cluster and then does something to that same cluster, so
+  # each is internally sequential - but they are independent of one another, and
+  # running them in one job made it the suite's critical path at 8m once the
+  # limit shapes were parallelised. A matrix costs three image builds to buy
+  # back half the wall clock.
   #
-  # Both restart a node, and the capture is taken afterwards, so the components
-  # in it are as old as the restart rather than as old as the cluster. The
-  # analysis is still worth running: the component-log gate reports a run where
+  # All three restart a node, and the capture is taken afterwards, so the
+  # components in it are as old as the restart rather than as old as the
+  # cluster. The analysis still runs: the component-log gate reports a run where
   # nothing was judgeable as a failure rather than a pass, which is what stops
   # it going quietly inert.
   test-resumed-clusters:
-    name: Test (resumed clusters)
+    name: Test (resumed, ${{ matrix.scenario }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # A limit given to a cluster that already exists. The provisioning
+          # that makes a node advertise honestly used to be gated on a marker on
+          # a volume, so a resumed cluster kept whatever it was born with.
+          - scenario: adopts-a-new-limit
+            gate: ./tools/ci-verify-resumed-adoption.sh default
+
+          # A cluster created by the previous release, resumed onto this build.
+          #
+          # Created by the old image, not merely run on it: a sibling derived
+          # from this tree has its state written by current provisioning however
+          # the restart goes, and the bugs worth catching are the opposite -
+          # an events directory created root-owned before the install -d line
+          # existed, a kubeconfig never staged because init predated the unit
+          # that stages it, reservations absent because nothing rendered them.
+          # Deploying current and downgrading would prove nothing.
+          #
+          # Pinned by digest. Version tags are written once and do not move, but
+          # the pin costs nothing and removes the assumption. It ageing is a
+          # feature: a more distant release means more accumulated difference,
+          # so there is no hurry to bump it.
+          - scenario: upgrade-from-previous-release
+            setup: |
+              PREV=ghcr.io/t0masd/kinc@sha256:a68f8f88d08ac566de1712cec94c0a417ad3cb92e0b462f9a8322ec991df101c
+              echo "::notice::upgrading from ${PREV} (v1.37.0-3)"
+              KINC_IMAGE="$PREV" KINC_WORKERS=0 KINC_NODE_MEMORY=5G KINC_ENABLE_FARO=true ./tools/deploy.sh
+            gate: ./tools/ci-verify-image-change-restart.sh default localhost/kinc/node:v1.37.0
+
+          # The mechanism on its own: a sibling image differing only in a value a
+          # provisioning step renders, so what the assertion sees can come from
+          # nothing else.
+          - scenario: new-image-configuration
+            setup: |
+              export KINC_WORKERS=0 KINC_NODE_MEMORY=5G
+              ./tools/deploy.sh
+            gate: ./tools/ci-verify-image-change-restart.sh default
 
     steps:
       - name: Checkout
@@ -1136,45 +1178,12 @@ jobs:
         run: ./tools/build.sh
         shell: bash
 
-      - name: An existing cluster adopts a limit it is given
-        run: ./tools/ci-verify-resumed-adoption.sh default
-        shell: bash
-
-      # A cluster created by the previous release, resumed onto this build.
-      #
-      # The gate above restarts onto an image derived from this tree, so the
-      # cluster's state was written by current provisioning however the restart
-      # goes. That proves a new image's configuration takes effect and nothing
-      # about history - and every bug it was built for lives in state an older
-      # release left behind: an events directory created root-owned before the
-      # install -d line existed, a kubeconfig never staged because init predated
-      # the unit that stages it, reservations absent because the cluster was
-      # built before anything rendered them.
-      #
-      # So the cluster here is *created by* the old image, not merely run on it.
-      # Deploying current and downgrading would prove nothing.
-      #
-      # Pinned by digest rather than by tag. Version tags are written once and
-      # do not move, but the pin costs nothing and removes the assumption. It
-      # ageing is a feature: upgrading from a more distant release exercises
-      # more accumulated difference, not less, so there is no hurry to bump it.
-      - name: A cluster built by the previous release upgrades onto this build
+      - name: ${{ matrix.scenario }}
         run: |
           set -euo pipefail
-          PREV=ghcr.io/t0masd/kinc@sha256:a68f8f88d08ac566de1712cec94c0a417ad3cb92e0b462f9a8322ec991df101c
-          echo "::notice::upgrading from ${PREV} (v1.37.0-3)"
           ./tools/cleanup.sh default || true
-          KINC_IMAGE="$PREV" KINC_WORKERS=0 KINC_NODE_MEMORY=5G KINC_ENABLE_FARO=true ./tools/deploy.sh
-          ./tools/ci-verify-image-change-restart.sh default localhost/kinc/node:v1.37.0
-        shell: bash
-
-      - name: A node restarted onto a new image adopts its configuration
-        run: |
-          set -euo pipefail
-          export KINC_WORKERS=0 KINC_NODE_MEMORY=5G
-          ./tools/cleanup.sh default || true
-          ./tools/deploy.sh
-          ./tools/ci-verify-image-change-restart.sh default
+          ${{ matrix.setup }}
+          ${{ matrix.gate }}
         shell: bash
 
       - name: Collect diagnostics
@@ -1186,7 +1195,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: kinc-diagnostics-resumed-${{ github.run_number }}
+          name: kinc-diagnostics-resumed-${{ matrix.scenario }}-${{ github.run_number }}
           path: artifacts/diagnostics/
           retention-days: 30
 
@@ -1204,6 +1213,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: run-summary-resumed-${{ github.run_number }}
+          name: run-summary-resumed-${{ matrix.scenario }}-${{ github.run_number }}
           path: artifacts/summary/
           if-no-files-found: warn
