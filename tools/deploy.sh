@@ -514,8 +514,22 @@ sed "s|CLUSTER_LIMITS_PLACEHOLDER|${CLUSTER_LIMITS}|" \
 if [ -n "$CLUSTER_LIMITS" ]; then
     echo "🧮 Cluster limits: $(printf '%b' "$CLUSTER_LIMITS" | tr '\n' ' ')"
 fi
-if [ -n "$NODE_LIMITS" ]; then
-    echo "🧮 Per-node limits: $(printf '%b' "$NODE_LIMITS" | tr '\n' ' ')"
+# Per role, and both of them, because they can differ.
+#
+# This printed NODE_LIMITS alone, which is the control plane's. On a weighted
+# split that reported one role's limits as though they applied to every node and
+# never mentioned the worker's at all - so a wrong worker figure had nothing to
+# survive on its way past. A success path that does not say what it did is how
+# every silent no-op in this repo stayed silent.
+if [ -n "$NODE_LIMITS" ] || [ -n "$WORKER_NODE_LIMITS" ]; then
+    if [ "$NODE_LIMITS" = "$WORKER_NODE_LIMITS" ]; then
+        echo "🧮 Per-node limits: $(printf '%b' "$NODE_LIMITS" | tr '\n' ' ')"
+    else
+        echo "🧮 Control plane:   $(printf '%b' "${NODE_LIMITS:-<unlimited>}" | tr '\n' ' ')"
+        if [ "${KINC_WORKERS:-0}" -gt 0 ]; then
+            echo "🧮 Each worker:     $(printf '%b' "${WORKER_NODE_LIMITS:-<unlimited>}" | tr '\n' ' ')"
+        fi
+    fi
 fi
 
 # What kubeadm wrote about this node, so a restart comes back as the same node.
