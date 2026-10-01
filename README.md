@@ -473,11 +473,28 @@ Unset, the API server starts with no audit flags at all and nothing is written.
 
 ### Faro Event Capture (Optional)
 
-**Faro** is a Kubernetes resource monitoring library that captures real-time events during cluster bootstrap. It's useful for:
+**Faro** is a Kubernetes resource monitoring library. kinc runs it as a **static
+pod**, which is a bootstrap instrument: the kubelet starts it from a manifest on
+disk, so it is watching from the moment the API server answers — before the
+scheduler exists, before RBAC bootstrap has run, and before anything could be
+deployed into the cluster. That window is what it is for:
+
 - Debugging initialization issues
 - Performance analysis
 - CI/CD validation
 - Cluster behavior comparison
+
+Being a static pod is what that costs. It authenticates with a kubeconfig staged
+on the node's filesystem rather than a ServiceAccount, because no ServiceAccount
+exists yet; it writes to a hostPath, because there is no storage class yet; and
+it runs with `hostNetwork`, because there is no CNI yet. Those are the right
+trade-offs for capturing a bootstrap and the wrong ones for anything else.
+
+Faro is its own project, not a kinc component. kinc embeds this one manifest so
+that its own bootstrap can be analysed — the captures in CI, and the release
+run's event counts, come from it. Running Faro against a cluster for any other
+purpose is a question for Faro, which is packaged as an operator and deploys
+like any other workload; nothing here is the recommended way to do that.
 
 **Enable Faro:**
 
