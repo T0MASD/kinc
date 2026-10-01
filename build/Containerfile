@@ -117,6 +117,8 @@ COPY kinc/etc/systemd/system/kubeadm-init.service /etc/systemd/system/kubeadm-in
 COPY kinc/etc/systemd/system/kinc-postinit.service /etc/systemd/system/kinc-postinit.service
 COPY kinc/etc/systemd/system/kinc-faro-kubeconfig.service /etc/systemd/system/kinc-faro-kubeconfig.service
 COPY kinc/etc/systemd/system/kinc-cgroup-setup.service /etc/systemd/system/kinc-cgroup-setup.service
+COPY kinc/etc/systemd/system/kinc-node-resources.service /etc/systemd/system/kinc-node-resources.service
+COPY kinc/etc/systemd/system/kinc-check-state.service /etc/systemd/system/kinc-check-state.service
 COPY --chmod=0755 kinc/etc/kinc/scripts/* /etc/kinc/scripts/
 COPY kinc/kinc/manifests/ /kinc/manifests/
 
@@ -164,6 +166,10 @@ COPY kinc/etc/kinc/patches/ /etc/kinc/patches/
 # files for path" - and fails the join outright, so naming a directory that
 # only exists when a node has resource limits breaks every cluster that sets
 # none. Empty is a valid answer; absent is not.
+# The kubelet's config drop-in directory, present whether or not anything
+# renders into it: --config-dir on a directory that does not exist is an error.
+RUN mkdir -p /etc/kubernetes/kubelet.conf.d
+
 RUN mkdir -p /etc/kinc/patches-runtime
 
 # Setup crun wrapper for rootless OOM score adjustment fix
@@ -200,6 +206,8 @@ RUN echo "Enabling kinc services ..." \
     && systemctl enable kinc-postinit.service \
     && systemctl enable kinc-faro-kubeconfig.service \
     && systemctl enable kinc-cgroup-setup.service \
+    && systemctl enable kinc-node-resources.service \
+    && systemctl enable kinc-check-state.service \
     && echo "kinc services enabled (multi-service architecture)"
 
 # Set proper permissions for kinc manifests
@@ -255,7 +263,7 @@ RUN crio --version \
     && echo "CNI plugins installed via package:" \
     && ls -la /usr/libexec/cni/ \
     && echo "SystemD services enabled:" \
-    && systemctl list-unit-files | grep enabled | grep -E "(crio|kubelet|kinc-preflight|kubeadm-init|kinc-postinit|kinc-cgroup-setup)" \
+    && systemctl list-unit-files | grep enabled | grep -E "(crio|kubelet|kinc-preflight|kubeadm-init|kinc-postinit|kinc-cgroup-setup|kinc-node-resources|kinc-check-state)" \
     && echo "Rootless configurations:" \
     && ls -la /etc/containers/storage.conf /etc/crio/crio.conf.d/04-rootless-storage.conf /etc/crio/crio.conf.d/05-rootless-cgroup.conf \
     && echo "✅ CRI-O container runtime configured with rootless support"
