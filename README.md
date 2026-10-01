@@ -15,7 +15,7 @@
 - 📦 **Self-contained:** Each node is one container (systemd, CRI-O, kubeadm, kubectl)
 - 🔧 **Configurable:** Baked-in or mounted configuration
 - 🌐 **Isolated networking:** Sequential port allocation with subnet derivation
-- 🧩 **Multi-node:** A cluster has as many nodes as you ask for, on one host
+- 🧩 **Multi-node:** A cluster has as many nodes as you ask for, on one host by default
 - 📊 **Multi-cluster:** Run multiple clusters concurrently
 - 🔍 **Observability:** Optional Faro event capture for what changed, and API-server audit for what was read and deleted (both enabled in CI)
 - ✅ **Production-grade:** Uses official Kubernetes tools (kubeadm, kubectl, CRI-O)
@@ -136,6 +136,48 @@ by name. Pod traffic between nodes travels Antrea's geneve tunnel, which is
 what the `openvswitch` and `geneve` modules are required for.
 
 `KINC_WORKERS` defaults to 0, which is a single-node cluster.
+
+**Node addresses come from the cluster's podman network**, which is why a
+cluster is one host by default: `advertiseAddress` and each node's `node-ip` are
+set to an address on that network, and the network lives in a rootless namespace
+that nothing outside can route to.
+
+What does **not** open that up is exposing the subnet. netavark's chain for the
+network ends with:
+
+```
+ip daddr 10.89.43.0/24 accept
+ip daddr != 224.0.0.0/4 masquerade
+```
+
+Addresses are left alone within the node subnet and rewritten for anything
+leaving it, so a node's address stops being its own at the boundary and replies
+have nowhere to go. The problem is not reachability, and routing the subnet out
+does not solve it.
+
+The symptom is worth knowing because it points away from the cause. A node
+reached that way registers and goes **Ready, and stays Ready** - its own traffic
+is outbound, and outbound works. The failure appears only when the API server
+dials back into the kubelet, so `kubectl logs`, `exec`, `port-forward` and
+metrics fail against a node every other indicator calls healthy, and it flaps
+with whichever side restarted last.
+
+If you try it regardless: an exemption has to go at the top of netavark's own
+chain, because a verdict reached in a different chain does not pre-empt it, and
+it has to be re-asserted, because netavark rewrites its ruleset whenever a
+container changes.
+
+**Spanning hosts is a different change, and nothing here forbids it.** The
+addresses are the constraint, not the architecture. A node on another host would
+need to register under an address routable between the hosts rather than one from
+the podman network, and the ports Kubernetes uses between nodes would need
+publishing the way the API server's 6443 already is - the kubelet on 10250 so the
+API server can dial back, and Antrea's geneve on UDP 6081 so pod traffic can
+cross. That is the same mechanism the control plane already uses to be reachable,
+rather than an attempt to make the namespace routable.
+
+kinc does not do this today and it is not tested here. It is a design worth
+knowing is available, not a configuration you can switch on.
 
 ### Deploy Multiple Clusters
 
