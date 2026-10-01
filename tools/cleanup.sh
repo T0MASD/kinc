@@ -89,6 +89,7 @@ echo "✅ Cluster state removed"
 
 echo "Removing Quadlet files..."
 rm -f ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-*.*
+rm -f ~/.config/systemd/user/kinc-${CLUSTER_NAME}.slice
 echo "✅ Quadlet files removed"
 
 echo "Reloading user systemd..."

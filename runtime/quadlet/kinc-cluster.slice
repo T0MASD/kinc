@@ -1,0 +1,26 @@
+[Unit]
+Description=kinc Cluster Resource Slice
+Documentation=https://github.com/T0MASD/kinc
+
+# One cgroup for a whole cluster, so its nodes can be limited together.
+#
+# Without it every node container lands in the user manager's app.slice
+# alongside everything else the user runs, and nothing bounds a cluster as a
+# unit. A slice is the systemd object that owns a cgroup and nothing else, so
+# limits written here apply to every node placed in it, and podman nests each
+# container's payload cgroup underneath - which is what makes a limit on the
+# node reach the pods running inside it.
+#
+# Installed under ~/.config/systemd/user rather than the quadlet directory:
+# quadlet only generates units from .container, .volume, .network, .pod and
+# friends, and silently ignores anything else it finds. A .slice left there is
+# never read - systemd still creates the slice, because Slice= on the node
+# refers to it, but it is created implicitly with no limits and FragmentPath
+# empty, so the cluster cap is quietly absent.
+#
+# Empty of limits by default. A cluster that names none behaves exactly as it
+# did before, which is the only safe default when the host is someone's
+# workstation as often as it is a CI runner.
+
+[Slice]
+CLUSTER_LIMITS_PLACEHOLDER

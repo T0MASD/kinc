@@ -143,6 +143,14 @@ COPY --chmod=0644 base/var/lib/kubelet/config-rootless.yaml /var/lib/kubelet/con
 # kubeadm.conf now mounted at runtime via Quadlet volume
 COPY kinc/etc/kinc/patches/ /etc/kinc/patches/
 
+# The directory join.conf names, present whether or not anything writes to it.
+#
+# kubeadm refuses a patches directory it cannot list - "could not list patch
+# files for path" - and fails the join outright, so naming a directory that
+# only exists when a node has resource limits breaks every cluster that sets
+# none. Empty is a valid answer; absent is not.
+RUN mkdir -p /etc/kinc/patches-runtime
+
 # Setup crun wrapper for rootless OOM score adjustment fix
 RUN echo "Setting up crun wrapper for rootless operation ..." \
     && mv /usr/bin/crun /usr/bin/crun.orig \

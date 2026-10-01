@@ -172,6 +172,121 @@ log "Kubelet oomScoreAdj: ${OOM_SCORE_ADJ} (inherited; -999 is unreachable rootl
 yq eval -i "(select(.kind == \"KubeletConfiguration\") | .oomScoreAdj) = ${OOM_SCORE_ADJ}" \
     /tmp/kubeadm-final.conf
 
+# Tell the kubelet how much of this machine is actually ours.
+#
+# A node reports capacity by reading /proc, and inside a container /proc is the
+# host's: on a 2-CPU 4G VM every node of a two-node cluster reports 2 CPU and
+# 4G, and the scheduler adds them up to 4 and 8. Measured on an 8-CPU 31G host,
+# both nodes reported cpu=8 mem=31Gi and the cluster total came to cpu=16
+# mem=62Gi.
+#
+# A cgroup limit does not fix that by itself, and alone makes it worse: the
+# scheduler keeps placing work against the host's numbers while the cgroup
+# refuses to run what arrives. systemReserved is the part the scheduler reads -
+# capacity still reports what the machine has, allocatable becomes what this
+# node may use, and allocatable is what pods are placed against. So reserve
+# everything that is not ours.
+#
+# The share comes from the environment rather than from the cgroup, because the
+# container is in its own cgroup namespace: it sees "max" at its own level
+# while the limit sits on the parent, so it cannot read its own ceiling.
+# Bytes from a size, accepting both spellings and reading both as binary.
+#
+# systemd's K/M/G are 1024-based and Kubernetes writes Ki/Mi/Gi for the same
+# thing, so the two are the same quantity spelled differently and kinc takes
+# either. numfmt does not: --from=iec rejects the "i" outright, and --from=auto
+# accepts it but then reads a bare "4G" as 4,000,000,000 - which would leave
+# the reserve disagreeing with the cgroup limit by 7% without saying so.
+bytes_of() { numfmt --from=iec "${1%i}"; }
+
+if [[ -n "${KINC_NODE_MEMORY:-}" || -n "${KINC_NODE_CPUS:-}" ]]; then
+    # What this node needs to be a node, before any pod is scheduled.
+    #
+    # Measured idle on an otherwise empty cluster: a control plane's cgroup held
+    # 2956MiB and a worker's 1231MiB. The control plane carries etcd, the API
+    # server, the controller-manager and the scheduler as static pods, and a
+    # static pod has no memory request - so the scheduler cannot see any of it.
+    # Left uncounted, a node limited to 4G advertised all 4G as allocatable
+    # while already using 2.9G of it, and a pod requesting 2Gi was admitted into
+    # memory that did not exist.
+    #
+    # Defaults differ by role for that reason, and both are overridable: these
+    # are this cluster's measurements, not a law.
+    if [[ -f /etc/kinc/join/join.conf ]]; then
+        _RESERVE_MEM="${KINC_NODE_RESERVED_MEMORY:-1Gi}"
+        _RESERVE_CPU="${KINC_NODE_RESERVED_CPU:-200m}"
+    else
+        _RESERVE_MEM="${KINC_NODE_RESERVED_MEMORY:-2Gi}"
+        _RESERVE_CPU="${KINC_NODE_RESERVED_CPU:-500m}"
+    fi
+
+    if [[ -n "${KINC_NODE_MEMORY:-}" ]]; then
+        _total_kb=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+        _limit_kb=$(( $(bytes_of "${KINC_NODE_MEMORY}") / 1024 ))
+        _kube_kb=$(( $(bytes_of "${_RESERVE_MEM}") / 1024 ))
+        if (( _limit_kb > 0 && _limit_kb < _total_kb )); then
+            if (( _kube_kb >= _limit_kb )); then
+                log "❌ ${_RESERVE_MEM} is reserved for this node's own components but the node is limited to ${KINC_NODE_MEMORY}"
+                log "   Nothing would be left to schedule. Raise KINC_NODE_MEMORY or lower KINC_NODE_RESERVED_MEMORY."
+                exit 1
+            fi
+            # systemReserved is everything that is not this node's, kubeReserved is
+            # what this node needs to be a node. Allocatable is what remains, and
+            # allocatable is the only one the scheduler places against.
+            yq eval -i "(select(.kind == \"KubeletConfiguration\") | .systemReserved.memory) = \"$(( _total_kb - _limit_kb ))Ki\"" \
+                /tmp/kubeadm-final.conf
+            yq eval -i "(select(.kind == \"KubeletConfiguration\") | .kubeReserved.memory) = \"${_kube_kb}Ki\"" \
+                /tmp/kubeadm-final.conf
+            log "Node memory: ${KINC_NODE_MEMORY} of $(( _total_kb / 1024 ))Mi, less ${_RESERVE_MEM} for the node itself"
+            log "   → allocatable $(( (_limit_kb - _kube_kb) / 1024 ))Mi"
+            _SYS_MEM_KI="$(( _total_kb - _limit_kb ))Ki"
+            _KUBE_MEM_KI="${_kube_kb}Ki"
+        else
+            log "⚠️  KINC_NODE_MEMORY=${KINC_NODE_MEMORY} is not below this machine's $(( _total_kb / 1024 ))Mi; nothing reserved"
+        fi
+    fi
+    if [[ -n "${KINC_NODE_CPUS:-}" ]]; then
+        _total_cpu=$(nproc)
+        _reserved=$(awk -v t="$_total_cpu" -v c="${KINC_NODE_CPUS}" 'BEGIN { r = t - c; print (r > 0 ? r : 0) }')
+        if [[ "$_reserved" != "0" ]]; then
+            yq eval -i "(select(.kind == \"KubeletConfiguration\") | .systemReserved.cpu) = \"${_reserved}\"" \
+                /tmp/kubeadm-final.conf
+            yq eval -i "(select(.kind == \"KubeletConfiguration\") | .kubeReserved.cpu) = \"${_RESERVE_CPU}\"" \
+                /tmp/kubeadm-final.conf
+            log "Node CPUs: ${KINC_NODE_CPUS} of ${_total_cpu}, less ${_RESERVE_CPU} for the node itself"
+            _SYS_CPU="${_reserved}"
+        else
+            log "⚠️  KINC_NODE_CPUS=${KINC_NODE_CPUS} is not below this machine's ${_total_cpu}; nothing reserved"
+        fi
+    fi
+
+    # A worker's kubelet configuration is not this file.
+    #
+    # kubeadm join downloads the kubelet-config ConfigMap the control plane
+    # uploaded and writes /var/lib/kubelet/config.yaml from it, so everything
+    # computed above is overwritten by the control plane's numbers - measured:
+    # a worker reserving 1Gi and 200m came up advertising the control plane's
+    # 2Gi and 500m, because that is what the cluster told it to use.
+    #
+    # kubeadm applies a patch directory after that download, which is the one
+    # point where a node can say something about itself that the cluster does
+    # not already know. join.conf names this directory.
+    if [[ -f /etc/kinc/join/join.conf ]]; then
+        install -d -m 0755 /etc/kinc/patches-runtime
+        {
+            echo "apiVersion: kubelet.config.k8s.io/v1beta1"
+            echo "kind: KubeletConfiguration"
+            [[ -n "${_SYS_MEM_KI:-}${_SYS_CPU:-}" ]] && echo "systemReserved:"
+            [[ -n "${_SYS_CPU:-}" ]]    && echo "  cpu: \"${_SYS_CPU}\""
+            [[ -n "${_SYS_MEM_KI:-}" ]] && echo "  memory: \"${_SYS_MEM_KI}\""
+            [[ -n "${_KUBE_MEM_KI:-}" || -n "${_RESERVE_CPU:-}" ]] && echo "kubeReserved:"
+            [[ -n "${_RESERVE_CPU:-}" ]] && echo "  cpu: \"${_RESERVE_CPU}\""
+            [[ -n "${_KUBE_MEM_KI:-}" ]] && echo "  memory: \"${_KUBE_MEM_KI}\""
+        } > /etc/kinc/patches-runtime/kubeletconfiguration.yaml
+        log "Worker reserve written as a join patch, which survives the cluster's own config"
+    fi
+fi
+
 # Adopt the cluster CA if one was minted for this cluster.
 #
 # kubeadm creates the CA during init otherwise, which means the hash a joining
