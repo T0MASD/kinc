@@ -1117,11 +1117,9 @@ jobs:
   #
   # Both restart a node, and the capture is taken afterwards, so the components
   # in it are as old as the restart rather than as old as the cluster. The
-  # component-log gate needs a component observed past its 90s startup grace by
-  # two detection periods before it can say anything at all, and reports a run
-  # where nothing was judgeable as a failure rather than a pass. So this job
-  # waits longer before capturing than the 150s default - without it the gate
-  # correctly refused to reach a verdict, and correctly failed.
+  # analysis is still worth running: the component-log gate reports a run where
+  # nothing was judgeable as a failure rather than a pass, which is what stops
+  # it going quietly inert.
   test-resumed-clusters:
     name: Test (resumed clusters)
     runs-on: ubuntu-latest
@@ -1142,6 +1140,34 @@ jobs:
         run: ./tools/ci-verify-resumed-adoption.sh default
         shell: bash
 
+      # A cluster created by the previous release, resumed onto this build.
+      #
+      # The gate above restarts onto an image derived from this tree, so the
+      # cluster's state was written by current provisioning however the restart
+      # goes. That proves a new image's configuration takes effect and nothing
+      # about history - and every bug it was built for lives in state an older
+      # release left behind: an events directory created root-owned before the
+      # install -d line existed, a kubeconfig never staged because init predated
+      # the unit that stages it, reservations absent because the cluster was
+      # built before anything rendered them.
+      #
+      # So the cluster here is *created by* the old image, not merely run on it.
+      # Deploying current and downgrading would prove nothing.
+      #
+      # Pinned by digest rather than by tag. Version tags are written once and
+      # do not move, but the pin costs nothing and removes the assumption. It
+      # ageing is a feature: upgrading from a more distant release exercises
+      # more accumulated difference, not less, so there is no hurry to bump it.
+      - name: A cluster built by the previous release upgrades onto this build
+        run: |
+          set -euo pipefail
+          PREV=ghcr.io/t0masd/kinc@sha256:a68f8f88d08ac566de1712cec94c0a417ad3cb92e0b462f9a8322ec991df101c
+          echo "::notice::upgrading from ${PREV} (v1.37.0-3)"
+          ./tools/cleanup.sh default || true
+          KINC_IMAGE="$PREV" KINC_WORKERS=0 KINC_NODE_MEMORY=5G KINC_ENABLE_FARO=true ./tools/deploy.sh
+          ./tools/ci-verify-image-change-restart.sh default localhost/kinc/node:v1.37.0
+        shell: bash
+
       - name: A node restarted onto a new image adopts its configuration
         run: |
           set -euo pipefail
@@ -1153,7 +1179,7 @@ jobs:
 
       - name: Collect diagnostics
         if: always()
-        run: KINC_CAPTURE_AGE=270 ./tools/ci-collect-diagnostics.sh default
+        run: ./tools/ci-collect-diagnostics.sh default
         shell: bash
 
       - name: Upload diagnostics
