@@ -101,7 +101,6 @@ RUN mkdir -p /etc/kinc \
 COPY --chmod=0644 base/etc/* /etc/
 COPY --chmod=0644 base/etc/containers/ /etc/containers/
 COPY --chmod=0644 base/etc/crio/ /etc/crio/
-COPY --chmod=0644 base/etc/default/* /etc/default/
 COPY --chmod=0644 base/etc/sysctl.d/* /etc/sysctl.d/
 COPY --chmod=0644 base/etc/systemd/system/* /etc/systemd/system/
 COPY --chmod=0644 base/etc/systemd/system/kubelet.service.d/* /etc/systemd/system/kubelet.service.d/
@@ -136,8 +135,24 @@ RUN mkdir -p /etc/faro /etc/kinc/faro
 COPY --chmod=0644 kinc/etc/kubernetes/manifests/faro-bootstrap.yaml /etc/kinc/faro/faro-bootstrap.yaml
 COPY --chmod=0644 kinc/etc/faro/config.yaml /etc/faro/config.yaml
 
-# Copy rootless kubelet configuration
-COPY --chmod=0644 base/var/lib/kubelet/config-rootless.yaml /var/lib/kubelet/config-rootless.yaml
+# The kubelet's config for its first start.
+#
+# kubelet.service is enabled, so systemd starts the kubelet at boot, well
+# before kubeadm's kubelet-start phase writes this file itself. Seeding it
+# means KubeletInUserNamespace - which is what lets the kubelet run without
+# real root, by stopping it managing cgroups, sysctls and oom scores it cannot
+# touch from inside a user namespace - holds from that very first start.
+#
+# It used to be carried as --feature-gates in /etc/default/kubelet instead,
+# for exactly this window. The kubelet deprecated that:
+#
+#   Flag --feature-gates has been deprecated, This parameter should be set via
+#   the config file specified by the Kubelet's --config flag
+#
+# which is this file. kubeadm overwrites it during init and join, from the
+# KubeletConfiguration in kubeadm.conf that declares the same gate, so it holds
+# across the handover too.
+COPY --chmod=0644 base/var/lib/kubelet/config.yaml /var/lib/kubelet/config.yaml
 
 # Copy runtime configuration files
 # kubeadm.conf now mounted at runtime via Quadlet volume

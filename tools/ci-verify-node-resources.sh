@@ -96,6 +96,15 @@ if [ -n "${KINC_NODE_CPUS:-}" ]; then
         got_us=$(awk -v v="$got" 'BEGIN { sub(/s$/, "", v); printf "%d", v * 1000000 }')
         [ "$got_us" = "$want_us" ] || fail "${n}: CPUQuota is ${got}, asked for ${KINC_NODE_CPUS} cores"
     done
+    [ "$status" -eq 0 ] && ok "${CLUSTER}: every node enforced at CPUQuota=${KINC_NODE_CPUS} cores"
+else
+    # Same reason as memory: a quota leaking in from anywhere would otherwise
+    # pass, because asserting only what was asked for cannot see it.
+    for n in $nodes; do
+        got=$(systemctl --user show "${n}.service" -p CPUQuotaPerSecUSec --value)
+        [ "$got" = "infinity" ] || fail "${n}: CPUQuota=${got}, but no per-node cpu was asked for"
+    done
+    [ "$status" -eq 0 ] && ok "${CLUSTER}: no per-node cpu limit, as asked"
 fi
 
 # --- the slice -------------------------------------------------------------
@@ -133,6 +142,37 @@ else
     frag=$(systemctl --user show "$SLICE" -p MemoryHigh --value)
     [ "$frag" = "infinity" ] || fail "${SLICE}: MemoryHigh=${frag}, but no cluster memory was asked for"
     [ "$status" -eq 0 ] && ok "${CLUSTER}: no cluster memory limit, as asked"
+fi
+
+# The cluster's cpu quota, which deploy.sh accepts and templates into the slice
+# and nothing checked. KINC_CLUSTER_CPUS appeared in this gate exactly once -
+# in the "nothing was asked for" branch above - so a quota that was written
+# wrong, or not written at all, passed.
+if [ -n "${KINC_CLUSTER_CPUS:-}" ]; then
+    frag=$(systemctl --user show "$SLICE" -p FragmentPath --value)
+    [ -n "$frag" ] || fail "${SLICE}: no unit file loaded - its limits are not in effect"
+    want_us=$(awk -v c="$KINC_CLUSTER_CPUS" 'BEGIN { printf "%d", c * 1000000 }')
+    got=$(systemctl --user show "$SLICE" -p CPUQuotaPerSecUSec --value)
+    got_us=$(awk -v v="$got" 'BEGIN { sub(/s$/, "", v); printf "%d", v * 1000000 }')
+    [ "$got_us" = "$want_us" ] || fail "${SLICE}: CPUQuota is ${got}, asked for ${KINC_CLUSTER_CPUS} cores"
+    [ "$status" -eq 0 ] && ok "${CLUSTER}: slice enforced at CPUQuota=${KINC_CLUSTER_CPUS} cores"
+
+    # cpu is compressible, so a cluster quota below the sum of its nodes' is
+    # not the same bargain memory makes: nodes are throttled against each
+    # other rather than reclaimed from, and nothing is killed.
+    if [ -n "${KINC_NODE_CPUS:-}" ]; then
+        count=$(printf '%s\n' "$nodes" | grep -c .)
+        total=$(awk -v c="$KINC_NODE_CPUS" -v n="$count" 'BEGIN { printf "%d", c * n * 1000000 }')
+        if [ "$want_us" -lt "$total" ]; then
+            say "aggregate quota: ${KINC_CLUSTER_CPUS} cores across ${count} nodes that may each reach ${KINC_NODE_CPUS}"
+        else
+            say "cluster quota is at or above ${count} x ${KINC_NODE_CPUS} cores, so the node quotas bind first"
+        fi
+    fi
+else
+    got=$(systemctl --user show "$SLICE" -p CPUQuotaPerSecUSec --value)
+    [ "$got" = "infinity" ] || fail "${SLICE}: CPUQuota=${got}, but no cluster cpu was asked for"
+    [ "$status" -eq 0 ] && ok "${CLUSTER}: no cluster cpu limit, as asked"
 fi
 
 # --- advertised, which is what the scheduler uses --------------------------
