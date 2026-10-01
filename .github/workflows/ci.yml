@@ -1113,10 +1113,15 @@ jobs:
   # Clusters that already exist, which no other job covers.
   #
   # Separate from the matrix because these are genuinely sequential: each builds
-  # a cluster and then does something to that same cluster. They also restart
-  # nodes, which is why they sit after their own capture rather than before it -
-  # a node that restarted seconds ago has plenty of classes still going, and the
-  # component-log gate reads the capture for exactly that.
+  # a cluster and then does something to that same cluster.
+  #
+  # Both restart a node, and the capture is taken afterwards, so the components
+  # in it are as old as the restart rather than as old as the cluster. The
+  # component-log gate needs a component observed past its 90s startup grace by
+  # two detection periods before it can say anything at all, and reports a run
+  # where nothing was judgeable as a failure rather than a pass. So this job
+  # waits longer before capturing than the 150s default - without it the gate
+  # correctly refused to reach a verdict, and correctly failed.
   test-resumed-clusters:
     name: Test (resumed clusters)
     runs-on: ubuntu-latest
@@ -1148,7 +1153,7 @@ jobs:
 
       - name: Collect diagnostics
         if: always()
-        run: ./tools/ci-collect-diagnostics.sh default
+        run: KINC_CAPTURE_AGE=270 ./tools/ci-collect-diagnostics.sh default
         shell: bash
 
       - name: Upload diagnostics
