@@ -176,6 +176,24 @@ jobs:
           ./tools/ci-collect-faro.sh test
         shell: bash
 
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kinc-diagnostics-release-${{ env.BUILD_TAG }}
+          path: artifacts/diagnostics/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload audit log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: audit-log-release-${{ env.BUILD_TAG }}
+          path: artifacts/audit/
+          retention-days: 90
+          if-no-files-found: ignore
+
       - name: Tear down before parsing
         run: CLUSTER_NAME=test ./tools/cleanup.sh
         shell: bash
@@ -187,6 +205,19 @@ jobs:
       - name: Verify the finished record
         run: ./tools/ci-analyse-capture.sh test
         shell: bash
+
+      # After the analysis, which is what writes them: the run summary and
+      # deprecations-test.txt, the evidence behind that step's verdict. Without
+      # this a release left only its Faro events behind, so a release could not
+      # be checked the way a pull request can - from its artifacts.
+      - name: Upload run summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: run-summary-release-${{ env.BUILD_TAG }}
+          path: artifacts/summary/
+          retention-days: 90
+          if-no-files-found: warn
 
       - name: Upload Faro events
         if: always()
