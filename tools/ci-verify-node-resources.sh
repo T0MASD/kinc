@@ -79,6 +79,14 @@ if [ -n "${KINC_NODE_MEMORY:-}" ]; then
         fi
     done
     [ "$status" -eq 0 ] && ok "${CLUSTER}: every node enforced at MemoryHigh=${KINC_NODE_MEMORY}"
+else
+    # Bounding a cluster does not bound its nodes. If this asserted only what
+    # was asked for, a node limit leaking in from anywhere would pass.
+    for n in $nodes; do
+        got=$(systemctl --user show "${n}.service" -p MemoryHigh --value)
+        [ "$got" = "infinity" ] || fail "${n}: MemoryHigh=${got}, but no per-node memory was asked for"
+    done
+    [ "$status" -eq 0 ] && ok "${CLUSTER}: no per-node memory limit, as asked"
 fi
 
 if [ -n "${KINC_NODE_CPUS:-}" ]; then
@@ -105,6 +113,26 @@ if [ -n "${KINC_CLUSTER_MEMORY:-}" ]; then
     got=$(bytes "$(systemctl --user show "$SLICE" -p MemoryHigh --value)")
     [ "$got" = "$want" ] || fail "${SLICE}: MemoryHigh is ${got} bytes, asked for ${KINC_CLUSTER_MEMORY}"
     [ "$status" -eq 0 ] && ok "${CLUSTER}: slice enforced at MemoryHigh=${KINC_CLUSTER_MEMORY}"
+
+    # With both set, whether the cluster is below the sum of its nodes is the
+    # whole policy: below, each node may burst and the total is still capped.
+    # Reported so the shape under test is on the record rather than inferred
+    # from the numbers.
+    if [ -n "${KINC_NODE_MEMORY:-}" ]; then
+        count=$(printf '%s\n' "$nodes" | grep -c .)
+        total=$(( $(bytes "$KINC_NODE_MEMORY") * count ))
+        if [ "$want" -lt "$total" ]; then
+            say "aggregate cap: ${KINC_CLUSTER_MEMORY} across ${count} nodes that may each reach ${KINC_NODE_MEMORY}"
+            frag_slice=$(bytes "$(systemctl --user show "$SLICE" -p MemoryMax --value)")
+            [ "$frag_slice" -gt 0 ] || fail "${SLICE}: no MemoryMax backstop above the aggregate cap"
+        else
+            say "cluster cap is at or above ${count} x ${KINC_NODE_MEMORY}, so the node caps bind first"
+        fi
+    fi
+else
+    frag=$(systemctl --user show "$SLICE" -p MemoryHigh --value)
+    [ "$frag" = "infinity" ] || fail "${SLICE}: MemoryHigh=${frag}, but no cluster memory was asked for"
+    [ "$status" -eq 0 ] && ok "${CLUSTER}: no cluster memory limit, as asked"
 fi
 
 # --- advertised, which is what the scheduler uses --------------------------
@@ -126,6 +154,16 @@ if [ -n "${KINC_NODE_MEMORY:-}" ]; then
         fi
     done
     [ "$status" -eq 0 ] && ok "${CLUSTER}: every node advertises its limit less its own reserve"
+else
+    # No per-node limit means no reserve, so a node should advertise the whole
+    # machine. Bounding the cluster deliberately does not change that: the
+    # nodes share an aggregate and none of them is individually smaller.
+    for n in $nodes; do
+        cap=$(bytes "$(kc get node "$n" -o jsonpath='{.status.capacity.memory}' 2>/dev/null)")
+        alloc=$(bytes "$(kc get node "$n" -o jsonpath='{.status.allocatable.memory}' 2>/dev/null)")
+        [ "$alloc" = "$cap" ] || fail "${n}: allocatable $(( alloc / 1048576 ))Mi differs from capacity $(( cap / 1048576 ))Mi with no per-node limit set"
+    done
+    [ "$status" -eq 0 ] && ok "${CLUSTER}: every node advertises the whole machine, as asked"
 fi
 
 echo ""

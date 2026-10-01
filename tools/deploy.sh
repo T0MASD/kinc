@@ -338,30 +338,21 @@ if [ -n "${KINC_CLUSTER_MEMORY:-}" ]; then
         && CLUSTER_LIMITS="${CLUSTER_LIMITS}\nMemoryMax=$(( _max * 110 / 100 ))"
 fi
 
-# A cluster budget below the sum of its nodes' is a contradiction, not a policy.
+# A cluster budget below the sum of its nodes' is the point, not a mistake.
 #
-# Both are accepted and neither is wrong on its own, so nothing would notice:
-# the nodes would start, each believing it may have its share, and contend
-# inside a slice that cannot give it to them. Said here rather than discovered
-# under load.
-if [ -n "${KINC_CLUSTER_MEMORY:-}" ] && [ -n "${KINC_NODE_MEMORY:-}" ]; then
-    _c=$(numfmt --from=iec "${KINC_CLUSTER_MEMORY%i}")
-    _n=$(numfmt --from=iec "${KINC_NODE_MEMORY%i}")
-    _nodes=$(( KINC_WORKERS + 1 ))
-    if [ "$_c" -lt $(( _n * _nodes )) ]; then
-        echo "❌ KINC_CLUSTER_MEMORY=${KINC_CLUSTER_MEMORY} is below ${_nodes} nodes x KINC_NODE_MEMORY=${KINC_NODE_MEMORY}"
-        echo "   The nodes would contend inside a slice too small to hold them."
-        exit 1
-    fi
-fi
-if [ -n "${KINC_CLUSTER_CPUS:-}" ] && [ -n "${KINC_NODE_CPUS:-}" ]; then
-    _nodes=$(( KINC_WORKERS + 1 ))
-    if awk -v c="${KINC_CLUSTER_CPUS}" -v n="${KINC_NODE_CPUS}" -v k="$_nodes" \
-         'BEGIN { exit !(c < n * k) }'; then
-        echo "❌ KINC_CLUSTER_CPUS=${KINC_CLUSTER_CPUS} is below ${_nodes} nodes x KINC_NODE_CPUS=${KINC_NODE_CPUS}"
-        exit 1
-    fi
-fi
+# This used to be refused as contradictory. It is not: it is overcommit with an
+# aggregate ceiling, and it is the combination worth having. Per-node alone
+# bounds each node and promises nothing about the total, so two 4G nodes can
+# want 8G of a 7G host. Per-cluster alone bounds the total and lets one node
+# starve another. Both, with the cluster below the sum, says each node may
+# spike to its limit while together they may not exceed the cluster's - which
+# is how you would divide a small VM.
+#
+# It degrades rather than breaks, because the slice carries MemoryHigh: memory
+# pressure there reclaims across the cluster before MemoryMax kills anything.
+#
+# Refusing it also made the cluster limit useless whenever a node limit was
+# set, since forcing cluster >= sum means the cluster can never bind first.
 if [ -n "${KINC_CLUSTER_CPUS:-}" ]; then
     quota=$(awk -v c="${KINC_CLUSTER_CPUS}" 'BEGIN { printf "%d", c * 100 }')
     CLUSTER_LIMITS="${CLUSTER_LIMITS:+${CLUSTER_LIMITS}\n}CPUQuota=${quota}%"
