@@ -518,9 +518,19 @@ plane and 1G for a worker.
 ./tools/ci-verify-node-resources.sh default     # asked, enforced and advertised agree
 ```
 
-Memory eviction is deliberately not configured. The kubelet derives
-`memory.available` from the host as well — it reported 30.7Gi on a node limited
-to 4G and using 1G — so a threshold would never fire. The cgroup does that job.
+Memory eviction is deliberately not configured, because a threshold would
+measure the host rather than the node. The kubelet computes `memory.available`
+as the machine's capacity minus this node's working set, and inside a container
+that capacity is the host's — so it accounts for neither the node's cgroup
+limit nor any other node's usage.
+
+How wrong that is depends on the host. On a workstation, a node limited to 4G
+and nearly full still reported 30Gi available, so no threshold would fire. On a
+small dedicated VM, where one node is most of the host, it approximates real
+pressure — still over-reporting by whatever the other nodes use. The cgroup
+does the bounding instead, reclaiming at `MemoryHigh` before killing at
+`MemoryMax`; if you run a single node on a dedicated VM, adding a threshold is
+reasonable as long as you know it tracks the VM.
 
 ### Surviving a Restart
 
