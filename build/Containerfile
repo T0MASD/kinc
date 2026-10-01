@@ -116,6 +116,7 @@ COPY --chmod=0755 base/usr/local/bin/crun-wrapper.sh /usr/local/bin/crun-wrapper
 COPY kinc/etc/systemd/system/kinc-preflight.service /etc/systemd/system/kinc-preflight.service
 COPY kinc/etc/systemd/system/kubeadm-init.service /etc/systemd/system/kubeadm-init.service
 COPY kinc/etc/systemd/system/kinc-postinit.service /etc/systemd/system/kinc-postinit.service
+COPY kinc/etc/systemd/system/kinc-faro-kubeconfig.service /etc/systemd/system/kinc-faro-kubeconfig.service
 COPY kinc/etc/systemd/system/kinc-cgroup-setup.service /etc/systemd/system/kinc-cgroup-setup.service
 COPY --chmod=0755 kinc/etc/kinc/scripts/* /etc/kinc/scripts/
 COPY kinc/kinc/manifests/ /kinc/manifests/
@@ -174,6 +175,7 @@ RUN echo "Enabling kinc services ..." \
     && systemctl enable kinc-preflight.service \
     && systemctl enable kubeadm-init.service \
     && systemctl enable kinc-postinit.service \
+    && systemctl enable kinc-faro-kubeconfig.service \
     && systemctl enable kinc-cgroup-setup.service \
     && echo "kinc services enabled (multi-service architecture)"
 

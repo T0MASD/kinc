@@ -343,6 +343,14 @@ if [[ "${KINC_ENABLE_FARO:-false}" == "true" ]]; then
     # so preparing it first is enough. The uid is the image's; if it ever
     # changes, ci-verify-faro.sh fails on an observer that captures nothing
     # rather than letting it pass silently again.
+    #
+    # kinc-faro-kubeconfig.service does this too, deliberately. Here it lands
+    # before the manifest is copied below, so on a first boot the kubelet cannot
+    # start Faro until the directory is already right. There it runs on every
+    # boot, which is what a cluster first initialised before this code existed
+    # needs - the directory is on /var, it is root-owned, and preflight is
+    # guarded by a marker on /var so it will never run again. Both are
+    # idempotent.
     install -d -o 65532 -g 65532 -m 0755 /var/lib/kinc/faro-events
     log "📁 Faro events directory ready, owned by uid 65532 (the image's faro user)"
 
