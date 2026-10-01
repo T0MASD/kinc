@@ -391,38 +391,15 @@ jobs:
           systemctl --user reset-failed || true
           echo "✅ Cleanup complete"
         shell: bash
-      # Judged after teardown, from the capture taken while the cluster ran.
-      #
-      # This gate only ran in release.yml, so a pull request could not break it
-      # visibly and its first real exercise was the release. It could not have
-      # run here before: it needs a component observed past its 90s startup
-      # grace, and captures were taken at 78-135s of cluster age, so it would
-      # have reported - correctly - that it could reach no verdict. The
-      # collector waits for KINC_CAPTURE_AGE now, which is what makes this
-      # answerable.
-      - name: Verify component logs settled
+      # The analysis phase: every check that reads the capture, after teardown.
+      # What belongs here and why is in the script - briefly, a question like
+      # "has this stopped?" cannot be answered against a cluster that is still
+      # writing, and a component's own log never reaches this console at all.
+      - name: Analyse capture
         if: always()
-        run: |
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs \
-            ./tools/ci-verify-component-logs.sh
+        run: ./tools/ci-analyse-capture.sh default
         shell: bash
 
-      # After teardown, against the archived audit log. Whether a denial has
-      # stopped only becomes visible once enough silence has accumulated to
-      # outlast its own period, and asked while the cluster runs the newest one
-      # is always seconds old - which failed this twice, at two thresholds.
-      - name: Verify no denials persisted
-        if: always()
-        run: ./tools/ci-verify-denials.sh default
-        shell: bash
-
-
-      - name: Summarise run
-        if: always()
-        run: |
-          mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
-        shell: bash
 
       # Separate from the diagnostics upload, which ran before teardown: the
       # summary is written after it and would otherwise miss the artifact.
@@ -587,38 +564,15 @@ jobs:
           CLUSTER_NAME=default ./tools/cleanup.sh || true
           systemctl --user reset-failed || true
         shell: bash
-      # Judged after teardown, from the capture taken while the cluster ran.
-      #
-      # This gate only ran in release.yml, so a pull request could not break it
-      # visibly and its first real exercise was the release. It could not have
-      # run here before: it needs a component observed past its 90s startup
-      # grace, and captures were taken at 78-135s of cluster age, so it would
-      # have reported - correctly - that it could reach no verdict. The
-      # collector waits for KINC_CAPTURE_AGE now, which is what makes this
-      # answerable.
-      - name: Verify component logs settled
+      # The analysis phase: every check that reads the capture, after teardown.
+      # What belongs here and why is in the script - briefly, a question like
+      # "has this stopped?" cannot be answered against a cluster that is still
+      # writing, and a component's own log never reaches this console at all.
+      - name: Analyse capture
         if: always()
-        run: |
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs \
-            ./tools/ci-verify-component-logs.sh
+        run: ./tools/ci-analyse-capture.sh default
         shell: bash
 
-      # After teardown, against the archived audit log. Whether a denial has
-      # stopped only becomes visible once enough silence has accumulated to
-      # outlast its own period, and asked while the cluster runs the newest one
-      # is always seconds old - which failed this twice, at two thresholds.
-      - name: Verify no denials persisted
-        if: always()
-        run: ./tools/ci-verify-denials.sh default
-        shell: bash
-
-
-      - name: Summarise run
-        if: always()
-        run: |
-          mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
-        shell: bash
 
       # Separate from the diagnostics upload, which ran before teardown: the
       # summary is written after it and would otherwise miss the artifact.
@@ -960,41 +914,15 @@ jobs:
           systemctl --user reset-failed || true
           echo "✅ Cleanup complete"
         shell: bash
-      # Judged after teardown, from the capture taken while the cluster ran.
-      #
-      # This gate only ran in release.yml, so a pull request could not break it
-      # visibly and its first real exercise was the release. It could not have
-      # run here before: it needs a component observed past its 90s startup
-      # grace, and captures were taken at 78-135s of cluster age, so it would
-      # have reported - correctly - that it could reach no verdict. The
-      # collector waits for KINC_CAPTURE_AGE now, which is what makes this
-      # answerable.
-      - name: Verify component logs settled
+      # The analysis phase: every check that reads the capture, after teardown.
+      # What belongs here and why is in the script - briefly, a question like
+      # "has this stopped?" cannot be answered against a cluster that is still
+      # writing, and a component's own log never reaches this console at all.
+      - name: Analyse capture
         if: always()
-        run: |
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs \
-            ./tools/ci-verify-component-logs.sh
-          KINC_LOG_CAPTURE=artifacts/diagnostics/cluster01/componentlogs \
-            ./tools/ci-verify-component-logs.sh
+        run: ./tools/ci-analyse-capture.sh default cluster01
         shell: bash
 
-      # After teardown, against the archived audit log. Whether a denial has
-      # stopped only becomes visible once enough silence has accumulated to
-      # outlast its own period, and asked while the cluster runs the newest one
-      # is always seconds old - which failed this twice, at two thresholds.
-      - name: Verify no denials persisted
-        if: always()
-        run: ./tools/ci-verify-denials.sh default cluster01
-        shell: bash
-
-
-      - name: Summarise run
-        if: always()
-        run: |
-          mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/default/componentlogs ./tools/ci-summarize-run.sh default | tee "artifacts/summary/default.md" | tee -a "$GITHUB_STEP_SUMMARY"
-          KINC_LOG_CAPTURE=artifacts/diagnostics/cluster01/componentlogs ./tools/ci-summarize-run.sh cluster01 | tee "artifacts/summary/cluster01.md" | tee -a "$GITHUB_STEP_SUMMARY"
-        shell: bash
 
       # Separate from the diagnostics upload, which ran before teardown: the
       # summary is written after it and would otherwise miss the artifact.
@@ -1114,3 +1042,19 @@ jobs:
         if: always()
         run: ./tools/cleanup.sh
         shell: bash
+
+      # The analysis phase: every check that reads the capture, after teardown.
+      # This job collected diagnostics and never read them - the drift the
+      # single entry point exists to prevent.
+      - name: Analyse capture
+        if: always()
+        run: ./tools/ci-analyse-capture.sh default
+        shell: bash
+
+      - name: Upload run summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-summary-node-resources-${{ github.run_number }}
+          path: artifacts/summary/
+          if-no-files-found: warn

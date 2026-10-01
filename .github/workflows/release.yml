@@ -180,14 +180,12 @@ jobs:
         run: CLUSTER_NAME=test ./tools/cleanup.sh
         shell: bash
 
+      # The same analysis phase the pull-request jobs run, against this run's
+      # capture. One entry point rather than a second copy of the list: the
+      # component-log gate was in this workflow and not in theirs for long
+      # enough that its first real exercise was a release.
       - name: Verify the finished record
-        run: |
-          set -euo pipefail
-          KINC_LOG_CAPTURE=artifacts/diagnostics/test/componentlogs ./tools/ci-verify-component-logs.sh
-          ./tools/ci-verify-denials.sh test
-          mkdir -p artifacts/summary
-          KINC_LOG_CAPTURE=artifacts/diagnostics/test/componentlogs ./tools/ci-summarize-run.sh test \
-            | tee "artifacts/summary/test.md" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: ./tools/ci-analyse-capture.sh test
         shell: bash
 
       - name: Upload Faro events
