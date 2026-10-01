@@ -98,5 +98,16 @@ RestartSec=10
 TimeoutStartSec=900
 TimeoutStopSec=180
 
+# The cluster's own cgroup, and this node's share of it.
+#
+# podman nests the container's payload cgroup under this unit's, so a limit
+# here bounds the node and everything scheduled onto it - the kubelet, CRI-O
+# and every pod - rather than any one process inside it.
+#
+# Both are placeholders that deploy.sh fills in, and it writes nothing at all
+# unless asked, so a cluster with no limits named behaves exactly as before.
+Slice=CLUSTER_SLICE_PLACEHOLDER
+NODE_LIMITS_PLACEHOLDER
+
 [Install]
 WantedBy=multi-user.target
