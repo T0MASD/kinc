@@ -1063,6 +1063,27 @@ jobs:
           ./tools/ci-verify-node-resources.sh default
         shell: bash
 
+      - name: Collect diagnostics
+        if: always()
+        run: ./tools/ci-collect-diagnostics.sh default
+        shell: bash
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kinc-diagnostics-node-resources-${{ github.run_number }}
+          path: artifacts/
+          include-hidden-files: true
+          retention-days: 30
+
+      # After the capture, not before it.
+      #
+      # Both of these restart a node, and the component-log gate reads the
+      # capture for classes that are still going. A node that restarted
+      # seconds earlier has plenty - and a worker left talking to a control
+      # plane that is restarting has more. Taking the capture from the
+      # settled cluster above and running these after it keeps both honest.
       # A cluster that already exists, which no other phase here covers.
       #
       # Every other phase builds a cluster and throws it away, so all of them
@@ -1087,25 +1108,11 @@ jobs:
       - name: A node restarted onto a new image adopts its configuration
         run: |
           set -euo pipefail
-          export KINC_WORKERS=1 KINC_NODE_MEMORY=5G
+          export KINC_WORKERS=0 KINC_NODE_MEMORY=5G
           ./tools/cleanup.sh default || true
           ./tools/deploy.sh
           ./tools/ci-verify-image-change-restart.sh default
         shell: bash
-
-      - name: Collect diagnostics
-        if: always()
-        run: ./tools/ci-collect-diagnostics.sh default
-        shell: bash
-
-      - name: Upload diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: kinc-diagnostics-node-resources-${{ github.run_number }}
-          path: artifacts/
-          include-hidden-files: true
-          retention-days: 30
 
       - name: Cleanup
         if: always()
