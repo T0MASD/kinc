@@ -7,6 +7,50 @@
 set -euo pipefail
 
 echo "=== System Prerequisites Check ==="
+echo ""
+
+# The commands deploy.sh runs. Checked here because it does not check them
+# itself: absent, the first one reached kills the run with exit 127 and a log
+# that stops mid-sentence, naming nothing.
+#
+# Found on a clean Fedora guest, where openssl and kubectl are simply not
+# installed. It is invisible on a CI runner and on a developer workstation,
+# which ship all of these, so the only host that ever sees it is the one the
+# README's prerequisites section is written for.
+echo "━━━ Check 0: Required Commands ━━━"
+missing=""
+for c in podman awk sed openssl kubectl numfmt; do
+  if command -v "$c" >/dev/null 2>&1; then
+    echo "  ✅ $c"
+  else
+    echo "  ❌ $c"
+    missing="${missing} $c"
+  fi
+done
+if [ -n "$missing" ]; then
+  echo ""
+  echo "❌ Missing:${missing}"
+  echo "   On Fedora: sudo dnf install -y${missing// kubectl/ kubernetes-client}"
+  exit 1
+fi
+echo ""
+
+# Rootless kinc runs as systemd --user units, and a user manager is stopped when
+# the user's last session ends unless lingering is enabled. Without it a cluster
+# is destroyed on logout: deploy.sh reports success, the cluster is genuinely
+# Ready, and `podman ps` is empty when you next log in, with nothing in any log
+# because nothing failed.
+#
+# It does not show up where kinc is developed. A workstation stays logged in,
+# and a CI job holds a session for its whole life.
+echo "━━━ Check 0b: User Lingering ━━━"
+if [ "$(loginctl show-user "$(id -un)" --property=Linger --value 2>/dev/null)" = "yes" ]; then
+  echo "✅ Lingering: enabled for $(id -un)"
+else
+  echo "  Enabling, so the cluster outlives this session..."
+  sudo loginctl enable-linger "$(id -un)"
+  echo "✅ Lingering: enabled for $(id -un)"
+fi
 
 echo "━━━ Check 1: IP Forwarding ━━━"
 if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
