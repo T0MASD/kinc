@@ -15,6 +15,16 @@ on:
 permissions:
   contents: read
 
+# One run per branch. A push supersedes the run before it, and the earlier one
+# is cancelled rather than finishing a suite nobody will read - 27 runs in a day
+# of iteration, most of them already stale when they completed.
+#
+# Not on main or on a tag: those runs are the record of what a commit did, and a
+# later push must not delete the evidence for an earlier one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
   test-baked-in:
     runs-on: ubuntu-latest
@@ -999,9 +1009,39 @@ jobs:
   # Each phase runs on a mounted config, which is the default path, so the
   # KubeletConfiguration preflight patches comes from a file rather than the
   # image.
+  # The limit shapes, in parallel.
+  #
+  # These were five deploys in one job, run one after another, and that job was
+  # the whole suite's critical path at 12m37s against the next slowest at 5m10s.
+  # Nothing about them is sequential: each is an independent cluster with its own
+  # limits, and the only reason they shared a job is that they were written as
+  # phases of one.
   test-node-resources:
-    name: Test (node resources)
+    name: Test (resources, ${{ matrix.scenario }})
     runs-on: ubuntu-latest
+    strategy:
+      # Every shape is reported, rather than the first failure hiding the rest.
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: per-node
+            limits: KINC_WORKERS=1 KINC_NODE_MEMORY=5G KINC_NODE_CPUS=2
+            crossnode: 'yes'
+          - scenario: per-cluster
+            limits: KINC_WORKERS=1 KINC_CLUSTER_MEMORY=6G KINC_CLUSTER_CPUS=3
+            crossnode: 'no'
+          # Two nodes that may each reach 5G, inside a cluster capped at 6G.
+          # Overcommit with an aggregate ceiling, which is the combination worth
+          # having and the one that used to be refused as contradictory.
+          - scenario: cluster-below-sum
+            limits: KINC_WORKERS=1 KINC_NODE_MEMORY=5G KINC_NODE_CPUS=2 KINC_CLUSTER_MEMORY=6G KINC_CLUSTER_CPUS=3
+            crossnode: 'no'
+          # A control plane's static pods request 650m a worker never carries, so
+          # an even split runs it far closer to its ceiling than the number says.
+          - scenario: weighted-per-role
+            limits: KINC_WORKERS=1 KINC_CONTROL_PLANE_MEMORY=5G KINC_CONTROL_PLANE_CPUS=3 KINC_WORKER_MEMORY=3G KINC_WORKER_CPUS=1.5
+            crossnode: 'no'
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -1014,16 +1054,19 @@ jobs:
         run: ./tools/build.sh
         shell: bash
 
-      - name: Per-node limits only
+      - name: Deploy and verify
         run: |
           set -euo pipefail
-          export KINC_WORKERS=1 KINC_NODE_MEMORY=5G KINC_NODE_CPUS=2
+          export ${{ matrix.limits }}
           ./tools/deploy.sh
           ./tools/ci-verify-init.sh default
           ./tools/ci-verify-node-resources.sh default
         shell: bash
 
-      - name: Per-node limits only - traffic still crosses nodes
+      # Only where nodes are limited rather than the cluster: the question is
+      # whether a per-node cgroup limit leaves the geneve datapath alone.
+      - name: Traffic still crosses nodes
+        if: matrix.crossnode == 'yes'
         run: |
           set -euo pipefail
           mkdir -p ~/.kube
@@ -1036,31 +1079,71 @@ jobs:
           ./tools/ci-verify-crossnode.sh kinc-default-control-plane kinc-default-w1
         shell: bash
 
-      - name: Tear down
+      - name: Collect diagnostics
+        if: always()
+        run: ./tools/ci-collect-diagnostics.sh default
+        shell: bash
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kinc-diagnostics-resources-${{ matrix.scenario }}-${{ github.run_number }}
+          path: artifacts/diagnostics/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
         run: ./tools/cleanup.sh
         shell: bash
 
-      - name: Per-cluster limits only
-        run: |
-          set -euo pipefail
-          export KINC_WORKERS=1 KINC_CLUSTER_MEMORY=6G KINC_CLUSTER_CPUS=3
-          ./tools/deploy.sh
-          ./tools/ci-verify-init.sh default
-          ./tools/ci-verify-node-resources.sh default
+      - name: Analyse capture
+        if: always()
+        run: ./tools/ci-analyse-capture.sh default
         shell: bash
 
-      - name: Tear down again
-        run: ./tools/cleanup.sh
+      - name: Upload run summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-summary-resources-${{ matrix.scenario }}-${{ github.run_number }}
+          path: artifacts/summary/
+          if-no-files-found: warn
+
+  # Clusters that already exist, which no other job covers.
+  #
+  # Separate from the matrix because these are genuinely sequential: each builds
+  # a cluster and then does something to that same cluster. They also restart
+  # nodes, which is why they sit after their own capture rather than before it -
+  # a node that restarted seconds ago has plenty of classes still going, and the
+  # component-log gate reads the capture for exactly that.
+  test-resumed-clusters:
+    name: Test (resumed clusters)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: System prerequisites check
+        run: ./tools/ci-prepare-host.sh
         shell: bash
 
-      - name: Both, with the cluster below the sum of its nodes
+      - name: Build kinc image
+        run: ./tools/build.sh
+        shell: bash
+
+      - name: An existing cluster adopts a limit it is given
+        run: ./tools/ci-verify-resumed-adoption.sh default
+        shell: bash
+
+      - name: A node restarted onto a new image adopts its configuration
         run: |
           set -euo pipefail
-          # Two nodes that may each reach 5G, inside a cluster capped at 6G.
-          export KINC_WORKERS=1 KINC_NODE_MEMORY=5G KINC_NODE_CPUS=2 KINC_CLUSTER_MEMORY=6G KINC_CLUSTER_CPUS=3
+          export KINC_WORKERS=0 KINC_NODE_MEMORY=5G
+          ./tools/cleanup.sh default || true
           ./tools/deploy.sh
-          ./tools/ci-verify-init.sh default
-          ./tools/ci-verify-node-resources.sh default
+          ./tools/ci-verify-image-change-restart.sh default
         shell: bash
 
       - name: Collect diagnostics
@@ -1072,82 +1155,15 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: kinc-diagnostics-node-resources-${{ github.run_number }}
-          path: artifacts/
-          include-hidden-files: true
+          name: kinc-diagnostics-resumed-${{ github.run_number }}
+          path: artifacts/diagnostics/
           retention-days: 30
-
-      - name: Tear down before the weighted phase
-        run: ./tools/cleanup.sh default
-        shell: bash
-
-      # A weighted split, which is the shape a limit usually wants.
-      #
-      # A control plane's four static pods request 650m of CPU that a worker
-      # never carries, and it comes out of allocatable rather than the reserve -
-      # so an even split runs the control plane far closer to its ceiling than
-      # the number suggests. Until these variables existed one figure was
-      # templated into every node's quadlet and a weighted split could not be
-      # expressed at all.
-      - name: Per-role limits, weighted towards the control plane
-        run: |
-          set -euo pipefail
-          export KINC_WORKERS=1
-          export KINC_CONTROL_PLANE_MEMORY=5G KINC_CONTROL_PLANE_CPUS=3
-          export KINC_WORKER_MEMORY=3G        KINC_WORKER_CPUS=1.5
-          ./tools/deploy.sh
-          ./tools/ci-verify-node-resources.sh default
-        shell: bash
-
-      - name: Tear down the weighted cluster
-        run: ./tools/cleanup.sh default
-        shell: bash
-
-      # After the capture, not before it.
-      #
-      # Both of these restart a node, and the component-log gate reads the
-      # capture for classes that are still going. A node that restarted
-      # seconds earlier has plenty - and a worker left talking to a control
-      # plane that is restarting has more. Taking the capture from the
-      # settled cluster above and running these after it keeps both honest.
-      # A cluster that already exists, which no other phase here covers.
-      #
-      # Every other phase builds a cluster and throws it away, so all of them
-      # test a first boot. The provisioning that makes a node advertise honestly
-      # used to be gated on /var/lib/kubeadm-initialized, which is on a volume,
-      # so a cluster that came back kept whatever it was born with - the limit
-      # reached the cgroup and never the kubelet. A consumer found that; CI
-      # could not, because CI never resumed a cluster.
-      - name: An existing cluster adopts a limit it is given
-        run: |
-          set -euo pipefail
-          ./tools/ci-verify-resumed-adoption.sh default
-        shell: bash
-
-      # The same node, restarted onto a different image.
-      #
-      # ci-verify-restart.sh restarts on the same image, which proves identity
-      # and cannot prove configuration. For a consumer whose clusters are
-      # resumed rather than rebuilt, a restart normally crosses an image change,
-      # and a node that comes back with new binaries and the configuration the
-      # cluster was born with reports nothing.
-      - name: A node restarted onto a new image adopts its configuration
-        run: |
-          set -euo pipefail
-          export KINC_WORKERS=0 KINC_NODE_MEMORY=5G
-          ./tools/cleanup.sh default || true
-          ./tools/deploy.sh
-          ./tools/ci-verify-image-change-restart.sh default
-        shell: bash
 
       - name: Cleanup
         if: always()
         run: ./tools/cleanup.sh
         shell: bash
 
-      # The analysis phase: every check that reads the capture, after teardown.
-      # This job collected diagnostics and never read them - the drift the
-      # single entry point exists to prevent.
       - name: Analyse capture
         if: always()
         run: ./tools/ci-analyse-capture.sh default
@@ -1157,6 +1173,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: run-summary-node-resources-${{ github.run_number }}
+          name: run-summary-resumed-${{ github.run_number }}
           path: artifacts/summary/
           if-no-files-found: warn
