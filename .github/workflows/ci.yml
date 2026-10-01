@@ -3,8 +3,13 @@ name: kinc CI
 on:
   push:
     branches: [main]
+  # Every pull request, whatever it targets.
+  #
+  # Filtered to main, a pull request onto another branch got no CI at all - and
+  # that is exactly the shape a stacked change takes, where one branch builds on
+  # another not yet merged. Such a PR sat green-looking and untested until it was
+  # triggered by hand, which is a worse state than failing.
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
