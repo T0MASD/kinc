@@ -843,6 +843,35 @@ fails at the end if any did.
 KINC_LOG_CAPTURE=<dir> ./tools/ci-verify-deprecations.sh   # one check, any archived capture
 ```
 
+### Reading a node you cannot reach
+
+A kinc node is a container, so `podman exec` reaches it on the host that runs
+it. Where that host is not yours to log into - a node inside a VM whose only
+interface is the API server - the cluster itself is the way in. A pod with
+`hostPID: true` shares the node container's PID namespace, and PID 1 there is
+the node's systemd:
+
+```bash
+kubectl run nodeenv --image=busybox --restart=Never --rm -it \
+  --overrides='{"spec":{"hostPID":true,"nodeName":"kinc-default-control-plane",
+                "containers":[{"name":"n","image":"busybox","securityContext":{"privileged":true},
+                "command":["sh","-c","tr \\0 \\n < /proc/1/environ"],
+                "stdin":true,"tty":true}]}}'
+```
+
+Which answers the question that matters when a node is configured by its
+environment: whether the variable arrived. `KINC_NODE_MEMORY`,
+`KINC_NODE_RESERVED_MEMORY` and the rest are set on the container by whatever
+renders the quadlet, and a unit sees them only if it also declares
+`PassEnvironment=` - so a value can be correct in the quadlet and absent from
+the unit, and the node simply uses its default. Reading PID 1's environment
+tells you which of the two halves to look at.
+
+What the node then resolved is in
+`/etc/kubernetes/kubelet.conf.d/20-kinc-node-resources.conf`, which is the file
+the kubelet reads, and `kinc-node-resources.service` logs the arithmetic it did
+to get there.
+
 ### Logs from a CI run
 
 CI collects all of the above into artifacts on every run, passing or failing,

@@ -1000,6 +1000,38 @@ fi
 
 echo
 echo "✅ Deployment complete!"
+
+# What each node actually reserved, read from the node rather than derived here.
+#
+# Deriving it host-side would be a prediction, and a prediction that silently
+# disagreed with the node would print a confident wrong number - which is the
+# failure this codebase keeps producing. It would also put the reserve defaults
+# in two places, free to drift.
+#
+# The node resolves them and writes them down, so this reads what it wrote. The
+# same file is what the kubelet reads, so there is nothing between this and the
+# behaviour. For a consumer who mounts /etc/kubernetes it is readable from
+# outside the node for the same reason.
+_resolved_reservations() {
+    local n first=1 dropin=/etc/kubernetes/kubelet.conf.d/20-kinc-node-resources.conf
+    for n in $(podman ps --format '{{.Names}}' 2>/dev/null | grep "^kinc-${CLUSTER_NAME}-" | sort); do
+        podman exec "$n" test -f "$dropin" 2>/dev/null || continue
+        if [ "$first" -eq 1 ]; then
+            echo
+            echo "🧮 Reserved by each node, as the node resolved it:"
+            first=0
+        fi
+        # `cat` inside the container, not a redirection outside it: `< "$dropin"`
+        # is resolved by this shell, on the host, where the file does not exist.
+        # That printed an empty value under a confident header, which is the
+        # failure this whole function exists to prevent.
+        _r=$(podman exec "$n" cat "$dropin" 2>/dev/null | tr -d ' ' \
+             | awk -F: '/^(systemReserved|kubeReserved)/ { k=$1 }
+                        /^(cpu|memory)/ { printf "%s.%s=%s ", k, $1, $2 }')
+        printf '   %-30s %s\n' "$n" "${_r:-<could not read ${dropin}>}"
+    done
+}
+_resolved_reservations
 echo
 echo "📋 Next steps:"
 echo
