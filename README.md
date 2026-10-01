@@ -993,6 +993,10 @@ kinc uses GitHub Actions:
 
 ## License
 
+kinc's own work is dedicated to the public domain; see [UNLICENSE](UNLICENSE).
+That cannot cover third-party work kinc includes or derives from, which stays
+under its own licence — see [NOTICE](NOTICE) for what and from where.
+
 THE SOFTWARE IS AI GENERATED AND PROVIDED “AS IS”, WITHOUT CLAIM OF COPYRIGHT OR WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ---
@@ -1002,11 +1006,13 @@ THE SOFTWARE IS AI GENERATED AND PROVIDED “AS IS”, WITHOUT CLAIM OF COPYRIGH
 - **Fedora:** The base image, and every package kinc runs — kubernetes, kubeadm,
   cri-tools and cri-o all come from Fedora's own builds rather than upstream
   binaries, which is what makes the image a normal `dnf install`
-- **KIND (Kubernetes IN Docker):** Inspiration
+- **KIND (Kubernetes IN Docker):** `build/Containerfile` is derived from kind's
+  node base image — the configuration that lets systemd run as PID 1 in a
+  container came from there. Apache-2.0; see [NOTICE](NOTICE)
 - **Antrea:** Cluster networking
 - **kubeadm:** Cluster bootstrap
 - **CRI-O:** Container runtime
 - **Podman:** Rootless containers
 - **systemd:** Service management
-- **local-path-provisioner:** Dynamic PersistentVolumes
+- **local-path-provisioner:** Dynamic PersistentVolumes; its manifests are vendored here. Apache-2.0
 
