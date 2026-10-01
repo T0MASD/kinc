@@ -1,3 +1,30 @@
+# Copyright 2018 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# This file is derived from kind's node base image and has been modified:
+#
+#   kubernetes-sigs/kind, images/base/Dockerfile
+#   https://github.com/kubernetes-sigs/kind/blob/main/images/base/Dockerfile
+#
+# The systemd-in-container configuration below - masking units, pruning the
+# *.wants directories, STOPSIGNAL SIGRTMIN+3 and the reasoning for it - comes
+# from there. What differs is the distribution (Fedora rather than Debian), the
+# runtime (CRI-O and crun rather than containerd), the networking (Antrea), and
+# everything kinc adds on top.
+#
+# See NOTICE for the full list of third-party work kinc includes or derives from.
+
 # kinc Consolidated Kubernetes Node
 # Single-stage Dockerfile that combines base Fedora + CRI-O + kinc components
 FROM fedora:44
@@ -14,7 +41,7 @@ ARG CACHE_BUST=1
 # - packages needed for kubernetes components  
 # - packages needed for networked backed storage with kubernetes
 # - packages needed by the container runtime (CRI-O/crun)
-# - misc packages kind uses itself
+# - misc packages a node needs for itself
 # - packages that provide semi-core kubernetes functionality
 RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
     && dnf update -y \
@@ -104,8 +131,6 @@ COPY --chmod=0644 base/etc/crio/ /etc/crio/
 COPY --chmod=0644 base/etc/sysctl.d/* /etc/sysctl.d/
 COPY --chmod=0644 base/etc/systemd/system/* /etc/systemd/system/
 COPY --chmod=0644 base/etc/systemd/system/kubelet.service.d/* /etc/systemd/system/kubelet.service.d/
-
-# Copy CNI configuration (pre-install kindnet config to avoid bootstrap issues)
 
 # Copy rootless crun wrapper for OOM score adjustment fix
 COPY --chmod=0755 base/usr/local/bin/crun-wrapper.sh /usr/local/bin/crun-wrapper.sh
