@@ -543,8 +543,17 @@ is written into the API server's serving certificate, every kubeconfig and
 This matters without anyone restarting anything on purpose: `Restart=always` is
 in the quadlet, so a crash of the container's PID 1 is enough.
 
+A node also comes back bounded as it was. `MemoryHigh` and `CPUQuota` live on
+the node's systemd unit, and the aggregate ones on the cluster's slice; both
+outlive the container they bound.
+
 ```bash
 ./tools/ci-verify-restart.sh default    # restarts every node, asserts it returns
+
+# The resource gate compares against what was asked for, so give it the same
+# variables the cluster was deployed with.
+KINC_NODE_MEMORY=2G KINC_NODE_CPUS=1 \
+  ./tools/ci-verify-node-resources.sh default
 ```
 
 ### Faro Event Capture (Optional)
@@ -664,6 +673,31 @@ podman exec kinc-default-control-plane sh -c 'ls /var/log/pods'
 podman exec kinc-default-control-plane sh -c 'cat /var/log/pods/kube-system_etcd-*/etcd/*.log'
 ```
 
+### How a run is verified
+
+A run has three phases, and which one a check belongs to follows from what it
+reads.
+
+| Phase | What runs |
+|---|---|
+| Live | What needs a running cluster: initialization, the Antrea datapath, cross-node traffic, Faro, node resources, restart. |
+| Capture | `ci-collect-diagnostics.sh`, `ci-collect-faro.sh` and `ci-collect-audit.sh` write the record; `cleanup.sh` then tears the cluster down. |
+| Analyse | `ci-analyse-capture.sh` runs everything that reads that record: whether every component settled, whether any denial persisted, whether anything logged a deprecation, and the run summary. |
+
+The analysis phase reads a finished record by design. Whether something has
+stopped is silence measured against the end of the log, and the end of a log
+holds still only once the cluster has. The phase also reaches what the job's
+console does not: a component's own log lives in the capture, so a deprecation
+the kubelet printed on every node is found there.
+
+Every check in the phase runs even when an earlier one fails, and the phase
+fails at the end if any did.
+
+```bash
+./tools/ci-analyse-capture.sh default                      # the whole phase
+KINC_LOG_CAPTURE=<dir> ./tools/ci-verify-deprecations.sh   # one check, any archived capture
+```
+
 ### Logs from a CI run
 
 CI collects all of the above into artifacts on every run, passing or failing,
@@ -675,7 +709,7 @@ so a red build does not need reproducing to be read. From a run page, under
 | `kinc-diagnostics-<job>-<n>` | Per node: `kubelet.log`, `crio.log`, full boot `journal.txt`, `errors.log` (every line above warning), `kinc-scripts.log` (all three `/var/log/kinc/*.log`), failed units, `inspect.json`. Plus every pod's log, Antrea's `agentinfo`/`podinterface`/`ovsflows`, cluster state, and the host contract kinc was given. |
 | `audit-log-<job>-<n>` | The API-server audit log, if the cluster was deployed with `KINC_AUDIT_RESOURCES`. |
 | `faro-events-<job>-<n>` | Faro's captured events, if deployed with `KINC_ENABLE_FARO=true`. |
-| `run-summary-<job>-<n>` | Every error class in the run: how far into its component's life it last appeared, how often, how long since, and whether it is startup noise, a one-off, stopped or still going. |
+| `run-summary-<job>-<n>` | Every error class in the run: how far into its component's life it last appeared, how often, how long since, and whether it is startup noise, a one-off, stopped or still going. Plus `deprecations-<cluster>.txt`, every deprecation any component logged, and for each one whether it is a finding or a known entry on the allowlist. |
 
 The summary is also printed into the job log and the job summary, so it needs
 no download to read.
