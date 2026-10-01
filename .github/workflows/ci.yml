@@ -1006,6 +1006,108 @@ jobs:
           path: artifacts/summary/
           retention-days: 30
 
+  # Every shape resource limits can take, each deployed and asserted.
+  #
+  # They are different policies, not degrees of one:
+  #
+  #   per-node only      each node bounded, the total is not - two 4G nodes can
+  #                      want 8G of a 7G host
+  #   per-cluster only   the total bounded, the nodes are not - one node can
+  #                      starve another
+  #   both, cluster <    each node may burst to its limit while together they
+  #   the sum of nodes   may not exceed the cluster's. This is the one a small
+  #                      VM wants, and it was refused as contradictory until a
+  #                      review pointed out it is the point.
+  #
+  # Three deploys in one job rather than three jobs, because they share a build
+  # and differ only in environment.
+  #
+  # Memory throughout, not CPU. A runner has 2 vCPU, so a per-node CPU limit is
+  # either a no-op at 2 or ruinous below it: measured, a control plane capped at
+  # one core was still running kubeadm init after 21 minutes, with 165 throttle
+  # events. Memory limits of 5G sit above what a node uses - measured 2.9G and
+  # 1.2G idle - and below the host, which exercises the arithmetic without
+  # anything throttling.
+  #
+  # Each phase runs on a mounted config, which is the default path, so the
+  # KubeletConfiguration preflight patches comes from a file rather than the
+  # image.
+  test-node-resources:
+    name: Test (node resources)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
 
+      - name: System prerequisites check
+        run: ./tools/ci-prepare-host.sh
+        shell: bash
 
+      - name: Build kinc image
+        run: ./tools/build.sh
+        shell: bash
 
+      - name: Per-node limits only
+        run: |
+          set -euo pipefail
+          export KINC_WORKERS=1 KINC_NODE_MEMORY=5G
+          ./tools/deploy.sh
+          ./tools/ci-verify-init.sh default
+          ./tools/ci-verify-node-resources.sh default
+        shell: bash
+
+      - name: Per-node limits only - traffic still crosses nodes
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.kube
+          podman exec kinc-default-control-plane cat /etc/kubernetes/admin.conf \
+            | sed "s|server: https://.*:6443|server: https://127.0.0.1:6443|" > ~/.kube/config
+          kubectl apply -f runtime/manifests/test-workload-crossnode.yaml
+          ./tools/ci-verify-crossnode.sh kinc-default-control-plane kinc-default-w1
+        shell: bash
+
+      - name: Tear down
+        run: ./tools/cleanup.sh
+        shell: bash
+
+      - name: Per-cluster limits only
+        run: |
+          set -euo pipefail
+          export KINC_WORKERS=1 KINC_CLUSTER_MEMORY=6G
+          ./tools/deploy.sh
+          ./tools/ci-verify-init.sh default
+          ./tools/ci-verify-node-resources.sh default
+        shell: bash
+
+      - name: Tear down again
+        run: ./tools/cleanup.sh
+        shell: bash
+
+      - name: Both, with the cluster below the sum of its nodes
+        run: |
+          set -euo pipefail
+          # Two nodes that may each reach 5G, inside a cluster capped at 6G.
+          export KINC_WORKERS=1 KINC_NODE_MEMORY=5G KINC_CLUSTER_MEMORY=6G
+          ./tools/deploy.sh
+          ./tools/ci-verify-init.sh default
+          ./tools/ci-verify-node-resources.sh default
+        shell: bash
+
+      - name: Collect diagnostics
+        if: always()
+        run: ./tools/ci-collect-diagnostics.sh default
+        shell: bash
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kinc-diagnostics-node-resources-${{ github.run_number }}
+          path: artifacts/
+          include-hidden-files: true
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: ./tools/cleanup.sh
+        shell: bash
