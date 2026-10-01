@@ -27,9 +27,6 @@ https://github.com/kubernetes-sigs/kind
   (Antrea), rootless operation under Podman quadlets, and everything kinc adds
   on top.
 
-  This attribution was missing until October 2026. It was pointed out publicly
-  and added on the same day.
-
 ================================================================================
 local-path-provisioner
 Copyright The local-path-provisioner Authors (Rancher Labs)
