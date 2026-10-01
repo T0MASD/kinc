@@ -337,6 +337,17 @@ jobs:
         run: ./tools/ci-verify-faro.sh default
         shell: bash
 
+      # The default path: no limits asked for, so none may exist.
+      #
+      # This is the direction that matters for everyone who sets nothing, and
+      # it needs a job that sets nothing to assert it. test-multi-node used to
+      # carry it and now runs limited, so it moved here rather than being lost
+      # - a limit leaking in where none was asked for would otherwise show up
+      # nowhere.
+      - name: Verify nothing is limited by default
+        run: ./tools/ci-verify-node-resources.sh default
+        shell: bash
+
       - name: Collect diagnostics
         if: always()
         run: ./tools/ci-collect-diagnostics.sh default
@@ -414,6 +425,23 @@ jobs:
 
   test-multi-node:
     runs-on: ubuntu-latest
+    # Resources are a property of this suite, not a job of their own.
+    #
+    # They used to be set in one job that ran nothing else - no faro, no audit,
+    # no restart - so every interaction between a limit and the rest of kinc
+    # was untested. Setting them here covers the one that matters most: this is
+    # the only job that restarts a cluster, and whether node units keep their
+    # limits across a stop/start is exactly the kind of thing that degrades
+    # quietly.
+    #
+    # Nodes that may each reach 6G and 2 cores, inside a cluster capped below
+    # the sum of them. test-baked-in stays unlimited and asserts that, so the
+    # default path - what `kinc up` gives you - keeps its own coverage.
+    env:
+      KINC_NODE_MEMORY: 6G
+      KINC_NODE_CPUS: 2
+      KINC_CLUSTER_MEMORY: 10G
+      KINC_CLUSTER_CPUS: 3
     name: Test (multi-node)
 
     steps:
@@ -536,17 +564,16 @@ jobs:
           path: artifacts/audit/
           retention-days: 30
 
-      # Asserts the default, which is that nothing is limited.
+      # Asserts the limits this job's env asked for: enforced on each node's
+      # unit and on the cluster slice, and advertised to the scheduler as
+      # allocatable less each node's own reserve.
       #
-      # The limited path is not exercised here. A runner is 2 vCPU and about
-      # 7GB, and a control plane reserves 2Gi for its own static pods, so any
-      # node limit small enough to fit two nodes on a runner is one preflight
-      # correctly refuses as leaving nothing to schedule. Squeezing it to fit
-      # would test the squeeze rather than the feature.
-      #
-      # What this does catch is the direction that matters for everyone who
-      # sets nothing: a limit appearing where none was asked for.
-      - name: Verify no node resource limits by default
+      # This used to assert the opposite - that nothing was limited - on the
+      # grounds that a runner was too small to fit two limited nodes. It is not:
+      # the same runner carries the dedicated resources job's two 5G nodes, so
+      # the reason the limited path was skipped here was measured on hardware
+      # that is no longer what CI runs on.
+      - name: Verify node resources are enforced and advertised
         run: ./tools/ci-verify-node-resources.sh default
         shell: bash
 
@@ -556,6 +583,18 @@ jobs:
       # with both a control plane and a worker, and they fail the same way.
       - name: Verify the cluster survives a restart
         run: ./tools/ci-verify-restart.sh default
+        shell: bash
+
+      # The same assertion again, on the other side of the restart.
+      #
+      # The gate above ran against a cluster that had never been restarted, and
+      # ci-verify-restart.sh checks addresses, readiness and kube-system - it
+      # says nothing about limits. So whether a node unit keeps its MemoryHigh
+      # and CPUQuota, and whether the slice keeps its own, across a stop/start
+      # was asserted nowhere. Re-running it here costs no deploy and is the
+      # reason this job carries the limits at all.
+      - name: Verify node resources survived the restart
+        run: ./tools/ci-verify-node-resources.sh default
         shell: bash
 
       - name: Cleanup
@@ -978,7 +1017,7 @@ jobs:
       - name: Per-node limits only
         run: |
           set -euo pipefail
-          export KINC_WORKERS=1 KINC_NODE_MEMORY=5G
+          export KINC_WORKERS=1 KINC_NODE_MEMORY=5G KINC_NODE_CPUS=2
           ./tools/deploy.sh
           ./tools/ci-verify-init.sh default
           ./tools/ci-verify-node-resources.sh default
@@ -1004,7 +1043,7 @@ jobs:
       - name: Per-cluster limits only
         run: |
           set -euo pipefail
-          export KINC_WORKERS=1 KINC_CLUSTER_MEMORY=6G
+          export KINC_WORKERS=1 KINC_CLUSTER_MEMORY=6G KINC_CLUSTER_CPUS=3
           ./tools/deploy.sh
           ./tools/ci-verify-init.sh default
           ./tools/ci-verify-node-resources.sh default
@@ -1018,7 +1057,7 @@ jobs:
         run: |
           set -euo pipefail
           # Two nodes that may each reach 5G, inside a cluster capped at 6G.
-          export KINC_WORKERS=1 KINC_NODE_MEMORY=5G KINC_CLUSTER_MEMORY=6G
+          export KINC_WORKERS=1 KINC_NODE_MEMORY=5G KINC_NODE_CPUS=2 KINC_CLUSTER_MEMORY=6G KINC_CLUSTER_CPUS=3
           ./tools/deploy.sh
           ./tools/ci-verify-init.sh default
           ./tools/ci-verify-node-resources.sh default
