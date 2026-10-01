@@ -1063,6 +1063,36 @@ jobs:
           ./tools/ci-verify-node-resources.sh default
         shell: bash
 
+      # A cluster that already exists, which no other phase here covers.
+      #
+      # Every other phase builds a cluster and throws it away, so all of them
+      # test a first boot. The provisioning that makes a node advertise honestly
+      # used to be gated on /var/lib/kubeadm-initialized, which is on a volume,
+      # so a cluster that came back kept whatever it was born with - the limit
+      # reached the cgroup and never the kubelet. A consumer found that; CI
+      # could not, because CI never resumed a cluster.
+      - name: An existing cluster adopts a limit it is given
+        run: |
+          set -euo pipefail
+          ./tools/ci-verify-resumed-adoption.sh default
+        shell: bash
+
+      # The same node, restarted onto a different image.
+      #
+      # ci-verify-restart.sh restarts on the same image, which proves identity
+      # and cannot prove configuration. For a consumer whose clusters are
+      # resumed rather than rebuilt, a restart normally crosses an image change,
+      # and a node that comes back with new binaries and the configuration the
+      # cluster was born with reports nothing.
+      - name: A node restarted onto a new image adopts its configuration
+        run: |
+          set -euo pipefail
+          export KINC_WORKERS=1 KINC_NODE_MEMORY=5G
+          ./tools/cleanup.sh default || true
+          ./tools/deploy.sh
+          ./tools/ci-verify-image-change-restart.sh default
+        shell: bash
+
       - name: Collect diagnostics
         if: always()
         run: ./tools/ci-collect-diagnostics.sh default

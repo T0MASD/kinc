@@ -462,6 +462,11 @@ sed "s/VolumeName=kinc-storage/VolumeName=${CLUSTER_STORAGE}/g" \
 NODE_ENV=""
 [ -n "${KINC_NODE_MEMORY:-}" ] && NODE_ENV="${NODE_ENV}Environment=KINC_NODE_MEMORY=${KINC_NODE_MEMORY}\n"
 [ -n "${KINC_NODE_CPUS:-}" ]   && NODE_ENV="${NODE_ENV}Environment=KINC_NODE_CPUS=${KINC_NODE_CPUS}\n"
+# The reserve a node keeps for itself. Read inside the node and documented as
+# overridable, and until now never passed in - so setting either on the host
+# changed nothing, silently, and every node used the built-in default.
+[ -n "${KINC_NODE_RESERVED_MEMORY:-}" ] && NODE_ENV="${NODE_ENV}Environment=KINC_NODE_RESERVED_MEMORY=${KINC_NODE_RESERVED_MEMORY}\n"
+[ -n "${KINC_NODE_RESERVED_CPU:-}" ]    && NODE_ENV="${NODE_ENV}Environment=KINC_NODE_RESERVED_CPU=${KINC_NODE_RESERVED_CPU}\n"
 
 # The cluster's cgroup. Written whether or not it carries limits, so every
 # node of a cluster is grouped under one slice and `systemd-cgls` shows a

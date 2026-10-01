@@ -1,0 +1,37 @@
+[Unit]
+Description=Render this node's resource reservations for the kubelet
+Documentation=file:///etc/kinc/scripts/kinc-node-resources.sh
+
+# Every boot, not once. The marker guard that kinc-preflight and kubeadm-init
+# carry is what froze this configuration at whatever first built the cluster.
+#
+# Ordered before the kubelet so a render is in place when it reads its config
+# directory, and deliberately ordered after nothing else. This needs only the
+# environment and /proc, so it takes no dependency on kubeadm-init - which is
+# what makes Before=kubelet.service safe here.
+#
+# That is not true for every unit. kinc-faro-kubeconfig.service must wait for
+# kubeadm-init, because the file it stages does not exist until kubeadm has run,
+# and kinc-kubeadm-init.sh runs `kubeadm init phase kubelet-start`, which starts
+# the kubelet and blocks. Adding Before=kubelet.service to a unit that is also
+# After=kubeadm-init.service deadlocks a first boot, and systemd will not report
+# it as an ordering cycle, because the dependency on the kubelet lives inside
+# the script rather than in a unit.
+Before=kubelet.service
+After=local-fs.target
+
+[Service]
+# systemd does not hand a service its own environment. The quadlet sets these on
+# the container, so they reach PID 1, and without this line a unit sees none of
+# them: this script ran, exited 0 and wrote nothing, which is indistinguishable
+# from a cluster that asked for no limits.
+PassEnvironment=KINC_NODE_MEMORY KINC_NODE_CPUS KINC_NODE_RESERVED_MEMORY KINC_NODE_RESERVED_CPU
+
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/kinc/scripts/kinc-node-resources.sh
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
