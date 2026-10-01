@@ -309,27 +309,71 @@ KINC_WORKERS="${KINC_WORKERS:-0}"
 # refuses to run. KINC_NODE_MEMORY and KINC_NODE_CPUS are therefore passed into
 # the node as well, where kinc-preflight turns them into systemReserved so that
 # allocatable matches what the node may actually have.
-NODE_LIMITS=""
-if [ -n "${KINC_NODE_MEMORY:-}" ]; then
-    # MemoryHigh is the limit; MemoryMax is a backstop above it.
-    #
-    # MemoryHigh throttles and reclaims, MemoryMax kills. Setting only the kill
-    # means a node that drifts over its budget loses a process rather than
-    # slowing down, and the kernel picks which - inside a node the control
-    # plane sits at the inherited oom_score_adj floor, so it survives ordinary
-    # pods, but nothing about that is graceful. Throttling first gives the
-    # kubelet and the workload a chance to give memory back.
-    #
-    # The backstop is 10% above, so the kill is a genuine last resort rather
-    # than the first thing that happens at the limit.
-    NODE_LIMITS="MemoryHigh=${KINC_NODE_MEMORY}"
-    _max=$(numfmt --from=iec "${KINC_NODE_MEMORY%i}" 2>/dev/null) \
-        && NODE_LIMITS="${NODE_LIMITS}\nMemoryMax=$(( _max * 110 / 100 ))"
-fi
-if [ -n "${KINC_NODE_CPUS:-}" ]; then
-    quota=$(awk -v c="${KINC_NODE_CPUS}" 'BEGIN { printf "%d", c * 100 }')
-    NODE_LIMITS="${NODE_LIMITS:+${NODE_LIMITS}\n}CPUQuota=${quota}%"
-fi
+# A control plane and a worker are not the same size.
+#
+# A control plane carries the cluster: its static pods request 650m of CPU
+# before anything else - apiserver 250m, controller-manager 200m, etcd 100m,
+# scheduler 100m - against a worker's nothing, and both then carry antrea-agent
+# at 400m. So a control plane starts 650m further down, and reserves 500m for
+# itself against a worker's 200m on top of that.
+#
+# Splitting a machine evenly therefore gives the control plane far less room
+# than the number suggests. Measured on a 4 CPU VM at 2 CPU per node, the
+# control plane advertised 1500m and its own pods requested 1450m of it.
+#
+# KINC_NODE_* applies to every node and is the simple case. The per-role
+# variables override it where the split should be weighted, which is most places
+# a limit is worth setting at all.
+#
+#   KINC_NODE_MEMORY=2G             every node
+#   KINC_CONTROL_PLANE_MEMORY=3G    this node instead, if set
+#   KINC_WORKER_MEMORY=1G           those nodes instead, if set
+#
+CP_MEMORY="${KINC_CONTROL_PLANE_MEMORY:-${KINC_NODE_MEMORY:-}}"
+CP_CPUS="${KINC_CONTROL_PLANE_CPUS:-${KINC_NODE_CPUS:-}}"
+WORKER_MEMORY="${KINC_WORKER_MEMORY:-${KINC_NODE_MEMORY:-}}"
+WORKER_CPUS="${KINC_WORKER_CPUS:-${KINC_NODE_CPUS:-}}"
+
+# Builds one role's limits and its environment. The node itself knows nothing
+# about roles: it reads KINC_NODE_MEMORY, and this passes whichever value that
+# role resolved to.
+#
+#   $1 memory  $2 cpus
+# Sets _ROLE_LIMITS and _ROLE_ENV.
+build_role_limits() {
+    local mem="$1" cpus="$2" _max quota
+    _ROLE_LIMITS=""
+    _ROLE_ENV=""
+    if [ -n "$mem" ]; then
+        # MemoryHigh is the limit; MemoryMax is a backstop 10% above it.
+        # MemoryHigh throttles and reclaims, MemoryMax kills - setting only the
+        # kill means a node that drifts over its budget loses a process rather
+        # than slowing down, and the kernel picks which.
+        _ROLE_LIMITS="MemoryHigh=${mem}"
+        _max=$(numfmt --from=iec "${mem%i}" 2>/dev/null) \
+            && _ROLE_LIMITS="${_ROLE_LIMITS}\nMemoryMax=$(( _max * 110 / 100 ))"
+        _ROLE_ENV="${_ROLE_ENV}Environment=KINC_NODE_MEMORY=${mem}\n"
+    fi
+    if [ -n "$cpus" ]; then
+        quota=$(awk -v c="$cpus" 'BEGIN { printf "%d", c * 100 }')
+        _ROLE_LIMITS="${_ROLE_LIMITS:+${_ROLE_LIMITS}\n}CPUQuota=${quota}%"
+        _ROLE_ENV="${_ROLE_ENV}Environment=KINC_NODE_CPUS=${cpus}\n"
+    fi
+    # The reserve a node keeps for itself, read inside it and documented as
+    # overridable. It reached the node through neither the quadlet nor any
+    # PassEnvironment until this was added, so setting either did nothing.
+    [ -n "${KINC_NODE_RESERVED_MEMORY:-}" ] && _ROLE_ENV="${_ROLE_ENV}Environment=KINC_NODE_RESERVED_MEMORY=${KINC_NODE_RESERVED_MEMORY}\n"
+    [ -n "${KINC_NODE_RESERVED_CPU:-}" ]    && _ROLE_ENV="${_ROLE_ENV}Environment=KINC_NODE_RESERVED_CPU=${KINC_NODE_RESERVED_CPU}\n"
+    return 0
+}
+
+build_role_limits "$CP_MEMORY" "$CP_CPUS"
+NODE_LIMITS="$_ROLE_LIMITS"
+NODE_ENV="$_ROLE_ENV"
+
+build_role_limits "$WORKER_MEMORY" "$WORKER_CPUS"
+WORKER_NODE_LIMITS="$_ROLE_LIMITS"
+WORKER_NODE_ENV="$_ROLE_ENV"
 
 CLUSTER_LIMITS=""
 if [ -n "${KINC_CLUSTER_MEMORY:-}" ]; then
@@ -459,14 +503,7 @@ sed "s/VolumeName=kinc-storage/VolumeName=${CLUSTER_STORAGE}/g" \
 # same number, because a container cannot read a limit set on its parent. Both
 # halves are needed: without the cgroup nothing is enforced, and without this
 # the scheduler places work against the host's totals that the cgroup refuses.
-NODE_ENV=""
-[ -n "${KINC_NODE_MEMORY:-}" ] && NODE_ENV="${NODE_ENV}Environment=KINC_NODE_MEMORY=${KINC_NODE_MEMORY}\n"
-[ -n "${KINC_NODE_CPUS:-}" ]   && NODE_ENV="${NODE_ENV}Environment=KINC_NODE_CPUS=${KINC_NODE_CPUS}\n"
-# The reserve a node keeps for itself. Read inside the node and documented as
-# overridable, and until now never passed in - so setting either on the host
-# changed nothing, silently, and every node used the built-in default.
-[ -n "${KINC_NODE_RESERVED_MEMORY:-}" ] && NODE_ENV="${NODE_ENV}Environment=KINC_NODE_RESERVED_MEMORY=${KINC_NODE_RESERVED_MEMORY}\n"
-[ -n "${KINC_NODE_RESERVED_CPU:-}" ]    && NODE_ENV="${NODE_ENV}Environment=KINC_NODE_RESERVED_CPU=${KINC_NODE_RESERVED_CPU}\n"
+# NODE_ENV and WORKER_NODE_ENV are built per role above, by build_role_limits.
 
 # The cluster's cgroup. Written whether or not it carries limits, so every
 # node of a cluster is grouped under one slice and `systemd-cgls` shows a
@@ -836,11 +873,11 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
             -e "s|WORKER_IP_PLACEHOLDER|$(get_cluster_node_ip "$CLUSTER_PORT" "$i")|g" \
             -e "s/Volume=kinc-etc-kubernetes:/Volume=${WORKER_CONTAINER}-etc-kubernetes:/g" \
             -e "s|CLUSTER_SLICE_PLACEHOLDER|${CLUSTER_SLICE}|g" \
-            -e "s|NODE_LIMITS_PLACEHOLDER|${NODE_LIMITS}|g" \
+            -e "s|NODE_LIMITS_PLACEHOLDER|${WORKER_NODE_LIMITS}|g" \
             -e "s/kinc-etc-kubernetes-volume.service/${WORKER_CONTAINER}-etc-kubernetes-volume.service/g" \
             runtime/quadlet/kinc-worker.container > ~/.config/containers/systemd/${WORKER_CONTAINER}.container
-        if [ -n "$NODE_ENV" ]; then
-            sed -i "/^Environment=KUBECONFIG/a ${NODE_ENV%\\n}" \
+        if [ -n "$WORKER_NODE_ENV" ]; then
+            sed -i "/^Environment=KUBECONFIG/a ${WORKER_NODE_ENV%\\n}" \
                 ~/.config/containers/systemd/${WORKER_CONTAINER}.container
         fi
 

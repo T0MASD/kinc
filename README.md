@@ -573,6 +573,55 @@ plane and 1G for a worker.
 ./tools/ci-verify-node-resources.sh default     # asked, enforced and advertised agree
 ```
 
+**A control plane needs a larger share than a worker.** It carries the cluster,
+and that burden comes out of allocatable rather than out of the reserve, so
+kinc's defaults do not express it: they encode the asymmetry only as 2Gi/500m
+reserved on a control plane against 1Gi/200m on a worker.
+
+Measured on an idle cluster, the control-plane-specific load is its four static
+pods:
+
+| | CPU request | Memory request |
+|---|---|---|
+| kube-apiserver | 250m | none |
+| kube-controller-manager | 200m | none |
+| etcd | 100m | 100Mi |
+| kube-scheduler | 100m | none |
+| **Only on a control plane** | **650m** | **100Mi** |
+
+Everything else a node runs, antrea-agent at 400m among it, runs on both. So a
+control plane needs about 650m of CPU more than a worker before anything is
+scheduled, and roughly 100Mi more memory.
+
+**Reserve memory, size CPU.** Three of those four carry no memory request at
+all, so nothing accounts for them and the reserve has to. Every one of them
+carries a CPU request, which the scheduler can already see, so CPU needs no
+equivalent reserve - it needs a larger share. That is why the memory reserve
+differs by 1Gi between the roles while the CPU reserve differs by only 300m.
+
+Splitting a machine evenly therefore runs a control plane far closer to its
+ceiling than the number suggests. Measured on a 4 CPU / 8G VM at 2 CPU per node:
+the control plane advertised 1500m and 1450m of it was committed, so a single
+pod carrying a CPU request would not have scheduled there, while the worker sat
+at 72%. The same cluster unlimited reported 36% of 4 CPU, which is the same
+fact with nothing to measure it against.
+
+Weight the split rather than dividing evenly. `KINC_NODE_*` applies to every
+node; the per-role variables override it:
+
+```bash
+KINC_CONTROL_PLANE_MEMORY=5G KINC_CONTROL_PLANE_CPUS=3 \
+KINC_WORKER_MEMORY=3G        KINC_WORKER_CPUS=1.5 \
+KINC_WORKERS=1 ./tools/deploy.sh
+```
+
+Which gives, enforced and advertised:
+
+```
+kinc-default-control-plane   MemoryHigh=5G   CPUQuota=300%    2500m / 3Gi
+kinc-default-w1              MemoryHigh=3G   CPUQuota=150%    1300m / 2Gi
+```
+
 **Changing a limit on a cluster that already exists.** The reservations are
 rendered into the kubelet's config directory on every boot, so a node adopts
 what it is given when it next starts. `deploy.sh` declines to re-render a
