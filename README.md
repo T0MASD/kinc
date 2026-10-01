@@ -322,6 +322,9 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=myapp ./tools/deploy.sh
 - `KINC_ENABLE_FARO`: Enable Faro event capture (default: `false`, CI: `true`)
 - `KINC_AUDIT_RESOURCES`: Comma-separated `<group>/<resource>` to audit reads and deletes of (default: unset, no audit flags at all)
 - `KINC_WORKERS`: Worker nodes to join (default: `0`, a single-node cluster)
+- `KINC_NODE_MEMORY`, `KINC_NODE_CPUS`: what each node may use (default: unset, unlimited)
+- `KINC_CLUSTER_MEMORY`, `KINC_CLUSTER_CPUS`: what the cluster may use in total (default: unset, unlimited)
+- `KINC_NODE_RESERVED_MEMORY`, `KINC_NODE_RESERVED_CPU`: what a node keeps for itself rather than offering to the scheduler (default: `2Gi`/`500m` on a control plane, `1Gi`/`200m` on a worker)
 
 ### `cleanup.sh`
 Remove a kinc cluster and clean up all resources.
@@ -470,6 +473,69 @@ jq -r 'select(.verb=="delete") | "\(.requestReceivedTimestamp) \(.user.username)
 
 It survives a container restart and is capped at 100MB × 10 files × 30 days.
 Unset, the API server starts with no audit flags at all and nothing is written.
+
+### Node Resources (Optional)
+
+Unset, a node may use the whole machine and says so. That is the default and it
+is usually what you want on a workstation.
+
+It is not what you want on a small VM. A node reports capacity by reading
+`/proc`, which inside a container is the host's, so **every node of a cluster
+reports the whole machine and the scheduler adds them up**. Measured on an
+8-CPU 31G host, a two-node cluster advertised 16 CPU and 62Gi. On a 2 CPU / 4G
+VM, two nodes each claim the whole VM.
+
+```bash
+KINC_NODE_MEMORY=2G KINC_NODE_CPUS=1 \
+KINC_CLUSTER_MEMORY=4G KINC_CLUSTER_CPUS=2 \
+KINC_WORKERS=1 ./tools/deploy.sh
+```
+
+Each node's systemd unit gets `MemoryHigh` and `CPUQuota`, and podman nests the
+container's cgroup under it, so the limit covers the kubelet, CRI-O and every
+pod on that node. `MemoryMax` is set 10% above as a backstop: memory pressure
+throttles and reclaims before anything is killed. Each cluster also gets a
+slice, so `systemd-cgls` shows a cluster as a cluster and the whole of one can
+be bounded together.
+
+The kubelet is told the same number, as `systemReserved`, so `allocatable`
+becomes what the node may have while `capacity` still reports the machine. The
+scheduler places against allocatable.
+
+**A node keeps some of that for itself.** Measured idle on an empty cluster, a
+control plane's cgroup held 2956MiB and a worker's 1231MiB — the control plane
+carries etcd, the API server, the controller-manager and the scheduler as
+static pods, and a static pod has no memory request, so nothing else accounts
+for it. `KINC_NODE_RESERVED_MEMORY` and `KINC_NODE_RESERVED_CPU` default to
+`2Gi`/`500m` on a control plane and `1Gi`/`200m` on a worker for that reason.
+
+So a node needs to be larger than its reserve, and kinc refuses to start one
+that is not. **On a 2 CPU / 4G VM a kinc control plane does not fit in 2G**: the
+honest shapes are one node, or an asymmetric split such as 3G for the control
+plane and 1G for a worker.
+
+```bash
+./tools/ci-verify-node-resources.sh default     # asked, enforced and advertised agree
+```
+
+Memory eviction is deliberately not configured. The kubelet derives
+`memory.available` from the host as well — it reported 30.7Gi on a node limited
+to 4G and using 1G — so a threshold would never fire. The cgroup does that job.
+
+### Surviving a Restart
+
+A node comes back as the same node. `/etc/kubernetes` is a named volume, so the
+PKI, the kubeconfigs and the static pod manifests that are the control plane
+outlive the container; and each node has a fixed address, because that address
+is written into the API server's serving certificate, every kubeconfig and
+`--advertise-address`.
+
+This matters without anyone restarting anything on purpose: `Restart=always` is
+in the quadlet, so a crash of the container's PID 1 is enough.
+
+```bash
+./tools/ci-verify-restart.sh default    # restarts every node, asserts it returns
+```
 
 ### Faro Event Capture (Optional)
 
