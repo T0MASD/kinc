@@ -1,28 +1,18 @@
 #!/usr/bin/env bash
 # Asserts that no component is still logging at error level once it has settled.
 #
-# NOT RUN BY PR CI, on purpose. A cluster there exists for about 100 seconds -
-# 61s to deploy, 42s of gates, then teardown - and antrea's agent, which starts
-# only after the CNI is applied, is 40-70s old when the logs are captured. This
-# judges whether something is *still* happening after its component came up,
-# which needs the component to outlive the startup grace by about two of
-# whatever period you want to detect. A 60s-period fault needs ~210s of
-# component life. That is not available, and padding CI with sleeps to
-# manufacture it is the test wagging the run.
-#
-# It is kept for two places where the record is long enough to conclude from:
-# a local cluster that has been up for a while, and a scheduled soak. Run it
-# against either, or against any archived capture:
+# Part of the analysis phase - see tools/ci-analyse-capture.sh, which is what
+# runs it. It is not run against a live cluster in CI, and cannot usefully be:
+# judging whether something is *still* happening needs the component to outlive
+# its startup grace by about two of whatever period you want to detect, so a
+# 60s-period fault needs ~210s of component life. For a long time that was not
+# available at all - a cluster existed for about 100 seconds, and antrea's
+# agent was 40-70s old when the logs were captured - and this script said so
+# here, in a comment claiming PR CI did not run it. The collector waits for
+# KINC_CAPTURE_AGE now, which is what made it answerable, and every job runs it.
 #
 #   ./tools/ci-verify-component-logs.sh                     # live cluster
 #   KINC_LOG_CAPTURE=<dir> ./tools/ci-verify-component-logs.sh
-#
-# What PR CI keeps instead is the same analysis without the verdict: the state
-# column in ci-summarize-run.sh says startup / once / stopped / ONGOING for
-# every class on every run. A fault is described rather than enforced, which is
-# honest about a record that cannot support the enforcement - and the fault
-# that motivated this gate is asserted directly, and instantly, in
-# ci-verify-crossnode.sh.
 set -euo pipefail
 
 # shellcheck source=tools/lib-component-logs.sh
