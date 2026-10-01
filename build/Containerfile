@@ -29,8 +29,13 @@
 # Single-stage Dockerfile that combines base Fedora + CRI-O + kinc components
 FROM fedora:44
 
-# Set container metadata for systemd
-ENV container=docker
+# What systemd reads to know it is in a container, and which manager runs it.
+# systemd-detect-virt reports this, and a unit can act on it through
+# ConditionVirtualization=.
+#
+# The quadlets set it explicitly as well, so this is what a direct `podman run`
+# of the image gets; podman sets container=oci itself when an image says nothing.
+ENV container=podman
 
 # Cache-busting increment for package updates (increment when packages need updating)
 ARG CACHE_BUST=1
