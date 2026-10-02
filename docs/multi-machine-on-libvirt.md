@@ -1,12 +1,28 @@
-# Running one kinc cluster across several libvirt machines
+# One cluster across three machines, two transports
 
-A worked setup: one Kubernetes cluster whose nodes live in VMs on different
-physical machines, with the control plane replaceable. It is written as a
-recipe, but each layer says what it is for, because the obstacles are not
-obvious and several of them fail silently.
+A worked case: a six-node Kubernetes cluster spread over three physical
+machines, where some nodes reach each other over plain routed networking and one
+reaches them through an encrypted tunnel, and where the control plane can be
+replaced without the cluster noticing.
 
-The lab it describes is two physical hosts, each running libvirt, each with one
-or two VMs, each VM running kinc nodes as rootless podman containers.
+Everything below was built and measured. The numbers and the console output are
+from that cluster, not from reasoning about what should happen.
+
+## The cluster
+
+| node | machine | transport | node address |
+|---|---|---|---|
+| `kinc-hyb-control-plane` | study-pc VM | routed veth | `10.89.43.2` |
+| `kinc-hyb-cp2` | oras VM 1 | routed veth | `10.89.21.3` |
+| `kinc-hyb-cp3` | oras VM 2 | routed veth | `10.89.22.3` |
+| `kinc-hyb-w1` | oras VM 1 | routed veth | `10.89.21.2` |
+| `kinc-hyb-w2` | oras VM 2 | routed veth | `10.89.22.2` |
+| `kinc-hyb-w3` | **ugnis VM** | **WireGuard** | **`10.99.0.2`** |
+
+study-pc and oras sit in the same rack on a gigabit LAN. ugnis is on wifi, in a
+different place, behind its own NAT. That asymmetry is the point: the two halves
+want different transports, and a cluster should not have to choose one for all
+of its nodes.
 
 ---
 
@@ -18,17 +34,13 @@ range, so two machines hand their containers **identical addresses** - both
 `10.89.x.2` - and neither can reach the other's.
 
 Bridging the hypervisors does not fix this. The namespace is the boundary, not
-the LAN: a container's address is private to its machine's rootless namespace no
-matter how flat the network underneath is. This is worth stating because
-bridging is the first thing to reach for, and it produces a setup that looks
-right and does not work.
-
-So three layers, each solving one thing:
+the LAN. This is worth stating plainly because bridging is the first thing to
+reach for, and it produces a setup that looks right and does not work.
 
 | layer | carries | why |
 |---|---|---|
 | libvirt `default` (NAT) | management, **DNS** | each VM's resolver, and where the control-plane name lives |
-| VXLAN bridge | VM ↔ VM across hosts | one L2 segment spanning physical machines |
+| VXLAN bridge | VM ↔ VM across machines | one L2 segment spanning physical hosts |
 | routed veth | host ↔ rootless namespace | makes a node's own address reachable |
 
 The third is the one that is easy to miss. Without it the first two are a
@@ -36,104 +48,144 @@ network the nodes cannot use.
 
 ---
 
-## Address plan
+## Choosing a transport: what it costs
 
-Pick these before building anything. Three of the four must be unique per
-machine; the pod and service subnets are cluster-wide and must match everywhere.
+Measured with iperf3 on this hardware, 2-vCPU guests:
 
-| | study-pc | oras VM 1 | oras VM 2 | scope |
-|---|---|---|---|---|
-| LAN (physical) | 192.168.88.41 | 192.168.88.101 | — | per host |
-| libvirt `default` | 192.168.122.71 | 192.168.122.61 | 192.168.122.62 | per VM |
-| VXLAN segment | 10.78.0.71 | 10.78.0.21 | 10.78.0.22 | per VM |
-| node subnet | 10.89.43.0/24 | 10.89.21.0/24 | 10.89.22.0/24 | **per VM** |
-| veth transit | 10.99.43.0/30 | 10.99.21.0/30 | 10.99.22.0/30 | per VM |
+| path | throughput | vs. the link |
+|---|---|---|
+| raw LAN, hypervisor to hypervisor | 928 Mbit/s | ceiling |
+| VM to VM across hosts, plain VXLAN | 896 Mbit/s | −3.4% |
+| VM to VM across hosts, through WireGuard | 809 Mbit/s | −13% |
+| VM to VM **on one hypervisor**, no crypto | 25,682 Mbit/s | — |
+| VM to VM **on one hypervisor**, WireGuard | 1,740 Mbit/s | **−93%** |
+| ugnis over wifi, any transport | 57–66 Mbit/s | the wifi |
 
-The node subnet is the one people get wrong. It is per machine, and kinc derives
-it from the published API port unless told otherwise - so on several machines,
-leaving it implicit means giving each machine a different externally visible
-port. Set `KINC_NODE_SUBNET` instead.
+**One number explains the whole table: WireGuard tops out near 1.7–1.8 Gbit/s on
+a 2-vCPU guest.**
+
+Below that ceiling the link is the limit and encryption costs about ten percent -
+and that ten percent is encapsulation and MTU, not cipher; the CPU was 45% idle
+during the gigabit run. Above the ceiling the cipher is the limit and everything
+else is discarded: a 25 Gbit/s path collapses to 1.7.
+
+So the crossover is around 1–2 Gbit/s, and it moves with core count because
+WireGuard parallelises. Encrypt anything at or below a gigabit - WAN, site to
+site, ordinary LAN. Route anything at 10 Gbit or in one rack, where encryption
+would throw away most of the bandwidth.
+
+The 25 Gbit/s figure is VM to VM through a hypervisor bridge, so it is memory
+bandwidth rather than a wire. It is the right comparison for two nodes on one
+machine and the wrong one for a 25 GbE fabric.
+
+For ugnis none of this mattered: wifi caps the path at ~60 Mbit/s, two orders of
+magnitude below the cipher ceiling, so encryption is free there and the tunnel
+is the obvious choice. For study-pc ↔ oras on a gigabit LAN either would do;
+routed was chosen because it also makes a node's address its real address.
 
 ---
 
-## 1. An L2 segment between the hosts
+## Address plan
 
-The VMs need to reach each other across physical machines. A VXLAN bridge gives
-them one flat segment; the hypervisors are on the same LAN here, so it carries
-no encryption of its own.
+Three of these are per machine. The pod and service subnets are cluster-wide and
+must match everywhere.
 
-On each host, with `LOCAL` and `REMOTE` being that host's and the other's LAN
-address:
+| | study-pc | oras VM 1 | oras VM 2 | ugnis VM |
+|---|---|---|---|---|
+| LAN (physical) | 192.168.88.41 | 192.168.88.101 | — | wifi, NAT |
+| libvirt `default` | 192.168.122.71 | 192.168.122.61 | 192.168.122.62 | 192.168.122.51 |
+| VXLAN segment | 10.78.0.71 | 10.78.0.21 | 10.78.0.22 | — |
+| node subnet | 10.89.43.0/24 | 10.89.21.0/24 | 10.89.22.0/24 | tunnel only |
+| veth transit | 10.99.43.0/30 | 10.99.21.0/30 | 10.99.22.0/30 | — |
+| tunnel address | — | — | — | 10.99.0.2 |
+
+The node subnet is the one people get wrong. kinc derives it from the published
+API port unless told otherwise, so on several machines leaving it implicit means
+giving each machine a different externally visible port. Set
+`KINC_NODE_SUBNET`.
+
+---
+
+## 1. An L2 segment between the routed machines
 
 ```bash
+# On each host, with its own and the other's LAN address:
 sudo ip link add vxlan0 type vxlan id 100 \
      local "$LOCAL" remote "$REMOTE" dstport 4789
 sudo ip link add br-vxlan type bridge
 sudo ip link set vxlan0 master br-vxlan
-sudo ip link set vxlan0 up
-sudo ip link set br-vxlan up
-sudo ip addr add 10.78.0.41/24 dev br-vxlan      # this host's segment address
+sudo ip link set vxlan0 up && sudo ip link set br-vxlan up
+sudo ip addr add 10.78.0.41/24 dev br-vxlan
 ```
 
-Then give each VM a second NIC on `br-vxlan` (`virsh domiflist` should show it
-as `type bridge`, `source br-vxlan`) and a static address on `10.78.0.0/24`.
+Give each VM a second NIC on `br-vxlan` and a static address on `10.78.0.0/24`.
 
-**MTU.** VXLAN costs 50 bytes, so the segment runs at 1450 rather than 1500. TCP
-negotiates around it; anything relying on a 1500-byte path will not.
+**MTU.** VXLAN costs 50 bytes, so the segment runs at 1450. Put WireGuard under
+it as well and it is 1390 (1500 → 1440 → 1390), verified by DF probe: a 1362
+payload passes, 1363 is rejected. Everything on the segment, VM NICs included,
+has to agree.
 
-**More than two hosts** needs a remote per peer - either several `vxlan0`-style
-links or `bridge fdb` entries - because `remote` names one.
-
-**If the hosts are not on a trusted network**, put WireGuard under the VXLAN and
-expect ~1390 MTU and a throughput ceiling around 1.7 Gbit/s on a 2-vCPU guest;
-above that the cipher is the bottleneck. On a trusted LAN, plain VXLAN runs at
-line rate.
+**Do not bridge the hypervisors' `default` networks.** Both are
+`192.168.122.1/24` with their own dnsmasq; bridging them puts two DHCP servers
+and two gateways with the same address on one segment.
 
 ## 2. Node subnets and the routed veth
 
-On each VM, give kinc a subnet of its own and route it into the rootless
-namespace:
-
 ```bash
-# On the VM holding 10.89.21.0/24, naming its peers on the segment:
+# On the VM holding 10.89.21.0/24, naming its peers:
 ./tools/install-node-veth.sh 10.89.21.0/24 10.99.21.0/30 \
     10.78.0.71=10.89.43.0/24 10.78.0.22=10.89.22.0/24
 ```
-
-That installs a service, adds a route to each peer's node subnet, and puts the
-veth and segment interfaces in firewalld's trusted zone.
 
 Three things this gets right that a hand-rolled version usually does not:
 
 - **It is a service, not a one-shot.** podman's rootless namespace is created
   with the first container and destroyed with the last, taking the veth and its
   routes with it. Replace a node by hand and the host keeps routing that subnet
-  to an interface that no longer exists: egress works, ingress does not, and
-  nothing logs an error. It presents as an etcd member that was announced and
-  never started. The tell is a host route table missing a route for its **own**
-  local subnet while listing every remote one.
+  to an interface that is gone: egress works, ingress does not, nothing logs it.
+  It presents as an etcd member that was announced and never started. The tell
+  is a host route table missing a route for its **own** local subnet while
+  listing every remote one.
 - **Routed, not bridged.** A veth enslaved to the podman bridge makes replies
   leave the interface they arrived on, and they are dropped.
 - **Two masquerade exemptions.** Both the node subnets and the transit subnets
-  must escape netavark's masquerade. Exempt only the first and inter-node
-  traffic reaches the far side as the transit address, which has no route back -
-  the reply is lost, and it does not appear on the far interface at all.
+  must escape netavark's masquerade.
 
-Check it with `systemctl is-active kinc-node-veth` and a route to the local
-subnet via `kincv0`.
+## 3. The gateway, for the tunnelled machine
 
-## 3. A name for the control plane
+An encrypted node speaks WireGuard; a routed node speaks none. **They cannot
+peer directly**, so one end has to terminate the tunnel and route into the pod
+subnets the veths already expose:
 
-`controlPlaneEndpoint` is written into every node's `kubelet.conf` when it joins.
-With an address, that node's identity is load-bearing: replacing it means reusing
-its address, and two separate records have to be repointed first. With a name, a
-replacement is a DNS update and can take any free address.
+```bash
+sudo ip link add wg-gw type wireguard
+sudo wg set wg-gw listen-port 51820 private-key /path/to/gw.key \
+     peer "$NODE_PUB" allowed-ips "10.99.0.2/32" persistent-keepalive 25
+sudo ip addr add 10.99.0.254/24 dev wg-gw
+sudo ip link set wg-gw mtu 1420 up
+sudo sysctl -qw net.ipv4.ip_forward=1
+```
 
-**libvirt's dnsmasq already serves the VMs, and its records reach inside the node
-containers.** The chain is two hops: container → `10.89.x.1` (aardvark-dns) →
-the VM's resolver, which is libvirt's dnsmasq at `192.168.122.1`.
+It lives on the **hypervisor**, not in a VM, because the tunnelled side's VMs
+sit behind their own libvirt NAT and can only dial outbound to a LAN address.
 
-Add one record per control plane, on **every** hypervisor:
+**`allowed-ips` is three things**: an egress peer selector, an ingress filter,
+and - crucially - *not a route*. A peer advertising subnets beyond the
+interface's own prefix needs explicit routes, or the tunnel handshakes and
+carries nothing.
+
+**The bug only a hybrid exposes.** Traffic from a routed-side container to the
+tunnelled node was silently dropped: netavark masqueraded it to the veth transit
+address, which is not in that peer's `allowed-ips`, so WireGuard discarded it at
+ingress - invisible even to tcpdump on `wg0` at the far end. The node stayed
+Ready throughout. Only `kubectl exec` surfaced it, because that is the one path
+that runs API server → kubelet.
+
+## 4. A name for the control plane
+
+libvirt's dnsmasq already serves the VMs, and **its records reach inside the node
+containers**: container → `10.89.x.1` (aardvark-dns) → the VM's resolver, which
+is dnsmasq at `192.168.122.1`.
 
 ```bash
 for ip in 10.89.43.2 10.89.21.3 10.89.22.3; do
@@ -142,97 +194,154 @@ for ip in 10.89.43.2 10.89.21.3 10.89.22.3; do
 done
 ```
 
-`--live --config` applies immediately and persists; no network restart, so
-running VMs are undisturbed. libvirt writes
-`/var/lib/libvirt/dnsmasq/default.addnhosts`, and several entries sharing a
-hostname become several A records.
+Removing one record must match on the **IP alone** -
+`"<host ip='10.89.43.2'/>"` - because libvirt matches `dns-host` by hostname and
+every record in the set shares it.
 
-**Removing one record must match on the IP alone:**
-
-```bash
-sudo virsh net-update default delete dns-host \
-  "<host ip='10.89.43.2'/>" --live --config
-```
-
-Passing the full `<host ip=...><hostname>...</hostname></host>` is refused with
-`multiple matching DNS HOST records were found`, because libvirt matches
-`dns-host` by hostname and every record in the set shares it.
-
-**Each hypervisor runs its own dnsmasq.** Nothing synchronises them. A VM
-resolves through its own host, so a record added on one host is invisible to VMs
-on another - and the failure is a node that cannot find the control plane, not a
-DNS error.
-
-Several A records also give failover with nothing in front of the cluster: a
-client skips a dead address in milliseconds, and a joining node comes up even
-when the records include addresses that are not serving yet.
-
-## 4. The cluster
-
-First control plane, on the machine holding `10.89.43.0/24`:
-
-```bash
-echo "api.kinc" > ~/kinc-advertise-addr
-CLUSTER_NAME=dns \
-KINC_API_BIND=0.0.0.0 \
-KINC_ADVERTISE=$HOME/kinc-advertise-addr \
-KINC_NODE_SUBNET=10.89.43.0/24 \
-KINC_WORKERS=0 \
-  ./tools/deploy.sh
-```
-
-The name must be in the certificate, so it is fixed when the cluster is created:
-a running cluster cannot be renamed without regenerating the API server's
-certificates.
-
-Copy the shared control-plane material to any machine that will run a control
-plane, and note the CA hash:
-
-```bash
-scp -r ~/.local/share/kinc/dns/ca other-vm:~/kinc-ca
-
-openssl x509 -in ~/.local/share/kinc/dns/ca/ca.crt -noout -pubkey \
-  | openssl pkey -pubin -outform DER \
-  | openssl dgst -sha256 | awk '{print $NF}'
-```
-
-Then on each other machine, joining control planes and workers the same way:
-
-```bash
-KINC_NET=kinc-dns ./tools/join-host.sh api.kinc <ca-hash> 10.89.21.0/24 \
-    kinc-dns-cp2:10.89.21.3:10.89.21.3:control-plane \
-    kinc-dns-w1:10.89.21.4:10.89.21.4
-```
-
-With the routed veth there is no tunnel, so a node's address is the one it
-already has - pass the same value for both fields. `KINC_NET` points at the
-cluster's existing podman network rather than creating a second one.
-
-Add each new control plane's address to `api.kinc` on every hypervisor.
+**Each hypervisor runs its own dnsmasq and nothing synchronises them.** A VM
+resolves through its own host, so a record added on one is invisible to VMs on
+another, and the failure is a node that cannot find the control plane rather
+than a DNS error.
 
 ---
 
-## Replacing a control plane
+## Placing the control planes
 
-With a name, this is the whole procedure:
+One per machine, so no single machine holds a quorum. Growing from one to three,
+with the node list polled every 20s:
 
-1. Stop the old node.
-2. Remove its etcd member and its Node object.
-3. Delete its A record, add the replacement's.
-4. Join the replacement with `join-host.sh`, at **any** free address.
+```
+  t+20s   control-planes=1 ready=1
+  t+100s  control-planes=2 ready=1
+  t+120s  control-planes=3 ready=2
+  t+200s  control-planes=3 ready=3
+CP_QUORUM_UP
+    kinc-hyb-control-plane  Ready  control-plane  10.89.43.2
+    kinc-hyb-cp2            Ready  control-plane  10.89.21.3
+    kinc-hyb-cp3            Ready  control-plane  10.89.22.3
+    kinc-hyb-w1             Ready  worker         10.89.21.2
+    kinc-hyb-w2             Ready  worker         10.89.22.2
+    kinc-hyb-w3             Ready  worker         10.99.0.2
+```
 
-Measured on a four-node cluster across three machines: the surviving nodes never
-left `Ready`, no endpoint record needed patching, and the join completed
-unattended. With an address instead of a name the same operation took eight
-manual steps and every worker went `NotReady` the moment the control plane died.
+A control plane takes about a minute to join and another minute to go Ready
+behind its CNI. Note `kinc-hyb-w3` at `10.99.0.2` - a tunnel address in a node
+list where everything else is a podman address. To the cluster they are the same
+kind of thing.
+
+Three CPs across three machines tolerates losing any one machine. Two CPs on one
+machine and one on another does **not**: losing the first machine loses quorum.
+Placement is the whole point of spreading them.
+
+## Losing a control plane that is not the first
+
+Stopping `kinc-hyb-cp3`, polling the API through the others:
+
+```
+  t+47s  healthz=ok write=ok cp-ready=3/3 nodes-ready=6/6
+  t+63s  healthz=ok write=ok cp-ready=2/3 nodes-ready=5/6
+  t+186s healthz=ok write=ok cp-ready=2/3 nodes-ready=5/6
+  --- workload unaffected? ---
+    affinity-app-5f55cbd48d-kb695  Running  kinc-hyb-w3
+```
+
+Writes kept working throughout - two of three members is a quorum - and the
+workload never moved. This is the case everyone expects to work, and it does.
+
+## Losing the control plane that ran `kubeadm init`
+
+The same test on the **first** control plane, watched through `cp2`:
+
+```
+  t+58s  via-cp2 healthz=ok write=ok nodes-ready=6/6
+  t+78s  via-cp2 healthz=ok write=ok nodes-ready=2/6
+  t+282s via-cp2 healthz=ok write=ok nodes-ready=2/6
+```
+
+The API is fine. **Four of six nodes fall off and stay off.**
+
+The reason is `controlPlaneEndpoint`. It is written into every node's
+`kubelet.conf` when that node joins, and at the time it was the first control
+plane's address. etcd kept quorum, the API kept serving through `cp2` - and
+every kubelet still dialled a machine that was gone. The two remaining Ready
+nodes were the two control planes that talk to their own local API server.
+
+Nothing in that output says "DNS". It says the cluster lost four nodes while the
+control plane reported healthy, which is why this is the failure worth
+reproducing before relying on an address.
+
+## Replacing it
+
+With the endpoint as an **address**, the replacement has to reuse the dead node's
+address, and two separate records have to be repointed first -
+`kube-system/kubeadm-config` and `kube-public/cluster-info`. Patching only the
+first makes the join dial the address it is itself about to become:
+
+```
+error execution phase control-plane-prepare/download-certs:
+  Get "https://10.89.43.2:6443/...": dial tcp 10.89.43.2:6443: connect: connection refused
+```
+
+Eight manual steps end to end: evict the etcd member, delete the Node, mint a
+certificate key, patch both records, re-assert the veth, promote the etcd
+learner, run `mark-control-plane`.
+
+With the endpoint as a **name**, the same operation is: stop the node, remove its
+etcd member and Node object, delete its A record, add the replacement's, join at
+**any free address**. Measured side by side on this cluster:
+
+| | endpoint is an IP | endpoint is `api.kinc` |
+|---|---|---|
+| surviving nodes when it dies | all workers NotReady | only the dead node |
+| endpoint records to patch | 2 | 0 |
+| replacement address | must reuse the dead one | any free address |
+| join | failed, then 8 manual steps | unattended, 100s |
+
+## Rescheduling a pod across the transport boundary
+
+The interesting case is not a pod moving between two nodes on one machine. It is
+a pod moving from a **routed** node on one hypervisor to a **tunnelled** node on
+another, over wifi, behind NAT.
+
+A deployment with `nodeAffinity` over two labelled nodes - `kinc-hyb-w1`
+(routed, oras) and `kinc-hyb-w3` (tunnelled, ugnis):
+
+```
+  labelled:
+    kinc-hyb-w1
+    kinc-hyb-w3
+  placed:
+    affinity-app-5f55cbd48d-ftlqv  Running  kinc-hyb-w1
+```
+
+Then `kinc-hyb-w1` is stopped:
+
+```
+  t+15s  w1=Ready     running-pod-on=kinc-hyb-w1
+  t+46s  w1=Ready     running-pod-on=kinc-hyb-w1
+  t+61s  w1=NotReady  running-pod-on=kinc-hyb-w3
+  RECOVERED on kinc-hyb-w3 after 61s
+  final: affinity-app-5f55cbd48d-ftlqv  Terminating  kinc-hyb-w1
+  final: affinity-app-5f55cbd48d-kb695  Running      kinc-hyb-w3
+```
+
+**61 seconds**, and the new pod is on the other side of both a machine boundary
+and a transport boundary. Most of that is the node-monitor grace period, not
+anything about the network.
+
+Worth noting what the scheduler was *not* told: nothing in the deployment
+mentions transports, hypervisors or addresses. The affinity is over an ordinary
+node label. A node whose address is a WireGuard address and a node whose address
+is a podman address are interchangeable to it - which is the result that makes
+the hybrid worth having.
 
 ---
 
 ## Things that cost time
 
 **A rebuilt cluster talking to its predecessor.** Tear a named cluster down on
-one host and the other hosts' control planes keep running *and keep answering to
-the name*. The new cluster then dials the old one and reports:
+one machine and the others keep running *and keep answering to the name*. The
+new cluster dials the old one:
 
 ```
 x509: certificate signed by unknown authority (possibly because of
@@ -241,12 +350,14 @@ x509: certificate signed by unknown authority (possibly because of
 
 while `/healthz` returns 200 - the 200 from the new local API server, the failure
 from the old remote one. Both CAs are `CN=kubernetes`, so even the error text
-looks like one certificate. A name is cluster-wide state: tear down every host
-and repoint the records before rebuilding.
+looks like one certificate. A name is cluster-wide state: tear down every
+machine and repoint the records before rebuilding.
 
 **NetworkManager removing routes and addresses.** Anything set with a bare
-`ip route` or `ip addr` is undone on the next NM event. Use profile routes
-(`nmcli con modify <con> +ipv4.routes "..."`) or a service that re-asserts.
+`ip route` or `ip addr` is undone on the next NM event - and on a fresh NIC, NM
+claims it, starts DHCP against a segment with no server, and clears the address
+when that fails, so it works for a minute and then vanishes. Use
+`nmcli con modify +ipv4.routes` and `ipv4.method manual`.
 
 **firewalld reverting zone changes.** A runtime-only `--zone=trusted
 --change-interface` is undone by the next reload, and the symptom arrives much
@@ -256,3 +367,6 @@ reload.
 **A tool that is not in the node image.** `ping`, `openssl` and `etcdctl` are
 absent. An "unreachable" result from `ping` means only that ping is missing; use
 `curl` or bash's `/dev/tcp`. For etcd, `crictl exec` into the etcd static pod.
+
+**Nothing here survives a hypervisor reboot** unless it was made persistent. The
+VXLAN links and the gateway are runtime state.
