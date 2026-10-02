@@ -15,7 +15,7 @@
 - 📦 **Self-contained:** Each node is one container (systemd, CRI-O, kubeadm, kubectl)
 - 🔧 **Configurable:** Baked-in or mounted configuration
 - 🌐 **Isolated networking:** Sequential port allocation with subnet derivation
-- 🧩 **Multi-node:** A cluster has as many nodes as you ask for, on one host by default
+- 🧩 **Multi-node:** A cluster has as many nodes as you ask for, on one host or across several
 - 📊 **Multi-cluster:** Run multiple clusters concurrently
 - 🔍 **Observability:** Optional Faro event capture for what changed, and API-server audit for what was read and deleted (both enabled in CI)
 - ✅ **Production-grade:** Uses official Kubernetes tools (kubeadm, kubectl, CRI-O)
@@ -167,17 +167,51 @@ chain, because a verdict reached in a different chain does not pre-empt it, and
 it has to be re-asserted, because netavark rewrites its ruleset whenever a
 container changes.
 
-**Spanning hosts is a different change, and nothing here forbids it.** The
-addresses are the constraint, not the architecture. A node on another host would
-need to register under an address routable between the hosts rather than one from
-the podman network, and the ports Kubernetes uses between nodes would need
-publishing the way the API server's 6443 already is - the kubelet on 10250 so the
-API server can dial back, and Antrea's geneve on UDP 6081 so pod traffic can
-cross. That is the same mechanism the control plane already uses to be reachable,
-rather than an attempt to make the namespace routable.
+**A cluster spans hosts over a WireGuard link each node container owns.** Give
+a node tunnel material and its tunnel address becomes its identity: kinc
+templates `advertiseAddress` and `node-ip` from the same value, so one
+substitution puts both on the tunnel, and Antrea's geneve then encapsulates to
+that address.
 
-kinc does not do this today and it is not tested here. It is a design worth
-knowing is available, not a configuration you can switch on.
+Publishing the ports between nodes the way 6443 is published does not work, and
+it is worth saying why, because it is the first thing to reach for. The kubelet
+validates `--node-ip` against the interfaces it can see and refuses an address
+that is not on one of them; a published host port does not give the node
+container such an interface. A `wg0` the container owns does, and the tunnel is
+established outbound, so the node behind NAT dials the one that is reachable.
+
+Peering is a full mesh. WireGuard does not relay between peers, so two workers
+that know only the control plane have nowhere to send pod traffic to each other
+- including two workers sharing a machine, which still reach each other through
+the tunnel because their identity is their tunnel address.
+
+To build one:
+
+```bash
+# 1. Generate a keypair and peer list per node from a cluster description.
+./tools/kinc-tunnel-mesh.py cluster.json ./wg
+
+# 2. On the control plane's host, with its material in ~/kinc-wg:
+KINC_WG_DIR=$HOME/kinc-wg \
+KINC_API_BIND=0.0.0.0 \
+KINC_ADVERTISE=$HOME/kinc-advertise-addr \
+  ./tools/deploy.sh
+
+# 3. On every other host, with each node's material in ~/kinc-wg-<name>:
+./tools/join-host.sh <cp-address> <ca-hash> 10.89.50.0/24 \
+    w1:10.99.0.2:10.89.50.11 w2:10.99.0.3:10.89.50.12
+```
+
+The CA is minted before any node starts, so each join config carries its hash
+from the beginning and a joining node needs nothing from the control plane's
+filesystem. `tools/ci-verify-crossnode.sh` asserts the cross-host datapath and
+`tools/ci-verify-samemachine.sh` the one between nodes sharing a machine; both
+read Antrea's traceflow, which is what shows the packet was encapsulated rather
+than delivered locally.
+
+Leave `KINC_WG_DIR` unset and everything above renders empty: the quadlets, the
+addresses and the published ports are exactly what a single-host cluster has
+always had.
 
 ### Deploy Multiple Clusters
 
