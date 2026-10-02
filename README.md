@@ -209,6 +209,7 @@ To build one:
 KINC_WG_DIR=$HOME/kinc-wg \
 KINC_API_BIND=0.0.0.0 \
 KINC_ADVERTISE=$HOME/kinc-advertise-addr \
+KINC_NODE_SUBNET=10.89.43.0/24 \
   ./tools/deploy.sh
 
 # 3. On every other host, with each node's material in ~/kinc-wg-<name>:
@@ -219,6 +220,11 @@ KINC_ADVERTISE=$HOME/kinc-advertise-addr \
 The CA is minted before any node starts, so each join config carries its hash
 from the beginning and a joining node needs nothing from the control plane's
 filesystem.
+
+`KINC_NODE_SUBNET` is the one range that differs per machine - the pod and
+service subnets are cluster-wide and must match everywhere. Left unset it is
+derived from the published API port, which is fine for one machine and means
+choosing a different externally visible port per machine once there are several.
 
 ### Without a Tunnel
 
