@@ -297,12 +297,24 @@ bytes_of() { numfmt --from=iec "${1%i}"; }
 #
 # A worker has no CA mount and skips this: it authenticates the control plane
 # by the hash its join config already carries.
+#
+# A JOINING control plane mounts the same directory, and that is what lets it
+# join without a certificate key: kubeadm's --upload-certs path exists to move
+# exactly this material, so a node that already has it skips the download and
+# never depends on a Secret that expires two hours after the cluster started.
 if [[ -f /etc/kinc/ca/ca.crt && -f /etc/kinc/ca/ca.key ]]; then
-    log "Adopting the pre-minted cluster CA"
-    install -d -m 0755 /etc/kubernetes/pki
-    install -m 0644 /etc/kinc/ca/ca.crt /etc/kubernetes/pki/ca.crt
-    install -m 0600 /etc/kinc/ca/ca.key /etc/kubernetes/pki/ca.key
-    log "✅ Cluster CA adopted"
+    log "Adopting the pre-minted cluster material"
+    install -d -m 0755 /etc/kubernetes/pki /etc/kubernetes/pki/etcd
+    # Public half 0644, private half 0600, and each only if it was minted: a
+    # cluster from an older state dir has the CA and nothing else, and must
+    # still come up rather than fail on a file that was never there.
+    for f in ca front-proxy-ca etcd/ca; do
+        [[ -f "/etc/kinc/ca/${f}.crt" ]] && install -m 0644 "/etc/kinc/ca/${f}.crt" "/etc/kubernetes/pki/${f}.crt"
+        [[ -f "/etc/kinc/ca/${f}.key" ]] && install -m 0600 "/etc/kinc/ca/${f}.key" "/etc/kubernetes/pki/${f}.key"
+    done
+    [[ -f /etc/kinc/ca/sa.pub ]] && install -m 0644 /etc/kinc/ca/sa.pub /etc/kubernetes/pki/sa.pub
+    [[ -f /etc/kinc/ca/sa.key ]] && install -m 0600 /etc/kinc/ca/sa.key /etc/kubernetes/pki/sa.key
+    log "✅ Adopted: $(cd /etc/kubernetes/pki && ls ca.crt front-proxy-ca.crt etcd/ca.crt sa.pub 2>/dev/null | tr '\n' ' ')"
 fi
 
 # API-server audit logging, when KINC_AUDIT_RESOURCES names something.

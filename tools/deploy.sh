@@ -450,18 +450,51 @@ node_store() {
 # cluster's data and cleanup.sh removes it with everything else.
 CLUSTER_STORAGE="kinc-${CLUSTER_NAME}-storage"
 
-echo "🔑 Step 1b: Minting the cluster CA"
-mkdir -p "${STATE_DIR}/ca"
-if [ -f "${STATE_DIR}/ca/ca.crt" ] && [ -f "${STATE_DIR}/ca/ca.key" ]; then
-    echo "✅ Reusing the CA already minted for cluster '${CLUSTER_NAME}'"
-else
+echo "🔑 Step 1b: Minting the cluster's shared control-plane material"
+mkdir -p "${STATE_DIR}/ca/etcd"
+
+# One authority per thing kubeadm signs with, minted here for the same reason
+# the cluster CA is: material that exists before any node does can be handed to
+# a joining control plane directly.
+#
+# The alternative kubeadm offers is --upload-certs, which puts this set in a
+# Secret encrypted with a certificate key. That Secret expires two hours after
+# it is written, so a control plane joined on day two needs someone to go and
+# re-upload it first - the same ordering problem the pre-minted CA removed, in
+# a different place. Material on disk does not expire.
+#
+# All four have to be identical on every control plane: sa.key signs service
+# account tokens, and the two extra CAs sign the aggregation layer and etcd's
+# peer certificates. A control plane that minted its own would issue tokens and
+# peer certificates the others reject.
+mint_ca() { # <path-prefix> <CN>
+    [ -f "$1.crt" ] && [ -f "$1.key" ] && return 0
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-        -subj "/CN=kubernetes" \
+        -subj "/CN=$2" \
         -addext "basicConstraints=critical,CA:TRUE" \
         -addext "keyUsage=critical,keyCertSign,cRLSign,digitalSignature" \
-        -keyout "${STATE_DIR}/ca/ca.key" -out "${STATE_DIR}/ca/ca.crt" 2>/dev/null
-    chmod 0600 "${STATE_DIR}/ca/ca.key"
-    echo "✅ CA minted"
+        -keyout "$1.key" -out "$1.crt" 2>/dev/null || return 1
+    chmod 0600 "$1.key"
+    return 0
+}
+
+if [ -f "${STATE_DIR}/ca/ca.crt" ] && [ -f "${STATE_DIR}/ca/ca.key" ] \
+   && [ -f "${STATE_DIR}/ca/sa.key" ]; then
+    echo "✅ Reusing the material already minted for cluster '${CLUSTER_NAME}'"
+else
+    mint_ca "${STATE_DIR}/ca/ca"              "kubernetes"     || { echo "❌ could not mint the cluster CA"; exit 1; }
+    mint_ca "${STATE_DIR}/ca/front-proxy-ca"  "front-proxy-ca" || { echo "❌ could not mint the front-proxy CA"; exit 1; }
+    mint_ca "${STATE_DIR}/ca/etcd/ca"         "etcd-ca"        || { echo "❌ could not mint the etcd CA"; exit 1; }
+    # Not a certificate: a keypair kube-controller-manager signs service account
+    # tokens with and the API server verifies them against.
+    if [ ! -f "${STATE_DIR}/ca/sa.key" ]; then
+        openssl genrsa -out "${STATE_DIR}/ca/sa.key" 2048 2>/dev/null \
+            && openssl rsa -in "${STATE_DIR}/ca/sa.key" -pubout \
+                   -out "${STATE_DIR}/ca/sa.pub" 2>/dev/null \
+            || { echo "❌ could not mint the service account keypair"; exit 1; }
+        chmod 0600 "${STATE_DIR}/ca/sa.key"
+    fi
+    echo "✅ Minted: cluster CA, front-proxy CA, etcd CA, service account keypair"
 fi
 
 # The hash a joining node pins. kubeadm compares it against the DER of the
@@ -881,7 +914,10 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
     # One directory per drop-in: systemd applies every .conf in a .d directory,
     # so the two must not share one.
     mkdir -p "${STATE_DIR}/dropins/kubeadm-init" "${STATE_DIR}/dropins/kinc-postinit"
-    cp runtime/config/dropins/join.conf "${STATE_DIR}/dropins/kubeadm-init/join.conf"
+    # deploy.sh creates workers only; a control plane is joined by join-host.sh,
+    # which renders the same drop-in with the extra phase it has to skip.
+    sed "s|JOIN_SKIP_PHASES_PLACEHOLDER|preflight|" \
+        runtime/config/dropins/join.conf > "${STATE_DIR}/dropins/kubeadm-init/join.conf"
     cp runtime/config/dropins/postinit.conf "${STATE_DIR}/dropins/kinc-postinit/postinit.conf"
 
     for i in $(seq 1 "$KINC_WORKERS"); do
@@ -923,6 +959,7 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
             -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${WORKER_CONTAINER}")|g" \
             -e "s|WORKER_IP_PLACEHOLDER|${WORKER_NODE_IP}|g" \
             -e "s|WG_VOLUME_PLACEHOLDER||g" \
+            -e "s|CA_VOLUME_PLACEHOLDER||g" \
             -e "s/Volume=kinc-etc-kubernetes:/Volume=${WORKER_CONTAINER}-etc-kubernetes:/g" \
             -e "s|CLUSTER_SLICE_PLACEHOLDER|${CLUSTER_SLICE}|g" \
             -e "s|NODE_LIMITS_PLACEHOLDER|${WORKER_NODE_LIMITS}|g" \
