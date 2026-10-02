@@ -40,14 +40,35 @@ fi
 # Templates are rendered by preflight (inside the node) and by the two tools
 # that create nodes (on the host), so a placeholder is satisfied by any of them.
 SUBSTITUTERS="build/kinc/etc/kinc/scripts/kinc-preflight.sh tools/deploy.sh tools/join-host.sh"
-TEMPLATES="$BAKED $MOUNTED runtime/config/join.conf runtime/config/dropins/join.conf
-           runtime/quadlet/kinc-control-plane.container runtime/quadlet/kinc-worker.container"
+# Discovered rather than listed, so a template added later is covered without
+# anyone remembering to add it here - which is how the gap below survived.
+TEMPLATES=$(grep -rlE '[A-Z_0-9]+_PLACEHOLDER' runtime/ build/ 2>/dev/null \
+            | grep -v 'kinc-preflight.sh' | sort | tr '\n' ' ')
 
 for ph in $(grep -ohE '[A-Z_0-9]+_PLACEHOLDER' $TEMPLATES 2>/dev/null | sort -u); do
     if grep -qh -- "$ph" $SUBSTITUTERS 2>/dev/null; then
         echo "✅ ${ph} is substituted"
     else
         echo "❌ ${ph} appears in a template but nothing substitutes it"
+        fail=1
+    fi
+done
+
+# And the other direction, which is the quieter one. A substitution for a
+# placeholder no template carries does not fail: sed matches nothing, the line
+# the placeholder stood for is simply absent, and whatever it carried - a mount,
+# a port, a limit - is silently dropped from the rendered unit.
+#
+# Found by deploying a control plane against a tree where the quadlet lacked
+# CA_VOLUME_PLACEHOLDER. The shared material never mounted, kubeadm minted a CA
+# of its own, and the failure surfaced minutes later as a TLS error against the
+# cluster it was joining.
+for ph in $(grep -ohE '\|[A-Z_0-9]+_PLACEHOLDER\|' $SUBSTITUTERS 2>/dev/null \
+            | tr -d '|' | sort -u); do
+    if grep -qh -- "$ph" $TEMPLATES 2>/dev/null; then
+        echo "✅ ${ph} has a template that carries it"
+    else
+        echo "❌ ${ph} is substituted but no template carries it"
         fail=1
     fi
 done

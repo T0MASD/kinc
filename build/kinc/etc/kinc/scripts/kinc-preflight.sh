@@ -302,6 +302,24 @@ bytes_of() { numfmt --from=iec "${1%i}"; }
 # join without a certificate key: kubeadm's --upload-certs path exists to move
 # exactly this material, so a node that already has it skips the download and
 # never depends on a Secret that expires two hours after the cluster started.
+# A control-plane join without that material is refused rather than attempted.
+# kubeadm would mint a CA of its own and carry on: the node comes up, serves an
+# API, and is rejected by every other member - the failure arrives minutes later
+# as "certificate signed by unknown authority" against the cluster it was
+# joining, naming neither the missing mount nor the CA it invented.
+#
+# The join config is what says this is a control plane; a worker holds none of
+# this and is unaffected.
+if [[ -f /etc/kinc/join/join.conf ]] && grep -q '^controlPlane:' /etc/kinc/join/join.conf; then
+    if [[ ! -f /etc/kinc/ca/ca.key || ! -f /etc/kinc/ca/sa.key ]]; then
+        log "❌ control-plane join with no shared material at /etc/kinc/ca"
+        log "   it needs the cluster's CAs and service account keypair, as"
+        log "   minted by deploy.sh in ~/.local/share/kinc/<cluster>/ca"
+        log "   without them kubeadm mints its own and the cluster splits"
+        exit 1
+    fi
+fi
+
 if [[ -f /etc/kinc/ca/ca.crt && -f /etc/kinc/ca/ca.key ]]; then
     log "Adopting the pre-minted cluster material"
     install -d -m 0755 /etc/kubernetes/pki /etc/kubernetes/pki/etcd
