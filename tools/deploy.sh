@@ -251,10 +251,11 @@ get_cluster_node_subnet() {
 }
 
 # .1 is the gateway, .2 is the control plane, workers count up from .3.
+# Derived from the subnet rather than the port, so overriding the subnet moves
+# the addresses with it.
 get_cluster_node_ip() {
-    local port=$1 index=$2      # index 0 = control plane, 1 = w1, ...
-    local subnet_id=${port: -2}
-    echo "10.89.${subnet_id}.$(( index + 2 ))"
+    local index=$1              # index 0 = control plane, 1 = w1, ...
+    echo "${NODE_PREFIX}.$(( index + 2 ))"
 }
 
 # Port allocation
@@ -269,9 +270,23 @@ fi
 # CIDR allocation based on port
 CLUSTER_POD_SUBNET=$(get_cluster_pod_subnet "$CLUSTER_PORT")
 CLUSTER_SERVICE_SUBNET=$(get_cluster_service_subnet "$CLUSTER_PORT")
-CLUSTER_NODE_SUBNET=$(get_cluster_node_subnet "$CLUSTER_PORT")
-CLUSTER_NODE_GATEWAY="${CLUSTER_NODE_SUBNET%.*/*}.1"
-CONTROL_PLANE_IP=$(get_cluster_node_ip "$CLUSTER_PORT" 0)
+# The node subnet is the one address range that is per MACHINE rather than per
+# cluster: a cluster spanning hosts needs a different one on each, while the pod
+# and service subnets are cluster-wide and must match everywhere.
+#
+# Keying it to the port made choosing it mean choosing the published API port -
+# two unrelated things, one of them externally visible, and ports below 6443
+# compute a negative pod block and are refused outright. KINC_NODE_SUBNET sets
+# it directly and leaves the port alone.
+CLUSTER_NODE_SUBNET="${KINC_NODE_SUBNET:-$(get_cluster_node_subnet "$CLUSTER_PORT")}"
+if [[ ! "$CLUSTER_NODE_SUBNET" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\.0/24$ ]]; then
+    echo "❌ KINC_NODE_SUBNET must be a /24 ending in .0, not '${CLUSTER_NODE_SUBNET}'"
+    echo "   each node takes a fixed address in it, so the prefix has to be known"
+    exit 1
+fi
+NODE_PREFIX="${BASH_REMATCH[1]}"
+CLUSTER_NODE_GATEWAY="${NODE_PREFIX}.1"
+CONTROL_PLANE_IP=$(get_cluster_node_ip 0)
 
 echo "🌐 API Server will be available at: https://127.0.0.1:${CLUSTER_PORT}"
 echo "🔗 Pod subnet: $CLUSTER_POD_SUBNET"
@@ -573,9 +588,10 @@ sed "s/VolumeName=kinc-etc-kubernetes/VolumeName=kinc-${CLUSTER_NAME}-etc-kubern
 # Multi-host knobs. All are unset for a single-machine cluster, and then every
 # placeholder below renders empty and the quadlet is what it always was.
 #
-#   KINC_API_BIND   address the API server is published on (default loopback)
-#   KINC_WG_DIR     this node's WireGuard material: private, address, peers
-#   KINC_ADVERTISE  file holding the endpoint a joining node dials
+#   KINC_API_BIND     address the API server is published on (default loopback)
+#   KINC_WG_DIR       this node's WireGuard material: private, address, peers
+#   KINC_ADVERTISE    file holding the endpoint a joining node dials
+#   KINC_NODE_SUBNET  the /24 this machine's node containers sit on
 #
 # Only the control plane publishes a WireGuard port; the quadlet says why a
 # worker must not.
@@ -936,7 +952,7 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
         # a placeholder for this that nothing replaced, so the kubelet fell back
         # to its default route address; on one machine that is the same address,
         # which is why the gap was invisible.
-        WORKER_NODE_IP="$(get_cluster_node_ip "$CLUSTER_PORT" "$i")"
+        WORKER_NODE_IP="$(get_cluster_node_ip "$i")"
         sed -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${CONTROL_PLANE_ENDPOINT}/g" \
             -e "s/CA_HASH_PLACEHOLDER/${CA_HASH}/g" \
             -e "s/CONTAINER_IP_PLACEHOLDER/${WORKER_NODE_IP}/g" \\
