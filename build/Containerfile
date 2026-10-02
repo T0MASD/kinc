@@ -149,6 +149,7 @@ COPY --chmod=0755 base/usr/local/bin/crun-wrapper.sh /usr/local/bin/crun-wrapper
 # Copy kinc-specific components
 # New: Multi-service architecture for better observability
 COPY kinc/etc/systemd/system/kinc-preflight.service /etc/systemd/system/kinc-preflight.service
+COPY kinc/etc/systemd/system/kinc-tunnel.service /etc/systemd/system/kinc-tunnel.service
 COPY kinc/etc/systemd/system/kubeadm-init.service /etc/systemd/system/kubeadm-init.service
 COPY kinc/etc/systemd/system/kinc-postinit.service /etc/systemd/system/kinc-postinit.service
 COPY kinc/etc/systemd/system/kinc-faro-kubeconfig.service /etc/systemd/system/kinc-faro-kubeconfig.service
@@ -238,6 +239,7 @@ RUN rm -f /etc/cni/net.d/100-crio-bridge.conflist \
 # New: Multi-service architecture (preflight → kubeadm-init → postinit)
 RUN echo "Enabling kinc services ..." \
     && systemctl enable kinc-preflight.service \
+    && systemctl enable kinc-tunnel.service \
     && systemctl enable kubeadm-init.service \
     && systemctl enable kinc-postinit.service \
     && systemctl enable kinc-faro-kubeconfig.service \
