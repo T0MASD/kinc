@@ -207,7 +207,20 @@ if [[ -s /etc/kinc/wg/private && -s /etc/kinc/wg/address ]]; then
     log "Multi-host transport: node address is ${NODE_IP}"
 fi
 
-sed -e "s/CONTAINER_IP_PLACEHOLDER/$NODE_IP/g" \
+# A named endpoint needs a certificate of its own, or it fails TLS and nothing
+# else: discovery succeeds and then every client rejects the certificate, so
+# the API reads as unreachable rather than as a bad certificate.
+#
+# Added here rather than carried as a placeholder in the template, so a cluster
+# that does not name its endpoint renders exactly what it always did. The
+# append runs before the substitution below, while the line still matches.
+ADV_SAN=()
+if [[ "$ADV" != "$CONTROL_PLANE_NAME" ]]; then
+    ADV_SAN=(-e "/CONTROL_PLANE_NAME_PLACEHOLDER/a\\  - ${ADV}")
+fi
+
+sed "${ADV_SAN[@]}" \
+    -e "s/CONTAINER_IP_PLACEHOLDER/$NODE_IP/g" \
     -e "s/CONTROL_PLANE_NAME_PLACEHOLDER/${CONTROL_PLANE_NAME}/g" \
     -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${ADV}:6443/g" \
     "$CONFIG_FILE" > /tmp/kubeadm-final.conf
