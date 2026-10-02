@@ -71,8 +71,16 @@ echo "✅ $target is $(findmnt -no PROPAGATION --target "$volroot")"
 echo ""
 
 echo "━━━ Check 6: System Health ━━━"
-failed=$(systemctl --user list-units --state=failed --output=json --no-pager 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
-if [ "$failed" -gt 0 ]; then
+# jq is checked before it is used, because the fallback that used to stand in
+# for it - `|| echo 0` - made a missing jq indistinguishable from a healthy
+# machine: both printed "No failed services" and both passed. A prerequisite
+# this check cannot run without is a failure of the check, not a result.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "❌ jq is required to read the unit list (also used by tools/ci-verify-samemachine.sh)"
+  exit 1
+fi
+failed=$(systemctl --user list-units --state=failed --output=json --no-pager 2>/dev/null | jq 'length')
+if [ "${failed:-0}" -gt 0 ]; then
   echo "⚠️  Found $failed failed services"
   systemctl --user list-units --state=failed --no-pager
 else
