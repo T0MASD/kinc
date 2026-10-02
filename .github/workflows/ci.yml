@@ -43,6 +43,13 @@ jobs:
         run: ./tools/ci-verify-no-deprecated-apis.sh
         shell: bash
 
+      # The same reason, and the same place: the kubeadm config exists twice
+      # and the two jobs below deploy different copies of it, so drift makes
+      # them disagree without either one failing.
+      - name: Check the two kubeadm configs agree
+        run: ./tools/ci-verify-config-drift.sh
+        shell: bash
+
       - name: Build kinc image
         run: |
           echo "=== Building kinc image with multi-service architecture ==="
