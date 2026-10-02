@@ -518,6 +518,40 @@ plane and 1G for a worker.
 ./tools/ci-verify-node-resources.sh default     # asked, enforced and advertised agree
 ```
 
+**Changing a limit on a cluster that already exists.** The reservations are
+rendered into the kubelet's config directory on every boot, so a node adopts
+what it is given when it next starts. `deploy.sh` declines to re-render a
+running cluster, so stop its units first and let the volumes stand:
+
+```bash
+systemctl --user stop kinc-default-control-plane.service kinc-default-w1.service
+KINC_NODE_MEMORY=5G ./tools/deploy.sh      # same volumes, same PKI, same cluster
+```
+
+The cluster resumes rather than rebuilding: `/var/lib/kubeadm-initialized` is on
+a volume, so `kubeadm init` is skipped and the node comes back as the same node
+with the new figure in effect.
+
+**What the kubelet enforces, and what it does not.** On a rootless node the
+kubelet logs this once per start, and a `FailedNodeAllocatableEnforcement` event
+goes with it:
+
+```
+Failed to update Node Allocatable Limits ["kubepods"]:
+openat2 /sys/fs/cgroup/kubepods/cpuset.cpus: no such file or directory
+```
+
+The controllers delegated to a rootless user manager are `cpu memory pids`, and
+`cpuset` is not among them, so the kubelet cannot write the part of its
+enforcement that needs one. What it does write holds: measured with a 5G node
+limit, `kubepods/memory.max` is the node's allocatable memory exactly, and
+`kubepods/cpu.max` is unset. So the collective ceiling exists for memory, the
+uncompressible one, and CPU is bounded by the node unit's `CPUQuota` instead.
+
+Delegating `cpuset` is a host-side property of `user@.service`; a container
+cannot grant itself a controller.
+
+
 Memory eviction is deliberately not configured, because a threshold would
 measure the host rather than the node. The kubelet computes `memory.available`
 as the machine's capacity minus this node's working set, and inside a container
@@ -546,6 +580,13 @@ in the quadlet, so a crash of the container's PID 1 is enough.
 A node also comes back bounded as it was. `MemoryHigh` and `CPUQuota` live on
 the node's systemd unit, and the aggregate ones on the cluster's slice; both
 outlive the container they bound.
+
+A node also comes back at the configuration of the image it is now running,
+which matters where a restart crosses an image change: the node binaries and
+everything derived from them are the new image's, while the cluster's identity
+and contents are the ones it was built with. Provisioning that reads the
+environment or the image runs on every boot for that reason, and what is
+genuinely once per cluster - `kubeadm init`, the CA, etcd - stays once.
 
 ```bash
 ./tools/ci-verify-restart.sh default    # restarts every node, asserts it returns

@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Render this node's resource reservations into the kubelet's config directory.
+#
+# Runs on every boot, which is the whole point. kinc-preflight.service and
+# kubeadm-init.service are both gated on ConditionPathExists=!/var/lib/kubeadm-initialized,
+# and /var is a volume while /etc/kinc is not - so on a cluster that comes back,
+# neither runs, and anything they configured is frozen at whatever version and
+# whatever environment first built it.
+#
+# That made the resource feature half-work on a resumed cluster, which is worse
+# than not working: KINC_NODE_MEMORY is read by deploy.sh when it renders the
+# quadlet, so the unit-level MemoryHigh and CPUQuota were applied, while the
+# systemReserved that makes the kubelet advertise honestly was computed here and
+# written somewhere only a first boot reads. The cgroup refused what the
+# scheduler kept placing. Measured in the wild: limits enforced at 3.5G, and the
+# node still offering 7.7Gi of a 8G machine.
+#
+# The kubelet reads /var/lib/kubelet/config.yaml, which kubeadm owns and
+# rewrites - on init, and again on join from the kubelet-config ConfigMap the
+# control plane uploaded. A drop-in under --config-dir is applied over that
+# file, so it survives both, which is also why this replaces the join patch
+# directory that used to carry a worker's reserve.
+set -euo pipefail
+
+DROPIN_DIR=/etc/kubernetes/kubelet.conf.d
+DROPIN="${DROPIN_DIR}/20-kinc-node-resources.conf"
+
+log() { echo "[kinc-node-resources] $*"; }
+
+# Nothing asked for means nothing reserved, and that has to be able to take
+# effect on a cluster that previously had a limit. Leaving the last render in
+# place would be the same freezing bug one level down: a cluster would carry a
+# reserve nobody asked for and no way to clear it.
+if [[ -z "${KINC_NODE_MEMORY:-}${KINC_NODE_CPUS:-}" ]]; then
+    if [[ -f "$DROPIN" ]]; then
+        rm -f "$DROPIN"
+        log "no node limits asked for; removed the previous reservation"
+    fi
+    exit 0
+fi
+
+install -d -m 0755 "$DROPIN_DIR"
+
+# systemd's K/M/G are 1024-based and Kubernetes writes Ki/Mi/Gi for the same
+# thing, so kinc takes either. numfmt does not: --from=iec rejects the "i"
+# outright, and --from=auto reads a bare "4G" as 4,000,000,000, which would
+# leave the reserve disagreeing with the cgroup limit by 7% in silence.
+bytes_of() { numfmt --from=iec "${1%i}"; }
+
+# What this node needs to be a node, before any pod is scheduled. Measured idle
+# on an empty cluster: a control plane's cgroup held 2956MiB and a worker's
+# 1231MiB, and a static pod has no memory request, so the scheduler cannot see
+# any of it. A node that does not subtract this advertises memory it is already
+# using.
+if [[ -f /etc/kinc/join/join.conf ]]; then
+    _RESERVE_MEM="${KINC_NODE_RESERVED_MEMORY:-1Gi}"
+    _RESERVE_CPU="${KINC_NODE_RESERVED_CPU:-200m}"
+else
+    _RESERVE_MEM="${KINC_NODE_RESERVED_MEMORY:-2Gi}"
+    _RESERVE_CPU="${KINC_NODE_RESERVED_CPU:-500m}"
+fi
+
+_SYS_MEM_KI=""; _KUBE_MEM_KI=""; _SYS_CPU=""
+
+if [[ -n "${KINC_NODE_MEMORY:-}" ]]; then
+    _total_kb=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+    _limit_kb=$(( $(bytes_of "${KINC_NODE_MEMORY}") / 1024 ))
+    _kube_kb=$(( $(bytes_of "${_RESERVE_MEM}") / 1024 ))
+    if (( _limit_kb > 0 && _limit_kb < _total_kb )); then
+        if (( _kube_kb >= _limit_kb )); then
+            log "❌ ${_RESERVE_MEM} is reserved for this node's own components but the node is limited to ${KINC_NODE_MEMORY}"
+            log "   Nothing would be left to schedule. Raise KINC_NODE_MEMORY or lower KINC_NODE_RESERVED_MEMORY."
+            exit 1
+        fi
+        _SYS_MEM_KI="$(( _total_kb - _limit_kb ))Ki"
+        _KUBE_MEM_KI="${_kube_kb}Ki"
+        log "memory: ${KINC_NODE_MEMORY} of $(( _total_kb / 1024 ))Mi, less ${_RESERVE_MEM} for the node itself"
+        log "   → allocatable $(( (_limit_kb - _kube_kb) / 1024 ))Mi"
+    else
+        log "⚠️  KINC_NODE_MEMORY=${KINC_NODE_MEMORY} is not below this machine's $(( _total_kb / 1024 ))Mi; nothing reserved"
+    fi
+fi
+
+if [[ -n "${KINC_NODE_CPUS:-}" ]]; then
+    _total_cpu=$(nproc)
+    _reserved=$(awk -v t="$_total_cpu" -v c="${KINC_NODE_CPUS}" 'BEGIN { r = t - c; print (r > 0 ? r : 0) }')
+    if [[ "$_reserved" != "0" ]]; then
+        _SYS_CPU="$_reserved"
+        log "cpu: ${KINC_NODE_CPUS} of ${_total_cpu}, less ${_RESERVE_CPU} for the node itself"
+    else
+        log "⚠️  KINC_NODE_CPUS=${KINC_NODE_CPUS} is not below this machine's ${_total_cpu}; nothing reserved"
+    fi
+fi
+
+# Everything asked for was above this machine's size, so there is nothing to
+# reserve and any previous render must still go.
+if [[ -z "${_SYS_MEM_KI}${_SYS_CPU}" ]]; then
+    rm -f "$DROPIN"
+    exit 0
+fi
+
+# Written whole and moved, so a kubelet starting concurrently reads either the
+# previous render or this one, never half of one.
+tmp="${DROPIN}.tmp"
+{
+    echo "apiVersion: kubelet.config.k8s.io/v1beta1"
+    echo "kind: KubeletConfiguration"
+    echo "systemReserved:"
+    [[ -n "$_SYS_CPU" ]]    && echo "  cpu: \"${_SYS_CPU}\""
+    [[ -n "$_SYS_MEM_KI" ]] && echo "  memory: \"${_SYS_MEM_KI}\""
+    echo "kubeReserved:"
+    [[ -n "$_SYS_CPU" ]]    && echo "  cpu: \"${_RESERVE_CPU}\""
+    [[ -n "$_KUBE_MEM_KI" ]] && echo "  memory: \"${_KUBE_MEM_KI}\""
+} > "$tmp"
+mv -f "$tmp" "$DROPIN"
+log "wrote ${DROPIN}"

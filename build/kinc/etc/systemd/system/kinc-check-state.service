@@ -1,0 +1,23 @@
+[Unit]
+Description=Check that this cluster's state halves share one lifetime
+Documentation=file:///etc/kinc/scripts/kinc-check-state.sh
+
+# Unguarded on purpose. The state this catches is one where the init marker
+# exists, so any unit carrying ConditionPathExists=!/var/lib/kubeadm-initialized
+# is skipped exactly when the check is needed.
+#
+# Before everything that would otherwise fail obscurely on the missing PKI, and
+# after nothing: it reads two paths and needs no cluster. It takes no dependency
+# on kubeadm-init, which is what makes ordering it before the kubelet safe.
+Before=kinc-preflight.service kubeadm-init.service kubelet.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/kinc/scripts/kinc-check-state.sh
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
