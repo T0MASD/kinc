@@ -172,38 +172,12 @@ log "Control-plane endpoint: ${CONTROL_PLANE_NAME}:6443"
 #
 # A single-machine cluster mounts nothing here and keeps its podman address.
 NODE_IP="$CONTAINER_IP"
-if [[ -s /etc/kinc/wg/private && -s /etc/kinc/wg/address ]]; then
-    WG_ADDR="$(tr -d '[:space:]' < /etc/kinc/wg/address)"
-    log "Multi-host transport: bringing up wg0 at ${WG_ADDR}"
-    ip link add wg0 type wireguard
-    wg set wg0 private-key /etc/kinc/wg/private listen-port "${KINC_WG_PORT:-51820}"
-    ip addr add "${WG_ADDR}/24" dev wg0
-    ip link set wg0 up
-    # peers: <public-key> <allowed-ips> [endpoint]
-    #
-    # Every node needs a route to every other node's tunnel address, so this is
-    # a full mesh: WireGuard does not relay, and hub-and-spoke through the
-    # control plane would leave worker-to-worker pod traffic with nowhere to go.
-    # An endpoint is absent when this side cannot dial the peer; that peer
-    # dials in instead and keepalive holds the path open.
-    while read -r peer_pub peer_allowed peer_endpoint; do
-        case "$peer_pub" in ""|\#*) continue ;; esac
-        if [[ -n "$peer_endpoint" ]]; then
-            wg set wg0 peer "$peer_pub" allowed-ips "$peer_allowed" \
-                endpoint "$peer_endpoint" persistent-keepalive 25
-        else
-            wg set wg0 peer "$peer_pub" allowed-ips "$peer_allowed" \
-                persistent-keepalive 25
-        fi
-        # allowed-ips is a filter on what may come OUT of the tunnel, not a
-        # route into it. Without these, anything outside the address's own
-        # prefix leaves by the container's default route instead - which looks
-        # like a tunnel that handshakes and carries nothing.
-        for cidr in ${peer_allowed//,/ }; do
-            ip route replace "$cidr" dev wg0 2>/dev/null || true
-        done
-    done < /etc/kinc/wg/peers
-    NODE_IP="$WG_ADDR"
+if [[ -s /etc/kinc/wg/address ]]; then
+    # The interface itself belongs to kinc-tunnel.service, which runs on every
+    # start. This unit is skipped once the node has initialised, so anything it
+    # created would be missing after a restart - which is how a tunnelled node
+    # came back with no wg0, no identity, and no way to register.
+    NODE_IP="$(tr -d '[:space:]' < /etc/kinc/wg/address)"
     log "Multi-host transport: node address is ${NODE_IP}"
 fi
 
