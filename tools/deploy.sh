@@ -679,10 +679,12 @@ fi
 echo
 echo "🔧 Step 5: Updating container file with cluster-specific settings"
 sed -i "s|Image=.*|Image=$IMAGE_NAME|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
-# Anchored on the API server's own line. Left as "PublishPort=.*" this
-# rewrites every published port the quadlet carries, so a cluster that
-# also publishes a WireGuard port silently loses it here.
-sed -i "s|PublishPort=${KINC_API_BIND:-127.0.0.1}:[0-9]*:6443/tcp|PublishPort=${KINC_API_BIND:-127.0.0.1}:${CLUSTER_PORT}:6443/tcp|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+# Anchored on the ":6443/tcp" suffix, which is the API server's line and
+# nothing else. Left as "PublishPort=.*" this rewrites every published port
+# the quadlet carries, so a cluster that also publishes a WireGuard port
+# silently loses it here. The anchor has to tolerate the unsubstituted
+# CLUSTER_PORT placeholder, because this line is what replaces it.
+sed -i "s|^PublishPort=.*:6443/tcp$|PublishPort=${API_BIND}:${CLUSTER_PORT}:6443/tcp|" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 sed -i "s|ContainerName=.*|ContainerName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 sed -i "s|HostName=.*|HostName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 
