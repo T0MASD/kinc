@@ -955,7 +955,7 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
         WORKER_NODE_IP="$(get_cluster_node_ip "$i")"
         sed -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${CONTROL_PLANE_ENDPOINT}/g" \
             -e "s/CA_HASH_PLACEHOLDER/${CA_HASH}/g" \
-            -e "s/CONTAINER_IP_PLACEHOLDER/${WORKER_NODE_IP}/g" \\
+            -e "s/CONTAINER_IP_PLACEHOLDER/${WORKER_NODE_IP}/g" \
             runtime/config/join.conf > "${WORKER_STATE}/join/join.conf"
 
         if [ "${KINC_MAC:-none}" = "selinux" ] && command -v restorecon >/dev/null 2>&1; then
