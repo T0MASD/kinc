@@ -53,7 +53,17 @@ for spec in "$@"; do
         -e "s|CONTAINER_IP_PLACEHOLDER|${WG_ADDR}|g" \
         runtime/config/join.conf > "${STATE}/join/join.conf"
 
+    # Replace this node's volumes rather than reusing them. A node that joined
+    # before left /var/lib/kubeadm-initialized behind, and preflight is
+    # ConditionPathExists=!that - so reusing the volume skips preflight, skips
+    # the join with it, and the node simply never appears. The unit is active,
+    # nothing restarts and nothing is logged as an error, which makes it look
+    # like a slow join rather than a node that will never arrive.
+    #
+    # This is the same thing rm -rf on the host-side state above is doing: the
+    # node is being created, so it starts from nothing.
     for v in var-data etc-kubernetes store storage; do
+        podman volume rm -f "${NAME}-${v}" >/dev/null 2>&1 || true
         podman volume create "${NAME}-${v}" >/dev/null 2>&1 || true
     done
 
