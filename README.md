@@ -226,10 +226,11 @@ service subnets are cluster-wide and must match everywhere. Left unset it is
 derived from the published API port, which is fine for one machine and means
 choosing a different externally visible port per machine once there are several.
 
-A worked example of all of this on real machines - the VXLAN segment between
-hypervisors, the per-machine subnets, the DNS records and the control-plane
-replacement - is in
-[docs/multi-machine-on-libvirt.md](docs/multi-machine-on-libvirt.md).
+[docs/multi-machine-on-libvirt.md](docs/multi-machine-on-libvirt.md) is a worked
+case of all of this: six nodes over three machines running **both** transports at
+once, with the throughput measurements that decide which to use where, how the
+control planes were placed, what happens when each kind of control plane dies,
+and a pod rescheduled across both a machine and a transport boundary in 61s.
 
 ### Without a Tunnel
 
