@@ -199,7 +199,6 @@ if [[ -s /etc/kinc/wg/private && -s /etc/kinc/wg/address ]]; then
         # route into it. Without these, anything outside the address's own
         # prefix leaves by the container's default route instead - which looks
         # like a tunnel that handshakes and carries nothing.
-        local cidr
         for cidr in ${peer_allowed//,/ }; do
             ip route replace "$cidr" dev wg0 2>/dev/null || true
         done
