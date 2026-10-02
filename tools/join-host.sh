@@ -30,6 +30,10 @@
 # The CA hash comes from the cluster's pre-minted CA, so a joining node needs
 # nothing from the first control plane's filesystem and can start before it is
 # up.
+#
+# Joining a control plane to a cluster that audits: pass the same
+# KINC_AUDIT_RESOURCES the cluster was created with. The flags come from the
+# cluster's own config, but the policy file they name is written per node.
 set -euo pipefail
 
 [ $# -ge 4 ] || { sed -n '2,31p' "$0" | sed 's/^# \?//'; exit 1; }
@@ -142,6 +146,24 @@ YAML
         -e "s|CLUSTER_SLICE_PLACEHOLDER|${NET}.slice|g" \
         -e "s|NODE_LIMITS_PLACEHOLDER||g" \
         runtime/quadlet/kinc-worker.container > "${Q}/${NAME}.container"
+
+    # A control plane joining an audited cluster has to be able to audit.
+    #
+    # The audit flags live in the cluster's ClusterConfiguration, so kubeadm
+    # applies them to every control plane it renders - including this one. The
+    # policy file they name is written per node by preflight, and only when it
+    # is told what to audit. Without this the API server here starts with
+    #
+    #   loading audit policy file: ... no such file or directory
+    #
+    # and crashloops. The join then stalls somewhere else entirely: a joining
+    # control plane's kubelet bootstraps against its OWN API server, so it waits
+    # on a TLS bootstrap that cannot complete, and nothing in that message
+    # mentions audit.
+    if [ "$ROLE" = "control-plane" ] && [ -n "${KINC_AUDIT_RESOURCES:-}" ]; then
+        sed -i "/^Environment=KUBECONFIG/a Environment=KINC_AUDIT_RESOURCES=${KINC_AUDIT_RESOURCES}" \
+            "${Q}/${NAME}.container"
+    fi
 
     # The cluster's config volume belongs to the machine that built the cluster.
     # Here it would be an empty volume mounted read-only, and preflight fails
