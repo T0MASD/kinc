@@ -534,6 +534,120 @@ jobs:
           retention-days: 30
 
 
+  test-tunnel-transport:
+    runs-on: ubuntu-latest
+    name: Test (tunnel transport)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: System prerequisites check
+        run: ./tools/ci-prepare-host.sh
+        shell: bash
+
+      # The mesh is generated here rather than in a node, so wg is needed on the
+      # runner as well as in the image.
+      - name: Install wireguard-tools
+        run: |
+          command -v wg >/dev/null || sudo apt-get install -y -qq wireguard-tools
+          wg --version
+        shell: bash
+
+      - name: Build kinc image
+        run: |
+          ./tools/build.sh
+          echo "✅ Image built successfully"
+        shell: bash
+
+      # Both nodes on one runner. That is not a weaker version of the real case:
+      # WireGuard does not relay between peers, so two nodes sharing a machine
+      # still have to reach each other through wg0, and a hub-and-spoke mesh
+      # fails here exactly as it would across machines. Measured on this setup,
+      # a traceflow between them reports tunnelDst=10.99.0.1 - the tunnel
+      # address, not the podman one.
+      - name: Generate the tunnel mesh
+        run: |
+          cat > /tmp/mesh.json <<'JSON'
+          {"nodes": [
+            {"name": "cp",              "wg": "10.99.0.1", "podman": "10.89.43.2", "machine": "runner"},
+            {"name": "kinc-default-w1", "wg": "10.99.0.2", "podman": "10.89.43.3", "machine": "runner"}
+          ]}
+          JSON
+          ./tools/kinc-tunnel-mesh.py /tmp/mesh.json "$HOME/wgmesh"
+          cp -r "$HOME/wgmesh/kinc-default-w1" "$HOME/kinc-wg-kinc-default-w1"
+          echo "10.99.0.1" > "$HOME/kinc-advertise-addr"
+        shell: bash
+
+      # The node's identity is its tunnel address: preflight templates
+      # advertiseAddress and node-ip from the same value, so the cluster is on
+      # the tunnel from its first node rather than migrated onto it afterwards.
+      - name: Deploy the control plane on the tunnel
+        run: |
+          export CLUSTER_NAME=default KINC_WORKERS=0
+          export KINC_NODE_SUBNET=10.89.43.0/24
+          export KINC_WG_DIR="$HOME/wgmesh/cp"
+          export KINC_ADVERTISE="$HOME/kinc-advertise-addr"
+          ./tools/deploy.sh
+        shell: bash
+
+      # join-host.sh and kinc-tunnel-mesh.py are the other half of the
+      # multi-host path and had no coverage at all - nothing else in CI calls
+      # either of them.
+      - name: Join a worker with join-host.sh
+        run: |
+          CA_HASH=$(openssl x509 -in "$HOME/.local/share/kinc/default/ca/ca.crt" -noout -pubkey \
+                    | openssl pkey -pubin -outform DER \
+                    | openssl dgst -sha256 | awk '{print $NF}')
+          KINC_NET=kinc-default ./tools/join-host.sh 10.99.0.1 "$CA_HASH" 10.89.43.0/24 \
+              kinc-default-w1:10.99.0.2:10.89.43.3
+        shell: bash
+
+      - name: Wait for both nodes, and apply the worker role
+        run: |
+          mkdir -p ~/.kube
+          podman exec kinc-default-control-plane cat /etc/kubernetes/admin.conf > ~/.kube/config
+          sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
+          for _ in $(seq 1 90); do
+            [ "$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)" = 2 ] && break
+            sleep 10
+          done
+          # join-host.sh cannot do this: it holds none of the cluster's
+          # credentials by design, and NodeRestriction refuses a kubernetes.io
+          # label a kubelet sets for itself. This is the step it prints.
+          kubectl label node kinc-default-w1 node-role.kubernetes.io/worker= --overwrite
+          kubectl get nodes -o wide
+        shell: bash
+
+      # The addresses are the assertion. A node that fell back to its podman
+      # address would still be Ready and still schedule pods; only the address
+      # says the tunnel carried the join.
+      - name: Assert both nodes are on the tunnel
+        run: |
+          fail=0
+          for n in kinc-default-control-plane kinc-default-w1; do
+            ip=$(kubectl get node "$n" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+            case "$ip" in
+              10.99.0.*) echo "✅ ${n} is on the tunnel at ${ip}" ;;
+              *)         echo "❌ ${n} registered ${ip}, which is not a tunnel address"; fail=1 ;;
+            esac
+          done
+          exit $fail
+        shell: bash
+
+      - name: Validate pod traffic between the nodes
+        run: |
+          kubectl apply -f runtime/manifests/test-workload.yaml
+          kubectl apply -f runtime/manifests/test-workload-crossnode.yaml
+          ./tools/ci-verify-crossnode.sh kinc-default-control-plane kinc-default-w1
+        shell: bash
+
+      - name: Collect diagnostics
+        if: always()
+        run: ./tools/ci-collect-diagnostics.sh default || true
+        shell: bash
+
+
   test-multi-node:
     runs-on: ubuntu-latest
     # Resources are a property of this suite, not a job of their own.

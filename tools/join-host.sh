@@ -159,3 +159,22 @@ for spec in "$@"; do
     systemctl --user start "${NAME}.service"
 done
 echo "✅ started $# node(s); each joins once preflight has finished"
+
+# NodeRestriction refuses every kubernetes.io label a kubelet sets for itself,
+# so a role is applied with the cluster's credentials after the node registers.
+# deploy.sh does that for the workers it creates because it holds admin.conf;
+# this machine deliberately holds nothing of the cluster's, so the step belongs
+# wherever those credentials are.
+#
+# Said out loud because the absence is quiet: an unlabelled node is Ready and
+# schedulable, and only a nodeSelector asking for a role - which is what the
+# cross-node gate and most placement rules use - ever notices.
+echo
+echo "   Nodes carry no role until one is applied from the control plane:"
+for spec in "$@"; do
+    IFS=: read -r n _ _ r <<<"$spec"
+    case "${r:-worker}" in
+        control-plane) ;;
+        *) echo "     kubectl label node ${n} node-role.kubernetes.io/worker= --overwrite" ;;
+    esac
+done
