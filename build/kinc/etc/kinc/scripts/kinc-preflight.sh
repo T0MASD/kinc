@@ -139,14 +139,70 @@ log "Templating kubeadm configuration with container IP..."
 # A worker renders its own name here and never uses the result: its
 # kubeadm-init is replaced by a join, which reads join.conf instead.
 CONTROL_PLANE_NAME="$(hostname)"
+# What a joining node dials. Distinct from advertiseAddress above: that is the
+# address the cluster hands to its own clients, this is the one a node outside
+# it has to reach. Derived from $(hostname) for a single-machine cluster, which
+# resolves only on that machine.
+ADV="${CONTROL_PLANE_NAME}"
+if [[ -s /etc/kinc/advertise-addr ]]; then
+    ADV="$(tr -d '[:space:]' < /etc/kinc/advertise-addr)"
+    log "Control-plane endpoint overridden: ${ADV}:6443"
+fi
 log "Control-plane endpoint: ${CONTROL_PLANE_NAME}:6443"
 
 # Rendered onto tmpfs deliberately. This carries the node's current IP, so it is
 # only ever valid for the boot that produced it: kept across a restart, a node
 # that came back on a different address would initialise against the old one.
-sed -e "s/CONTAINER_IP_PLACEHOLDER/$CONTAINER_IP/g" \
+# --- Multi-host transport -------------------------------------------------
+# A kinc cluster can span machines. The transport is a WireGuard link this
+# container owns, because the two obvious alternatives are both closed:
+# rootless podman puts each machine's network in its own user namespace, so one
+# machine's node address is unreachable from any other; and the kubelet refuses
+# to advertise an address that is not on one of its own interfaces, which rules
+# out publishing host ports. A wg0 the container owns satisfies both, and the
+# tunnel is established outbound.
+#
+# This runs before the kubeadm config is templated, and that ordering is the
+# point. advertiseAddress must name a local address when kubeadm validates it,
+# and it is what the API server writes into endpoints/kubernetes - the address
+# every in-cluster client is handed. Set it afterwards and the cluster forms
+# with its own Service pointing somewhere no other machine can reach, which
+# surfaces as CNI pods crashlooping on an unreachable API rather than as an
+# addressing mistake.
+#
+# A single-machine cluster mounts nothing here and keeps its podman address.
+NODE_IP="$CONTAINER_IP"
+if [[ -s /etc/kinc/wg/private && -s /etc/kinc/wg/address ]]; then
+    WG_ADDR="$(tr -d '[:space:]' < /etc/kinc/wg/address)"
+    log "Multi-host transport: bringing up wg0 at ${WG_ADDR}"
+    ip link add wg0 type wireguard
+    wg set wg0 private-key /etc/kinc/wg/private listen-port "${KINC_WG_PORT:-51820}"
+    ip addr add "${WG_ADDR}/24" dev wg0
+    ip link set wg0 up
+    # peers: <public-key> <allowed-ips> [endpoint]
+    #
+    # Every node needs a route to every other node's tunnel address, so this is
+    # a full mesh: WireGuard does not relay, and hub-and-spoke through the
+    # control plane would leave worker-to-worker pod traffic with nowhere to go.
+    # An endpoint is absent when this side cannot dial the peer; that peer
+    # dials in instead and keepalive holds the path open.
+    while read -r peer_pub peer_allowed peer_endpoint; do
+        case "$peer_pub" in ""|\#*) continue ;; esac
+        if [[ -n "$peer_endpoint" ]]; then
+            wg set wg0 peer "$peer_pub" allowed-ips "$peer_allowed" \
+                endpoint "$peer_endpoint" persistent-keepalive 25
+        else
+            wg set wg0 peer "$peer_pub" allowed-ips "$peer_allowed" \
+                persistent-keepalive 25
+        fi
+    done < /etc/kinc/wg/peers
+    NODE_IP="$WG_ADDR"
+    log "Multi-host transport: node address is ${NODE_IP}"
+fi
+
+sed -e "s/CONTAINER_IP_PLACEHOLDER/$NODE_IP/g" \
     -e "s/CONTROL_PLANE_NAME_PLACEHOLDER/${CONTROL_PLANE_NAME}/g" \
-    -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${CONTROL_PLANE_NAME}:6443/g" \
+    -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${ADV}:6443/g" \
     "$CONFIG_FILE" > /tmp/kubeadm-final.conf
 
 # Tell the kubelet the OOM score it can actually hold.

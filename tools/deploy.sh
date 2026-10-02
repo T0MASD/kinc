@@ -537,6 +537,27 @@ sed "s/VolumeName=kinc-etc-kubernetes/VolumeName=kinc-${CLUSTER_NAME}-etc-kubern
     runtime/quadlet/kinc-etc-kubernetes.volume \
     > ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-etc-kubernetes.volume
 
+# Multi-host knobs. All are unset for a single-machine cluster, and then every
+# placeholder below renders empty and the quadlet is what it always was.
+#
+#   KINC_API_BIND   address the API server is published on (default loopback)
+#   KINC_WG_DIR     this node's WireGuard material: private, address, peers
+#   KINC_ADVERTISE  file holding the endpoint a joining node dials
+#
+# Only the control plane publishes a WireGuard port; the quadlet says why a
+# worker must not.
+API_BIND="${KINC_API_BIND:-127.0.0.1}"
+WG_VOLUME=""
+WG_PUBLISH=""
+ADVERTISE_VOLUME=""
+if [ -n "${KINC_WG_DIR:-}" ]; then
+    WG_VOLUME="Volume=${KINC_WG_DIR}:/etc/kinc/wg:ro,Z"
+    WG_PUBLISH="PublishPort=0.0.0.0:${KINC_WG_PORT:-51820}:${KINC_WG_PORT:-51820}/udp"
+fi
+if [ -n "${KINC_ADVERTISE:-}" ]; then
+    ADVERTISE_VOLUME="Volume=${KINC_ADVERTISE}:/etc/kinc/advertise-addr:ro,Z"
+fi
+
 # Copy and customize container file
 sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-control-plane/g" \
     -e "s/HostName=kinc-control-plane/HostName=kinc-${CLUSTER_NAME}-control-plane/g" \
@@ -546,6 +567,10 @@ sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-co
     -e "s/kinc-config-volume.service/kinc-${CLUSTER_NAME}-config-volume.service/g" \
     -e "s/PublishPort=127.0.0.1:6443:6443\/tcp/PublishPort=127.0.0.1:${CLUSTER_PORT}:6443\/tcp/g" \
     -e "s|CA_DIR_PLACEHOLDER|${STATE_DIR}/ca|g" \
+    -e "s|API_BIND_PLACEHOLDER|${API_BIND}|g" \
+    -e "s|WG_VOLUME_PLACEHOLDER|${WG_VOLUME}|g" \
+    -e "s|WG_PUBLISH_PLACEHOLDER|${WG_PUBLISH}|g" \
+    -e "s|ADVERTISE_VOLUME_PLACEHOLDER|${ADVERTISE_VOLUME}|g" \
     -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
     -e "s|STORAGE_VOLUME_PLACEHOLDER|${CLUSTER_STORAGE}|g" \
     -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${CONTROL_PLANE_NAME}")|g" \
@@ -654,7 +679,10 @@ fi
 echo
 echo "🔧 Step 5: Updating container file with cluster-specific settings"
 sed -i "s|Image=.*|Image=$IMAGE_NAME|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
-sed -i "s|PublishPort=.*|PublishPort=127.0.0.1:${CLUSTER_PORT}:6443/tcp|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+# Anchored on the API server's own line. Left as "PublishPort=.*" this
+# rewrites every published port the quadlet carries, so a cluster that
+# also publishes a WireGuard port silently loses it here.
+sed -i "s|PublishPort=${KINC_API_BIND:-127.0.0.1}:[0-9]*:6443/tcp|PublishPort=${KINC_API_BIND:-127.0.0.1}:${CLUSTER_PORT}:6443/tcp|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 sed -i "s|ContainerName=.*|ContainerName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 sed -i "s|HostName=.*|HostName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 
@@ -865,8 +893,15 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
         # the CA hash, so this node needs nothing from the control plane's
         # filesystem and waits on its own discovery timeout.
         mkdir -p "${WORKER_STATE}/join"
+        # A local worker's node-ip is its address on the cluster's podman
+        # network - the same one the quadlet pins. join.conf has always carried
+        # a placeholder for this that nothing replaced, so the kubelet fell back
+        # to its default route address; on one machine that is the same address,
+        # which is why the gap was invisible.
+        WORKER_NODE_IP="$(get_cluster_node_ip "$CLUSTER_PORT" "$i")"
         sed -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${CONTROL_PLANE_ENDPOINT}/g" \
             -e "s/CA_HASH_PLACEHOLDER/${CA_HASH}/g" \
+            -e "s/CONTAINER_IP_PLACEHOLDER/${WORKER_NODE_IP}/g" \\
             runtime/config/join.conf > "${WORKER_STATE}/join/join.conf"
 
         if [ "${KINC_MAC:-none}" = "selinux" ] && command -v restorecon >/dev/null 2>&1; then
@@ -884,7 +919,8 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
             -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
             -e "s|STORAGE_VOLUME_PLACEHOLDER|${CLUSTER_STORAGE}|g" \
             -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${WORKER_CONTAINER}")|g" \
-            -e "s|WORKER_IP_PLACEHOLDER|$(get_cluster_node_ip "$CLUSTER_PORT" "$i")|g" \
+            -e "s|WORKER_IP_PLACEHOLDER|${WORKER_NODE_IP}|g" \
+            -e "s|WG_VOLUME_PLACEHOLDER||g" \
             -e "s/Volume=kinc-etc-kubernetes:/Volume=${WORKER_CONTAINER}-etc-kubernetes:/g" \
             -e "s|CLUSTER_SLICE_PLACEHOLDER|${CLUSTER_SLICE}|g" \
             -e "s|NODE_LIMITS_PLACEHOLDER|${WORKER_NODE_LIMITS}|g" \

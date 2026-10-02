@@ -56,6 +56,12 @@ RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
     && dnf install -y \
       systemd \
       conntrack-tools nftables iptables-nft iproute ethtool util-linux kmod \
+# wireguard-tools is the userspace half of the multi-host transport. The
+# kernel half needs nothing added: a node container can already create the
+# link, because CAP_NET_ADMIN is evaluated against the owning user namespace.
+# Without wg(8), preflight on a cluster that spans machines dies at its first
+# 'wg set' with status 127.
+      wireguard-tools \
       libseccomp pigz fuse-overlayfs \
       nfs-utils iscsi-initiator-utils \
       bash ca-certificates curl jq yq procps-ng which hostname \

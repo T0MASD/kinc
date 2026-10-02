@@ -67,6 +67,10 @@ Volume=NODE_STORE_PLACEHOLDER:/root/.local/share/containers/storage:rw,Z
 # a tmpfs in this container, so a volume under it was RAM-backed.
 Volume=STORAGE_VOLUME_PLACEHOLDER:/tmp/kinc-storage:rw,Z
 Volume=/lib/modules:/lib/modules:ro
+# Tunnel material for a multi-host cluster, and the endpoint a joining node
+# dials. Both are empty placeholders on a single-machine cluster.
+WG_VOLUME_PLACEHOLDER
+ADVERTISE_VOLUME_PLACEHOLDER
 
 # Network configuration
 #
@@ -75,7 +79,15 @@ Volume=/lib/modules:/lib/modules:ro
 # do not collide. What a node inside the cluster dials is controlPlaneEndpoint,
 # whose port is the one the API server binds - 6443, always.
 # Port must be sequential (6443, 6444, 6445...) because subnet IDs are derived from last 2 digits
-PublishPort=127.0.0.1:CLUSTER_PORT:6443/tcp
+# Bound to API_BIND_PLACEHOLDER. A single-machine cluster keeps 127.0.0.1, so
+# nothing is exposed that was not before; a cluster that spans machines needs
+# the loopback restriction lifted for the nodes elsewhere to reach it.
+PublishPort=API_BIND_PLACEHOLDER:CLUSTER_PORT:6443/tcp
+# The control plane is the node every other dials, so it is the one that
+# publishes a WireGuard port. Workers must not: they dial out, and publishing
+# the port there makes rootlessport compete with the in-container WireGuard for
+# the same UDP port, which presents as a tunnel that sends and never receives.
+WG_PUBLISH_PLACEHOLDER
 # The cluster's own network, so other nodes resolve this one by name.
 Network=NETWORK_UNIT_PLACEHOLDER
 
