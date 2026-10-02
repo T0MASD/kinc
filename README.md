@@ -209,7 +209,39 @@ KINC_ADVERTISE=$HOME/kinc-advertise-addr \
 
 The CA is minted before any node starts, so each join config carries its hash
 from the beginning and a joining node needs nothing from the control plane's
-filesystem. `tools/ci-verify-crossnode.sh` asserts the cross-host datapath and
+filesystem.
+
+### More Than One Control Plane
+
+A control plane is a node role, not a separate path: the same tool joins it,
+with `control-plane` as a fourth field on the node-spec.
+
+```bash
+# Once, from the machine that created the cluster:
+scp -r ~/.local/share/kinc/<cluster>/ca other-host:~/kinc-ca
+
+# Then on that host, alongside any workers:
+./tools/join-host.sh <cp-address> <ca-hash> 10.89.50.0/24 \
+    cp2:10.99.0.4:10.89.50.10:control-plane \
+    w1:10.99.0.2:10.89.50.11
+```
+
+What it needs is the cluster's shared material - the three CAs and the service
+account keypair - which `deploy.sh` mints before the first node starts, for the
+same reason it mints the CA. All of it has to be identical on every control
+plane: `sa.key` signs service account tokens, and the other two CAs sign the
+aggregation layer and etcd's peer certificates.
+
+kubeadm's own answer is `--upload-certs`, which puts that material in a Secret
+encrypted with a certificate key. The Secret expires two hours after it is
+written, so a control plane added on day two needs someone to re-upload it
+first - the ordering problem the pre-minted CA removed, in a different place.
+Material on disk does not expire, and no `kubeadm-certs` Secret is ever created.
+
+Give the cluster a name rather than an address if you intend to replace control
+planes - see `KINC_ADVERTISE` above. The endpoint is written into every node's
+kubelet.conf when it joins, so with an address a replacement has to reuse the
+dead node's one. `tools/ci-verify-crossnode.sh` asserts the cross-host datapath and
 `tools/ci-verify-samemachine.sh` the one between nodes sharing a machine; both
 read Antrea's traceflow, which is what shows the packet was encapsulated rather
 than delivered locally.
