@@ -139,14 +139,64 @@ log "Templating kubeadm configuration with container IP..."
 # A worker renders its own name here and never uses the result: its
 # kubeadm-init is replaced by a join, which reads join.conf instead.
 CONTROL_PLANE_NAME="$(hostname)"
+# What a joining node dials. Distinct from advertiseAddress above: that is the
+# address the cluster hands to its own clients, this is the one a node outside
+# it has to reach. Derived from $(hostname) for a single-machine cluster, which
+# resolves only on that machine.
+ADV="${CONTROL_PLANE_NAME}"
+if [[ -s /etc/kinc/advertise-addr ]]; then
+    ADV="$(tr -d '[:space:]' < /etc/kinc/advertise-addr)"
+    log "Control-plane endpoint overridden: ${ADV}:6443"
+fi
 log "Control-plane endpoint: ${CONTROL_PLANE_NAME}:6443"
 
 # Rendered onto tmpfs deliberately. This carries the node's current IP, so it is
 # only ever valid for the boot that produced it: kept across a restart, a node
 # that came back on a different address would initialise against the old one.
-sed -e "s/CONTAINER_IP_PLACEHOLDER/$CONTAINER_IP/g" \
+# --- Multi-host transport -------------------------------------------------
+# A kinc cluster can span machines. The transport is a WireGuard link this
+# container owns, because the two obvious alternatives are both closed:
+# rootless podman puts each machine's network in its own user namespace, so one
+# machine's node address is unreachable from any other; and the kubelet refuses
+# to advertise an address that is not on one of its own interfaces, which rules
+# out publishing host ports. A wg0 the container owns satisfies both, and the
+# tunnel is established outbound.
+#
+# This runs before the kubeadm config is templated, and that ordering is the
+# point. advertiseAddress must name a local address when kubeadm validates it,
+# and it is what the API server writes into endpoints/kubernetes - the address
+# every in-cluster client is handed. Set it afterwards and the cluster forms
+# with its own Service pointing somewhere no other machine can reach, which
+# surfaces as CNI pods crashlooping on an unreachable API rather than as an
+# addressing mistake.
+#
+# A single-machine cluster mounts nothing here and keeps its podman address.
+NODE_IP="$CONTAINER_IP"
+if [[ -s /etc/kinc/wg/address ]]; then
+    # The interface itself belongs to kinc-tunnel.service, which runs on every
+    # start. This unit is skipped once the node has initialised, so anything it
+    # created would be missing after a restart - which is how a tunnelled node
+    # came back with no wg0, no identity, and no way to register.
+    NODE_IP="$(tr -d '[:space:]' < /etc/kinc/wg/address)"
+    log "Multi-host transport: node address is ${NODE_IP}"
+fi
+
+# A named endpoint needs a certificate of its own, or it fails TLS and nothing
+# else: discovery succeeds and then every client rejects the certificate, so
+# the API reads as unreachable rather than as a bad certificate.
+#
+# Added here rather than carried as a placeholder in the template, so a cluster
+# that does not name its endpoint renders exactly what it always did. The
+# append runs before the substitution below, while the line still matches.
+ADV_SAN=()
+if [[ "$ADV" != "$CONTROL_PLANE_NAME" ]]; then
+    ADV_SAN=(-e "/CONTROL_PLANE_NAME_PLACEHOLDER/a\\  - ${ADV}")
+fi
+
+sed "${ADV_SAN[@]}" \
+    -e "s/CONTAINER_IP_PLACEHOLDER/$NODE_IP/g" \
     -e "s/CONTROL_PLANE_NAME_PLACEHOLDER/${CONTROL_PLANE_NAME}/g" \
-    -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${CONTROL_PLANE_NAME}:6443/g" \
+    -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${ADV}:6443/g" \
     "$CONFIG_FILE" > /tmp/kubeadm-final.conf
 
 # Tell the kubelet the OOM score it can actually hold.
@@ -221,12 +271,42 @@ bytes_of() { numfmt --from=iec "${1%i}"; }
 #
 # A worker has no CA mount and skips this: it authenticates the control plane
 # by the hash its join config already carries.
+#
+# A JOINING control plane mounts the same directory, and that is what lets it
+# join without a certificate key: kubeadm's --upload-certs path exists to move
+# exactly this material, so a node that already has it skips the download and
+# never depends on a Secret that expires two hours after the cluster started.
+# A control-plane join without that material is refused rather than attempted.
+# kubeadm would mint a CA of its own and carry on: the node comes up, serves an
+# API, and is rejected by every other member - the failure arrives minutes later
+# as "certificate signed by unknown authority" against the cluster it was
+# joining, naming neither the missing mount nor the CA it invented.
+#
+# The join config is what says this is a control plane; a worker holds none of
+# this and is unaffected.
+if [[ -f /etc/kinc/join/join.conf ]] && grep -q '^controlPlane:' /etc/kinc/join/join.conf; then
+    if [[ ! -f /etc/kinc/ca/ca.key || ! -f /etc/kinc/ca/sa.key ]]; then
+        log "❌ control-plane join with no shared material at /etc/kinc/ca"
+        log "   it needs the cluster's CAs and service account keypair, as"
+        log "   minted by deploy.sh in ~/.local/share/kinc/<cluster>/ca"
+        log "   without them kubeadm mints its own and the cluster splits"
+        exit 1
+    fi
+fi
+
 if [[ -f /etc/kinc/ca/ca.crt && -f /etc/kinc/ca/ca.key ]]; then
-    log "Adopting the pre-minted cluster CA"
-    install -d -m 0755 /etc/kubernetes/pki
-    install -m 0644 /etc/kinc/ca/ca.crt /etc/kubernetes/pki/ca.crt
-    install -m 0600 /etc/kinc/ca/ca.key /etc/kubernetes/pki/ca.key
-    log "✅ Cluster CA adopted"
+    log "Adopting the pre-minted cluster material"
+    install -d -m 0755 /etc/kubernetes/pki /etc/kubernetes/pki/etcd
+    # Public half 0644, private half 0600, and each only if it was minted: a
+    # cluster from an older state dir has the CA and nothing else, and must
+    # still come up rather than fail on a file that was never there.
+    for f in ca front-proxy-ca etcd/ca; do
+        [[ -f "/etc/kinc/ca/${f}.crt" ]] && install -m 0644 "/etc/kinc/ca/${f}.crt" "/etc/kubernetes/pki/${f}.crt"
+        [[ -f "/etc/kinc/ca/${f}.key" ]] && install -m 0600 "/etc/kinc/ca/${f}.key" "/etc/kubernetes/pki/${f}.key"
+    done
+    [[ -f /etc/kinc/ca/sa.pub ]] && install -m 0644 /etc/kinc/ca/sa.pub /etc/kubernetes/pki/sa.pub
+    [[ -f /etc/kinc/ca/sa.key ]] && install -m 0600 /etc/kinc/ca/sa.key /etc/kubernetes/pki/sa.key
+    log "✅ Adopted: $(cd /etc/kubernetes/pki && ls ca.crt front-proxy-ca.crt etcd/ca.crt sa.pub 2>/dev/null | tr '\n' ' ')"
 fi
 
 # API-server audit logging, when KINC_AUDIT_RESOURCES names something.

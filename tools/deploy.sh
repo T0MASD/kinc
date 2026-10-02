@@ -251,10 +251,11 @@ get_cluster_node_subnet() {
 }
 
 # .1 is the gateway, .2 is the control plane, workers count up from .3.
+# Derived from the subnet rather than the port, so overriding the subnet moves
+# the addresses with it.
 get_cluster_node_ip() {
-    local port=$1 index=$2      # index 0 = control plane, 1 = w1, ...
-    local subnet_id=${port: -2}
-    echo "10.89.${subnet_id}.$(( index + 2 ))"
+    local index=$1              # index 0 = control plane, 1 = w1, ...
+    echo "${NODE_PREFIX}.$(( index + 2 ))"
 }
 
 # Port allocation
@@ -269,9 +270,23 @@ fi
 # CIDR allocation based on port
 CLUSTER_POD_SUBNET=$(get_cluster_pod_subnet "$CLUSTER_PORT")
 CLUSTER_SERVICE_SUBNET=$(get_cluster_service_subnet "$CLUSTER_PORT")
-CLUSTER_NODE_SUBNET=$(get_cluster_node_subnet "$CLUSTER_PORT")
-CLUSTER_NODE_GATEWAY="${CLUSTER_NODE_SUBNET%.*/*}.1"
-CONTROL_PLANE_IP=$(get_cluster_node_ip "$CLUSTER_PORT" 0)
+# The node subnet is the one address range that is per MACHINE rather than per
+# cluster: a cluster spanning hosts needs a different one on each, while the pod
+# and service subnets are cluster-wide and must match everywhere.
+#
+# Keying it to the port made choosing it mean choosing the published API port -
+# two unrelated things, one of them externally visible, and ports below 6443
+# compute a negative pod block and are refused outright. KINC_NODE_SUBNET sets
+# it directly and leaves the port alone.
+CLUSTER_NODE_SUBNET="${KINC_NODE_SUBNET:-$(get_cluster_node_subnet "$CLUSTER_PORT")}"
+if [[ ! "$CLUSTER_NODE_SUBNET" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\.0/24$ ]]; then
+    echo "❌ KINC_NODE_SUBNET must be a /24 ending in .0, not '${CLUSTER_NODE_SUBNET}'"
+    echo "   each node takes a fixed address in it, so the prefix has to be known"
+    exit 1
+fi
+NODE_PREFIX="${BASH_REMATCH[1]}"
+CLUSTER_NODE_GATEWAY="${NODE_PREFIX}.1"
+CONTROL_PLANE_IP=$(get_cluster_node_ip 0)
 
 echo "🌐 API Server will be available at: https://127.0.0.1:${CLUSTER_PORT}"
 echo "🔗 Pod subnet: $CLUSTER_POD_SUBNET"
@@ -450,18 +465,51 @@ node_store() {
 # cluster's data and cleanup.sh removes it with everything else.
 CLUSTER_STORAGE="kinc-${CLUSTER_NAME}-storage"
 
-echo "🔑 Step 1b: Minting the cluster CA"
-mkdir -p "${STATE_DIR}/ca"
-if [ -f "${STATE_DIR}/ca/ca.crt" ] && [ -f "${STATE_DIR}/ca/ca.key" ]; then
-    echo "✅ Reusing the CA already minted for cluster '${CLUSTER_NAME}'"
-else
+echo "🔑 Step 1b: Minting the cluster's shared control-plane material"
+mkdir -p "${STATE_DIR}/ca/etcd"
+
+# One authority per thing kubeadm signs with, minted here for the same reason
+# the cluster CA is: material that exists before any node does can be handed to
+# a joining control plane directly.
+#
+# The alternative kubeadm offers is --upload-certs, which puts this set in a
+# Secret encrypted with a certificate key. That Secret expires two hours after
+# it is written, so a control plane joined on day two needs someone to go and
+# re-upload it first - the same ordering problem the pre-minted CA removed, in
+# a different place. Material on disk does not expire.
+#
+# All four have to be identical on every control plane: sa.key signs service
+# account tokens, and the two extra CAs sign the aggregation layer and etcd's
+# peer certificates. A control plane that minted its own would issue tokens and
+# peer certificates the others reject.
+mint_ca() { # <path-prefix> <CN>
+    [ -f "$1.crt" ] && [ -f "$1.key" ] && return 0
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-        -subj "/CN=kubernetes" \
+        -subj "/CN=$2" \
         -addext "basicConstraints=critical,CA:TRUE" \
         -addext "keyUsage=critical,keyCertSign,cRLSign,digitalSignature" \
-        -keyout "${STATE_DIR}/ca/ca.key" -out "${STATE_DIR}/ca/ca.crt" 2>/dev/null
-    chmod 0600 "${STATE_DIR}/ca/ca.key"
-    echo "✅ CA minted"
+        -keyout "$1.key" -out "$1.crt" 2>/dev/null || return 1
+    chmod 0600 "$1.key"
+    return 0
+}
+
+if [ -f "${STATE_DIR}/ca/ca.crt" ] && [ -f "${STATE_DIR}/ca/ca.key" ] \
+   && [ -f "${STATE_DIR}/ca/sa.key" ]; then
+    echo "✅ Reusing the material already minted for cluster '${CLUSTER_NAME}'"
+else
+    mint_ca "${STATE_DIR}/ca/ca"              "kubernetes"     || { echo "❌ could not mint the cluster CA"; exit 1; }
+    mint_ca "${STATE_DIR}/ca/front-proxy-ca"  "front-proxy-ca" || { echo "❌ could not mint the front-proxy CA"; exit 1; }
+    mint_ca "${STATE_DIR}/ca/etcd/ca"         "etcd-ca"        || { echo "❌ could not mint the etcd CA"; exit 1; }
+    # Not a certificate: a keypair kube-controller-manager signs service account
+    # tokens with and the API server verifies them against.
+    if [ ! -f "${STATE_DIR}/ca/sa.key" ]; then
+        openssl genrsa -out "${STATE_DIR}/ca/sa.key" 2048 2>/dev/null \
+            && openssl rsa -in "${STATE_DIR}/ca/sa.key" -pubout \
+                   -out "${STATE_DIR}/ca/sa.pub" 2>/dev/null \
+            || { echo "❌ could not mint the service account keypair"; exit 1; }
+        chmod 0600 "${STATE_DIR}/ca/sa.key"
+    fi
+    echo "✅ Minted: cluster CA, front-proxy CA, etcd CA, service account keypair"
 fi
 
 # The hash a joining node pins. kubeadm compares it against the DER of the
@@ -537,6 +585,28 @@ sed "s/VolumeName=kinc-etc-kubernetes/VolumeName=kinc-${CLUSTER_NAME}-etc-kubern
     runtime/quadlet/kinc-etc-kubernetes.volume \
     > ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-etc-kubernetes.volume
 
+# Multi-host knobs. All are unset for a single-machine cluster, and then every
+# placeholder below renders empty and the quadlet is what it always was.
+#
+#   KINC_API_BIND     address the API server is published on (default loopback)
+#   KINC_WG_DIR       this node's WireGuard material: private, address, peers
+#   KINC_ADVERTISE    file holding the endpoint a joining node dials
+#   KINC_NODE_SUBNET  the /24 this machine's node containers sit on
+#
+# Only the control plane publishes a WireGuard port; the quadlet says why a
+# worker must not.
+API_BIND="${KINC_API_BIND:-127.0.0.1}"
+WG_VOLUME=""
+WG_PUBLISH=""
+ADVERTISE_VOLUME=""
+if [ -n "${KINC_WG_DIR:-}" ]; then
+    WG_VOLUME="Volume=${KINC_WG_DIR}:/etc/kinc/wg:ro,Z"
+    WG_PUBLISH="PublishPort=0.0.0.0:${KINC_WG_PORT:-51820}:${KINC_WG_PORT:-51820}/udp"
+fi
+if [ -n "${KINC_ADVERTISE:-}" ]; then
+    ADVERTISE_VOLUME="Volume=${KINC_ADVERTISE}:/etc/kinc/advertise-addr:ro,Z"
+fi
+
 # Copy and customize container file
 sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-control-plane/g" \
     -e "s/HostName=kinc-control-plane/HostName=kinc-${CLUSTER_NAME}-control-plane/g" \
@@ -546,6 +616,10 @@ sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-co
     -e "s/kinc-config-volume.service/kinc-${CLUSTER_NAME}-config-volume.service/g" \
     -e "s/PublishPort=127.0.0.1:6443:6443\/tcp/PublishPort=127.0.0.1:${CLUSTER_PORT}:6443\/tcp/g" \
     -e "s|CA_DIR_PLACEHOLDER|${STATE_DIR}/ca|g" \
+    -e "s|API_BIND_PLACEHOLDER|${API_BIND}|g" \
+    -e "s|WG_VOLUME_PLACEHOLDER|${WG_VOLUME}|g" \
+    -e "s|WG_PUBLISH_PLACEHOLDER|${WG_PUBLISH}|g" \
+    -e "s|ADVERTISE_VOLUME_PLACEHOLDER|${ADVERTISE_VOLUME}|g" \
     -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
     -e "s|STORAGE_VOLUME_PLACEHOLDER|${CLUSTER_STORAGE}|g" \
     -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${CONTROL_PLANE_NAME}")|g" \
@@ -654,7 +728,12 @@ fi
 echo
 echo "🔧 Step 5: Updating container file with cluster-specific settings"
 sed -i "s|Image=.*|Image=$IMAGE_NAME|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
-sed -i "s|PublishPort=.*|PublishPort=127.0.0.1:${CLUSTER_PORT}:6443/tcp|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
+# Anchored on the ":6443/tcp" suffix, which is the API server's line and
+# nothing else. Left as "PublishPort=.*" this rewrites every published port
+# the quadlet carries, so a cluster that also publishes a WireGuard port
+# silently loses it here. The anchor has to tolerate the unsubstituted
+# CLUSTER_PORT placeholder, because this line is what replaces it.
+sed -i "s|^PublishPort=.*:6443/tcp$|PublishPort=${API_BIND}:${CLUSTER_PORT}:6443/tcp|" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 sed -i "s|ContainerName=.*|ContainerName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 sed -i "s|HostName=.*|HostName=kinc-${CLUSTER_NAME}-control-plane|g" ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-control-plane.container
 
@@ -851,7 +930,10 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
     # One directory per drop-in: systemd applies every .conf in a .d directory,
     # so the two must not share one.
     mkdir -p "${STATE_DIR}/dropins/kubeadm-init" "${STATE_DIR}/dropins/kinc-postinit"
-    cp runtime/config/dropins/join.conf "${STATE_DIR}/dropins/kubeadm-init/join.conf"
+    # deploy.sh creates workers only; a control plane is joined by join-host.sh,
+    # which renders the same drop-in with the extra phase it has to skip.
+    sed "s|JOIN_SKIP_PHASES_PLACEHOLDER|preflight|" \
+        runtime/config/dropins/join.conf > "${STATE_DIR}/dropins/kubeadm-init/join.conf"
     cp runtime/config/dropins/postinit.conf "${STATE_DIR}/dropins/kinc-postinit/postinit.conf"
 
     for i in $(seq 1 "$KINC_WORKERS"); do
@@ -865,8 +947,15 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
         # the CA hash, so this node needs nothing from the control plane's
         # filesystem and waits on its own discovery timeout.
         mkdir -p "${WORKER_STATE}/join"
+        # A local worker's node-ip is its address on the cluster's podman
+        # network - the same one the quadlet pins. join.conf has always carried
+        # a placeholder for this that nothing replaced, so the kubelet fell back
+        # to its default route address; on one machine that is the same address,
+        # which is why the gap was invisible.
+        WORKER_NODE_IP="$(get_cluster_node_ip "$i")"
         sed -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${CONTROL_PLANE_ENDPOINT}/g" \
             -e "s/CA_HASH_PLACEHOLDER/${CA_HASH}/g" \
+            -e "s/CONTAINER_IP_PLACEHOLDER/${WORKER_NODE_IP}/g" \
             runtime/config/join.conf > "${WORKER_STATE}/join/join.conf"
 
         if [ "${KINC_MAC:-none}" = "selinux" ] && command -v restorecon >/dev/null 2>&1; then
@@ -884,7 +973,9 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
             -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
             -e "s|STORAGE_VOLUME_PLACEHOLDER|${CLUSTER_STORAGE}|g" \
             -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${WORKER_CONTAINER}")|g" \
-            -e "s|WORKER_IP_PLACEHOLDER|$(get_cluster_node_ip "$CLUSTER_PORT" "$i")|g" \
+            -e "s|WORKER_IP_PLACEHOLDER|${WORKER_NODE_IP}|g" \
+            -e "s|WG_VOLUME_PLACEHOLDER||g" \
+            -e "s|CA_VOLUME_PLACEHOLDER||g" \
             -e "s/Volume=kinc-etc-kubernetes:/Volume=${WORKER_CONTAINER}-etc-kubernetes:/g" \
             -e "s|CLUSTER_SLICE_PLACEHOLDER|${CLUSTER_SLICE}|g" \
             -e "s|NODE_LIMITS_PLACEHOLDER|${WORKER_NODE_LIMITS}|g" \
