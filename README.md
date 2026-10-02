@@ -249,6 +249,61 @@ another's.
 
 ---
 
+### Container Creation and OOM Scores
+
+CRI-O's runtime is a wrapper. `/usr/bin/crun` is a symlink to
+`/usr/local/bin/crun-wrapper.sh`, and crun itself is `/usr/bin/crun.orig`. The
+wrapper edits one field of the OCI spec and then execs the real crun.
+
+The field is `process.oomScoreAdj`, and the reason is that a rootless process
+cannot lower `oom_score_adj` below the floor its session inherited. The kernel
+checks `CAP_SYS_RESOURCE` against the initial user namespace, so no capability a
+rootless container can hold satisfies it. crun treats the refusal as fatal
+rather than advisory:
+
+```
+Container creation error: write to `/proc/self/oom_score_adj`: Permission denied
+```
+
+The kubelet asks for -997 on Guaranteed pods and -999 on the control plane's
+static pods, so the wrapper is what lets the API server start at all. Removing
+it is enough to stop a cluster coming up: etcd, kube-apiserver and
+kube-controller-manager all fail to create, and kubeadm waits for an API server
+that never arrives.
+
+**It removes the value only when the value cannot be set.** Lowering below the
+inherited floor is what needs the capability; raising above it always succeeds,
+so anything at or above the floor is passed through untouched. That distinction
+is what keeps the cluster's OOM ordering, because the kubelet uses the positive
+end of the range deliberately: 997, 998 and 1000 on Burstable and BestEffort
+pods, precisely so they are chosen first.
+
+Measured on a default two-node cluster, where the inherited floor is 200:
+
+| `oom_score_adj` | Processes |
+|---|---|
+| 200 | The control plane, the kubelet, CRI-O, antrea-agent, and everything else that asked for a negative value |
+| 997 | antrea-controller |
+| 998 | coredns |
+| 1000 | local-path-provisioner |
+
+So the ordering a cluster depends on holds: under memory pressure the kernel
+takes ordinary pods before it takes the control plane. What differs from a
+root-run cluster is the distance. The control plane sits at the floor rather
+than at -999, which separates it from the pods above it but not from anything
+else on the host at the same floor. `KINC_NODE_MEMORY` is what bounds a node
+against the rest of the machine; see
+[Node Resources](#node-resources-optional).
+
+Every invocation is recorded in `/var/log/crun-wrapper.log` on each node: what
+CRI-O asked for, and what was done to the spec. It is the only account of a step
+that happens between the kubelet's intent and the container that results. It
+lives on the node's volume so it survives the restart that `kinc node` performs,
+is rotated once at 16MiB and keeps one previous file, and
+`ci-collect-diagnostics.sh` copies it into the per-node diagnostics of every CI
+run. A rewrite that fails also goes to the journal under the `crun-wrapper` tag,
+because the alternative is silence followed by a container that will not create.
+
 ## Configuration Modes
 
 ### Baked-In Config (Zero-Config)
