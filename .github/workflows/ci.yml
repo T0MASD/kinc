@@ -1077,6 +1077,32 @@ jobs:
           include-hidden-files: true
           retention-days: 30
 
+      - name: Tear down before the weighted phase
+        run: ./tools/cleanup.sh default
+        shell: bash
+
+      # A weighted split, which is the shape a limit usually wants.
+      #
+      # A control plane's four static pods request 650m of CPU that a worker
+      # never carries, and it comes out of allocatable rather than the reserve -
+      # so an even split runs the control plane far closer to its ceiling than
+      # the number suggests. Until these variables existed one figure was
+      # templated into every node's quadlet and a weighted split could not be
+      # expressed at all.
+      - name: Per-role limits, weighted towards the control plane
+        run: |
+          set -euo pipefail
+          export KINC_WORKERS=1
+          export KINC_CONTROL_PLANE_MEMORY=5G KINC_CONTROL_PLANE_CPUS=3
+          export KINC_WORKER_MEMORY=3G        KINC_WORKER_CPUS=1.5
+          ./tools/deploy.sh
+          ./tools/ci-verify-node-resources.sh default
+        shell: bash
+
+      - name: Tear down the weighted cluster
+        run: ./tools/cleanup.sh default
+        shell: bash
+
       # After the capture, not before it.
       #
       # Both of these restart a node, and the component-log gate reads the

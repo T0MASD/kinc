@@ -56,7 +56,10 @@ kc() { KUBECONFIG="$KUBECONFIG_FILE" kubectl "$@"; }
 echo "=== ${CLUSTER}: node resources ==="
 
 # --- nothing asked for: assert nothing was done ---------------------------
-if [ -z "${KINC_NODE_MEMORY:-}${KINC_NODE_CPUS:-}${KINC_CLUSTER_MEMORY:-}${KINC_CLUSTER_CPUS:-}" ]; then
+# Every variable that asks for something, including the per-role ones. Leaving
+# those out of this guard sent a weighted cluster down the "nothing was asked
+# for" path, where it asserted the absence of the limits it had just been given.
+if [ -z "${KINC_NODE_MEMORY:-}${KINC_NODE_CPUS:-}${KINC_CLUSTER_MEMORY:-}${KINC_CLUSTER_CPUS:-}${KINC_CONTROL_PLANE_MEMORY:-}${KINC_CONTROL_PLANE_CPUS:-}${KINC_WORKER_MEMORY:-}${KINC_WORKER_CPUS:-}" ]; then
     for n in $nodes; do
         for prop in MemoryHigh MemoryMax; do
             v=$(systemctl --user show "${n}.service" -p "$prop" --value)
@@ -69,16 +72,42 @@ if [ -z "${KINC_NODE_MEMORY:-}${KINC_NODE_CPUS:-}${KINC_CLUSTER_MEMORY:-}${KINC_
     exit "$status"
 fi
 
+# What a given node was asked for. KINC_NODE_* applies to every node; the
+# per-role variables override it, and a weighted split is the normal case once a
+# limit is worth setting - a control plane's static pods request 650m before
+# anything else, so an even split leaves it with far less room than a worker.
+#
+# A node is a control plane when its name says so, which is how deploy.sh names
+# them and how the node itself decides its reserve.
+want_memory_for() {
+    case "$1" in
+        *-control-plane) echo "${KINC_CONTROL_PLANE_MEMORY:-${KINC_NODE_MEMORY:-}}" ;;
+        *)               echo "${KINC_WORKER_MEMORY:-${KINC_NODE_MEMORY:-}}" ;;
+    esac
+}
+want_cpus_for() {
+    case "$1" in
+        *-control-plane) echo "${KINC_CONTROL_PLANE_CPUS:-${KINC_NODE_CPUS:-}}" ;;
+        *)               echo "${KINC_WORKER_CPUS:-${KINC_NODE_CPUS:-}}" ;;
+    esac
+}
+
 # --- enforced on each node -------------------------------------------------
-if [ -n "${KINC_NODE_MEMORY:-}" ]; then
-    want=$(bytes "$KINC_NODE_MEMORY")
+if [ -n "${KINC_NODE_MEMORY:-}${KINC_CONTROL_PLANE_MEMORY:-}${KINC_WORKER_MEMORY:-}" ]; then
     for n in $nodes; do
-        got=$(bytes "$(systemctl --user show "${n}.service" -p MemoryHigh --value)")
-        if [ "$got" != "$want" ]; then
-            fail "${n}: MemoryHigh is ${got} bytes, asked for ${KINC_NODE_MEMORY} (${want})"
+        asked=$(want_memory_for "$n")
+        got=$(systemctl --user show "${n}.service" -p MemoryHigh --value)
+        if [ -z "$asked" ]; then
+            [ "$got" = "infinity" ] || fail "${n}: MemoryHigh=${got}, but this role was asked for nothing"
+            continue
+        fi
+        want=$(bytes "$asked")
+        if [ "$(bytes "$got")" != "$want" ]; then
+            fail "${n}: MemoryHigh is $(bytes "$got") bytes, asked for ${asked} (${want})"
+        else
+            ok "${n}: enforced at MemoryHigh=${asked}"
         fi
     done
-    [ "$status" -eq 0 ] && ok "${CLUSTER}: every node enforced at MemoryHigh=${KINC_NODE_MEMORY}"
 else
     # Bounding a cluster does not bound its nodes. If this asserted only what
     # was asked for, a node limit leaking in from anywhere would pass.
@@ -89,14 +118,19 @@ else
     [ "$status" -eq 0 ] && ok "${CLUSTER}: no per-node memory limit, as asked"
 fi
 
-if [ -n "${KINC_NODE_CPUS:-}" ]; then
-    want_us=$(awk -v c="$KINC_NODE_CPUS" 'BEGIN { printf "%d", c * 1000000 }')
+if [ -n "${KINC_NODE_CPUS:-}${KINC_CONTROL_PLANE_CPUS:-}${KINC_WORKER_CPUS:-}" ]; then
     for n in $nodes; do
+        asked=$(want_cpus_for "$n")
         got=$(systemctl --user show "${n}.service" -p CPUQuotaPerSecUSec --value)
+        if [ -z "$asked" ]; then
+            [ "$got" = "infinity" ] || fail "${n}: CPUQuota=${got}, but this role was asked for nothing"
+            continue
+        fi
+        want_us=$(awk -v c="$asked" 'BEGIN { printf "%d", c * 1000000 }')
         got_us=$(awk -v v="$got" 'BEGIN { sub(/s$/, "", v); printf "%d", v * 1000000 }')
-        [ "$got_us" = "$want_us" ] || fail "${n}: CPUQuota is ${got}, asked for ${KINC_NODE_CPUS} cores"
+        [ "$got_us" = "$want_us" ] && ok "${n}: enforced at CPUQuota=${asked} cores" \
+            || fail "${n}: CPUQuota is ${got}, asked for ${asked} cores"
     done
-    [ "$status" -eq 0 ] && ok "${CLUSTER}: every node enforced at CPUQuota=${KINC_NODE_CPUS} cores"
 else
     # Same reason as memory: a quota leaking in from anywhere would otherwise
     # pass, because asserting only what was asked for cannot see it.
@@ -178,22 +212,28 @@ fi
 # --- advertised, which is what the scheduler uses --------------------------
 # Per node, because a control plane reserves more than a worker: its static
 # pods have no memory request, so nothing else accounts for them.
-if [ -n "${KINC_NODE_MEMORY:-}" ]; then
-    limit=$(bytes "$KINC_NODE_MEMORY")
+if [ -n "${KINC_NODE_MEMORY:-}${KINC_CONTROL_PLANE_MEMORY:-}${KINC_WORKER_MEMORY:-}" ]; then
     for n in $nodes; do
+        asked=$(want_memory_for "$n")
+        got=$(bytes "$(kc get node "$n" -o jsonpath='{.status.allocatable.memory}' 2>/dev/null)")
+        if [ -z "$asked" ]; then
+            cap=$(bytes "$(kc get node "$n" -o jsonpath='{.status.capacity.memory}' 2>/dev/null)")
+            [ "$got" = "$cap" ] || fail "${n}: advertises $(( got / 1048576 ))Mi, but this role was asked for no limit"
+            continue
+        fi
         if podman exec "$n" test -f /etc/kinc/join/join.conf 2>/dev/null; then
             reserve=$(bytes "${KINC_NODE_RESERVED_MEMORY:-1Gi}")
         else
             reserve=$(bytes "${KINC_NODE_RESERVED_MEMORY:-2Gi}")
         fi
-        expect=$(( limit - reserve ))
-        got=$(bytes "$(kc get node "$n" -o jsonpath='{.status.allocatable.memory}' 2>/dev/null)")
+        expect=$(( $(bytes "$asked") - reserve ))
         if [ "$got" != "$expect" ]; then
-            fail "${n}: advertises $(( got / 1048576 ))Mi allocatable, expected $(( expect / 1048576 ))Mi (${KINC_NODE_MEMORY} less its own reserve)"
+            fail "${n}: advertises $(( got / 1048576 ))Mi allocatable, expected $(( expect / 1048576 ))Mi (${asked} less its own reserve)"
             say "a node that advertises more than it has admits pods into memory that is not there"
+        else
+            ok "${n}: advertises ${asked} less its own reserve ($(( got / 1048576 ))Mi)"
         fi
     done
-    [ "$status" -eq 0 ] && ok "${CLUSTER}: every node advertises its limit less its own reserve"
 else
     # No per-node limit means no reserve, so a node should advertise the whole
     # machine. Bounding the cluster deliberately does not change that: the
