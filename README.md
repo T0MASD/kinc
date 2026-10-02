@@ -167,8 +167,22 @@ chain, because a verdict reached in a different chain does not pre-empt it, and
 it has to be re-asserted, because netavark rewrites its ruleset whenever a
 container changes.
 
-**A cluster spans hosts over a WireGuard link each node container owns.** Give
-a node tunnel material and its tunnel address becomes its identity: kinc
+**A cluster spans hosts, over a tunnel each node owns or over routed host
+networking.** Both exist because the obstacle is the same one: rootless podman
+puts its network in a user namespace, every machine allocates from the same
+range, and so two machines hand their containers identical addresses that
+neither can reach. Bridging the hypervisors does not help - the namespace is
+the boundary, not the LAN.
+
+| | tunnel (`KINC_WG_DIR`) | routed veth (`tools/install-node-veth.sh`) |
+|---|---|---|
+| node identity | the tunnel address it owns | the address it already has |
+| works over | anything, including NAT and the internet | one routed network |
+| encrypts | yes | no |
+| throughput | capped by the cipher (~1.7 Gbit/s on 2 vCPU) | line rate |
+| needs on the host | nothing | a route per peer, and a service |
+
+Give a node tunnel material and its tunnel address becomes its identity: kinc
 templates `advertiseAddress` and `node-ip` from the same value, so one
 substitution puts both on the tunnel, and Antrea's geneve then encapsulates to
 that address.
@@ -205,6 +219,47 @@ KINC_ADVERTISE=$HOME/kinc-advertise-addr \
 The CA is minted before any node starts, so each join config carries its hash
 from the beginning and a joining node needs nothing from the control plane's
 filesystem.
+
+### Without a Tunnel
+
+On machines that already route to each other, the addresses the nodes have can
+be made reachable instead, which removes the cipher from the path. A veth is
+routed into the rootless namespace and each machine carries a route to the
+others' node subnets:
+
+```bash
+# On each machine, naming its own node subnet, a transit /30, and its peers:
+./tools/install-node-veth.sh 10.89.21.0/24 10.99.21.0/30 \
+    10.78.0.22=10.89.22.0/24 10.78.0.71=10.89.43.0/24
+```
+
+Then join as usual and leave `~/kinc-wg-<name>/` out: preflight brings up `wg0`
+only when it finds a key, so a node without tunnel material keeps the address it
+was given.
+
+Routed, not bridged - a veth enslaved to the podman bridge makes replies leave
+the interface they arrived on and they are dropped. It runs as a service rather
+than once because podman's namespace dies with the last container, so replacing
+a node otherwise leaves the host routing its subnet to a veth that is gone:
+egress works, ingress does not, and nothing logs it.
+
+### Naming the Control Plane
+
+`controlPlaneEndpoint` is written into every node's kubelet.conf when it joins,
+so an address makes that node's identity load-bearing: replacing it means
+reusing its address, and both recorded copies of the endpoint -
+`kube-system/kubeadm-config` and `kube-public/cluster-info` - have to be
+repointed first. Point `KINC_ADVERTISE` at a file holding a name instead, and
+kinc puts the name in `certSANs` as well as the endpoint. Replacing a control
+plane is then a DNS update, and the replacement can take any free address.
+
+Several A records for one name also give failover with nothing in front of the
+cluster: a client skips a dead address in milliseconds, and a joining node comes
+up even when the records include addresses that are not serving yet.
+
+The name has to be in the certificate, so it is fixed when the cluster is
+created - a running cluster cannot be renamed without regenerating the API
+server's certificates.
 
 ### More Than One Control Plane
 
