@@ -302,10 +302,17 @@ Material on disk does not expire, and no `kubeadm-certs` Secret is ever created.
 Give the cluster a name rather than an address if you intend to replace control
 planes - see `KINC_ADVERTISE` above. The endpoint is written into every node's
 kubelet.conf when it joins, so with an address a replacement has to reuse the
-dead node's one. `tools/ci-verify-crossnode.sh` asserts the cross-host datapath and
-`tools/ci-verify-samemachine.sh` the one between nodes sharing a machine; both
-read Antrea's traceflow, which is what shows the packet was encapsulated rather
-than delivered locally.
+dead node's one. `tools/ci-verify-crossnode.sh` asserts the datapath between two nodes, reading
+Antrea's traceflow - a `tunnelDst` is what shows the packet was encapsulated
+rather than delivered locally. CI runs it against a tunnel cluster whose nodes
+share one runner, where it reports the tunnel address, so the same-machine case
+is covered there.
+
+`tools/ci-verify-samemachine.sh` asserts the same property for a named pair. It
+is for a cluster that actually spans machines, where the scheduler may put
+`crossnode`'s pods either side of a machine boundary and the same-machine pair
+has to be named explicitly. It is an operator check, not part of CI, which has
+one machine.
 
 Leave `KINC_WG_DIR` unset and everything above renders empty: the quadlets, the
 addresses and the published ports are exactly what a single-host cluster has
