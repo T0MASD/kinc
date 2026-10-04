@@ -29,6 +29,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 CLUSTER="${1:-default}"
+# The image to restart onto. Given, this is an upgrade: the caller deployed the
+# cluster from some other image and this moves it onto the one named. Omitted,
+# a sibling is derived from whatever the cluster is running, which tests the
+# mechanism and nothing about history.
+TARGET_IMAGE="${2:-}"
 CP="kinc-${CLUSTER}-control-plane"
 KC="/etc/kubernetes/admin.conf"
 QUADLET=~/.config/containers/systemd/${CP}.container
@@ -65,20 +70,36 @@ before=$(allocatable_bytes)
 [ -n "$before" ] && [ -n "$born" ] || { echo "❌ could not read the node's starting state"; exit 1; }
 echo "   on ${IMAGE_A}, allocatable $(( before / 1024 / 1024 ))Mi, node created ${born}"
 
-# --- image B: the same image, configured differently -----------------------
-# One layer over A, changing the default a provisioning step reads. Not a
-# rebuild: everything else about the image - the binaries, the manifests - is
-# the same, so what the assertion sees can only come from the change.
-IMAGE_B="localhost/kinc/node:imagechange-test"
-podman build -q -t "$IMAGE_B" -f - . >/dev/null 2>&1 <<EOF
+# --- the image to restart onto ---------------------------------------------
+DERIVED=0
+if [ -n "$TARGET_IMAGE" ]; then
+    # An upgrade. The cluster's state was created by whatever built it, which is
+    # the point: a derived sibling shares this tree, so every directory it owns
+    # and every file it staged was written by current provisioning. The bugs
+    # worth catching here are the opposite - state an older release left behind.
+    # A root-owned events directory only exists on a cluster built before the
+    # install -d line did; a missing staged kubeconfig only matters where init
+    # predates the unit that stages it.
+    podman image exists "$TARGET_IMAGE" || podman pull -q "$TARGET_IMAGE" >/dev/null 2>&1
+    podman image exists "$TARGET_IMAGE" || { echo "❌ ${TARGET_IMAGE} is not available"; exit 1; }
+    IMAGE_B="$TARGET_IMAGE"
+    ok "upgrading from ${IMAGE_A##*/} to ${IMAGE_B##*/}"
+else
+    # One layer over A, changing the default a provisioning step reads. Not a
+    # rebuild: everything else about the image is the same, so what the
+    # assertion sees can only come from the change.
+    DERIVED=1
+    IMAGE_B="localhost/kinc/node:imagechange-test"
+    podman build -q -t "$IMAGE_B" -f - . >/dev/null 2>&1 <<EOF
 FROM ${IMAGE_A}
 RUN sed -i 's/KINC_NODE_RESERVED_MEMORY:-2Gi/KINC_NODE_RESERVED_MEMORY:-3Gi/' \
     /etc/kinc/scripts/kinc-node-resources.sh \
  && grep -q 'KINC_NODE_RESERVED_MEMORY:-3Gi' /etc/kinc/scripts/kinc-node-resources.sh
 EOF
-[ "${PIPESTATUS[0]:-0}" -eq 0 ] || true
-podman image exists "$IMAGE_B" || { echo "❌ could not derive the second image"; exit 1; }
-ok "derived ${IMAGE_B}, which reserves 3Gi where ${IMAGE_A##*/} reserves 2Gi"
+    [ "${PIPESTATUS[0]:-0}" -eq 0 ] || true
+    podman image exists "$IMAGE_B" || { echo "❌ could not derive the second image"; exit 1; }
+    ok "derived ${IMAGE_B}, which reserves 3Gi where ${IMAGE_A##*/} reserves 2Gi"
+fi
 
 # --- restart the node onto it ----------------------------------------------
 # The quadlet is repointed and the unit restarted. The volumes are untouched,
@@ -108,16 +129,63 @@ now_born=$(kq get node "$CP" -o jsonpath='{.metadata.creationTimestamp}')
     || fail "the node object was recreated: ${born} became ${now_born:-<absent>}"
 
 after=$(allocatable_bytes)
-if [ -z "$after" ]; then
-    fail "allocatable could not be read after the restart"
-elif [ "$after" = "$before" ]; then
-    fail "allocatable is unchanged at $(( before / 1024 / 1024 ))Mi"
-    fail "the node came back on a new image carrying the configuration it was born with"
-elif [ "$after" -lt "$before" ]; then
-    ok "allocatable moved $(( before / 1024 / 1024 ))Mi → $(( after / 1024 / 1024 ))Mi: the new image's reserve is in effect"
-else
-    fail "allocatable rose to $(( after / 1024 / 1024 ))Mi, which the new image's larger reserve cannot explain"
+if [ "$DERIVED" -eq 1 ]; then
+    # The derived image reserves more, so allocatable must fall.
+    if [ -z "$after" ]; then
+        fail "allocatable could not be read after the restart"
+    elif [ "$after" = "$before" ]; then
+        fail "allocatable is unchanged at $(( before / 1024 / 1024 ))Mi"
+        fail "the node came back on a new image carrying the configuration it was born with"
+    elif [ "$after" -lt "$before" ]; then
+        ok "allocatable moved $(( before / 1024 / 1024 ))Mi → $(( after / 1024 / 1024 ))Mi: the new image's reserve is in effect"
+    else
+        fail "allocatable rose to $(( after / 1024 / 1024 ))Mi, which the new image's larger reserve cannot explain"
+    fi
+    # Not -f. The node is still running this image, and `podman rmi -f` on an
+    # image in use stops and removes the containers using it - so the gate
+    # destroyed the cluster it had just verified, and whatever ran next found
+    # no nodes to capture. Plain rmi declines while the container lives, which
+    # is the behaviour wanted: tidy up if the cluster is already gone, never
+    # take it down to do so.
+    podman rmi "$IMAGE_B" >/dev/null 2>&1 || true
+    exit "$status"
 fi
 
-podman rmi -f "$IMAGE_B" >/dev/null 2>&1 || true
+# --- an upgrade: what provisioning from an older release left behind --------
+#
+# Each of these was a real bug, and each was invisible both to a fresh build and
+# to a restart within one source tree. They are asserted on the cluster, after
+# the restart, because that is the only moment the old state and the new image
+# exist together.
+
+# The reservation this node resolved. On a cluster whose init predates
+# kinc-node-resources.service, nothing wrote this and allocatable stayed at the
+# machine's size while the cgroup held the limit.
+if podman exec "$CP" test -f /etc/kubernetes/kubelet.conf.d/20-kinc-node-resources.conf 2>/dev/null; then
+    ok "the node rendered its reservation after the upgrade"
+    cap=$(podman exec "$CP" awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo 2>/dev/null)
+    if [ -n "$after" ] && [ -n "$cap" ] && [ "$after" -lt "$cap" ]; then
+        ok "and advertises less than the machine ($(( after / 1024 / 1024 ))Mi of $(( cap / 1024 / 1024 ))Mi)"
+    else
+        fail "advertises $(( ${after:-0} / 1024 / 1024 ))Mi against a machine of $(( ${cap:-0} / 1024 / 1024 ))Mi"
+    fi
+else
+    fail "no reservation was rendered: provisioning from the older release was not redone"
+fi
+
+# Faro's events directory and staged kubeconfig, both of which an older
+# release created root-owned or not at all.
+if podman exec "$CP" test -d /var/lib/kinc/faro-events 2>/dev/null; then
+    owner=$(podman exec "$CP" stat -c '%u:%g' /var/lib/kinc/faro-events 2>/dev/null)
+    [ "$owner" = "65532:65532" ] \
+        && ok "the Faro events directory is owned by 65532 after the upgrade" \
+        || fail "the Faro events directory is owned by ${owner}, so Faro cannot write to it"
+fi
+if podman exec "$CP" test -f /etc/kinc/faro/kubeconfig 2>/dev/null; then
+    owner=$(podman exec "$CP" stat -c '%u:%g' /etc/kinc/faro/kubeconfig 2>/dev/null)
+    [ "$owner" = "65532:65532" ] \
+        && ok "the staged Faro kubeconfig is present and owned by 65532" \
+        || fail "the staged Faro kubeconfig is owned by ${owner}"
+fi
+
 exit "$status"
