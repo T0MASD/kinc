@@ -998,6 +998,45 @@ if [ "$KINC_WORKERS" -gt 0 ]; then
     echo "✅ All workers joined"
 fi
 
+# Converged, not merely initialised.
+#
+# Step 7 waits for /var/lib/kinc-initialized, which kinc-postinit writes. On a
+# first boot that is the right signal and the cluster is fully up by the time it
+# appears. On a resume it is not a signal at all: the marker is on a volume and
+# postinit is gated on it, so the wait returns at once and this declared the
+# deployment complete while a pod was still being created. Measured: a resumed
+# cluster exited here after 20s with one container still creating.
+#
+# So the check is on content rather than on a unit or a marker, which is what
+# holds on both paths - the same reasoning as kinc-check-state keying on
+# ca.crt rather than on a volume existing. CoreDNS is the addon worth waiting
+# for: it being Available means the CNI carries pod traffic, the scheduler
+# placed it, and DNS answers, which is what "usable" means to whatever runs
+# next.
+#
+# Nodes being Ready is deliberately not the signal. A kubelet reports Ready once
+# it sees a usable CNI config, which precedes the addons being up, and "nodes
+# Ready therefore cluster usable" is a trap two separate consumers have fallen
+# into from opposite directions.
+_wait_converged() {
+    local kc timeout=120
+    kc=$(mktemp)
+    podman exec "kinc-${CLUSTER_NAME}-control-plane" cat /etc/kubernetes/admin.conf > "$kc" 2>/dev/null
+    sed -i "s|server: https://.*:6443|server: https://127.0.0.1:${CLUSTER_PORT}|g" "$kc"
+    if kubectl --kubeconfig="$kc" wait --for=condition=Available \
+           --timeout="${timeout}s" -n kube-system deploy/coredns >/dev/null 2>&1; then
+        echo "✅ Addons converged (CoreDNS available)"
+    else
+        # Said rather than swallowed: the cluster may still be usable, and the
+        # caller is about to run kubectl against it either way.
+        echo "⚠️  CoreDNS did not become available within ${timeout}s"
+        echo "   The cluster is up but its addons are still converging; check with"
+        echo "   kubectl get pods -A before relying on DNS or scheduling."
+    fi
+    rm -f "$kc"
+}
+_wait_converged
+
 echo
 echo "✅ Deployment complete!"
 
