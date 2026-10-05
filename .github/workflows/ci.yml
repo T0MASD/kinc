@@ -26,6 +26,100 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  # Does the image build, and does a cluster come up, on aarch64. The build has
+  # never been architecture-specific - fedora:44 is multi-arch and everything
+  # else arrives through dnf - but "should work" is not a test, and a release
+  # that publishes an arm64 image needs one before it does.
+  #
+  # Deliberately narrower than the jobs below: this answers whether the
+  # architecture works, not whether a feature does. Those are the same code on
+  # either architecture and testing them twice buys little for the runtime.
+  #
+  # Faro is left off. Its operator image is published for amd64 only, so a
+  # pre-pull here would fail for a reason that has nothing to do with kinc. That
+  # is also how the fleet runs it - as an operator with its own scheduling, not
+  # as this bootstrap static pod.
+  test-aarch64:
+    runs-on: ubuntu-24.04-arm
+    name: Test (aarch64)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: System prerequisites check
+        run: ./tools/ci-prepare-host.sh
+        shell: bash
+
+      - name: Build kinc image
+        run: ./tools/build.sh
+        shell: bash
+
+      - name: The image is actually arm64
+        run: |
+          set -euo pipefail
+          # Resolved, not named: build.sh carries the tag and bumps it with
+          # the Kubernetes version, so a literal here would start passing
+          # against nothing the next time that moves.
+          img=$(podman images --filter reference='localhost/kinc/node' --format '{{.Repository}}:{{.Tag}}' | head -1)
+          [ -n "$img" ] || { echo "::error::build.sh produced no localhost/kinc/node image"; exit 1; }
+          echo "  image: $img"
+          arch=$(podman image inspect "$img" --format '{{.Architecture}}')
+          echo "  built image architecture: $arch"
+          [ "$arch" = "arm64" ] || { echo "::error::expected arm64, got $arch"; exit 1; }
+        shell: bash
+
+      - name: Deploy cluster (baked-in config)
+        run: |
+          export CLUSTER_NAME=default
+          export USE_BAKED_IN_CONFIG=true
+          ./tools/deploy.sh
+        shell: bash
+
+      - name: Verify configuration validation
+        run: ./tools/ci-verify-init.sh default
+        shell: bash
+
+      - name: Extract kubeconfig and validate cluster
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.kube
+          cluster_port=$(podman inspect kinc-default-control-plane --format '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}}{{end}}{{end}}' 2>/dev/null)
+          podman cp kinc-default-control-plane:/etc/kubernetes/admin.conf ~/.kube/config
+          sed -i "s|server: https://.*:6443|server: https://127.0.0.1:$cluster_port|g" ~/.kube/config
+          kubectl wait --for=condition=Ready node --all --timeout=300s
+          kubectl get nodes -o wide
+          # The node the kubelet registered must agree with the machine it is
+          # on. A cluster that comes up on the wrong architecture would still
+          # pass every check above.
+          got=$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}')
+          echo "  node architecture: $got"
+          [ "$got" = "arm64" ] || { echo "::error::node reports $got"; exit 1; }
+        shell: bash
+
+      - name: Nothing is limited by default
+        run: ./tools/ci-verify-node-resources.sh default
+        shell: bash
+
+      - name: Collect diagnostics
+        if: always()
+        run: ./tools/ci-collect-diagnostics.sh default
+        shell: bash
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kinc-diagnostics-aarch64
+          path: artifacts/diagnostics/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Cleanup
+        if: always()
+        run: CLUSTER_NAME=default ./tools/cleanup.sh
+        shell: bash
+
   test-baked-in:
     runs-on: ubuntu-latest
     name: Test (baked-in config)
