@@ -87,22 +87,39 @@ sudo sysctl -p /etc/sysctl.d/99-kubernetes.conf
 
 ### Deploy a Cluster
 
+kinc is consumed as a published image. `KINC_IMAGE` names which one, and
+`deploy.sh` pulls it if it is not already local:
+
 ```bash
-# Build the image (one time)
-./tools/build.sh
+git clone https://github.com/T0MASD/kinc.git && cd kinc
 
-# Deploy with baked-in config (simplest)
+export KINC_IMAGE=ghcr.io/t0masd/kinc:v1.37.0-3
 USE_BAKED_IN_CONFIG=true ./tools/deploy.sh
+```
 
-# Extract kubeconfig
+Measured on a workstation: 134s from nothing including the image pull, 73s when
+the image is already local, to a cluster whose addons have converged rather than
+to a command that has returned. `deploy.sh` waits for CoreDNS to be available
+before it says it is done.
+
+Then take the kubeconfig. The port is allocated per cluster rather than fixed,
+and `deploy.sh` prints which one it chose, so ask the cluster rather than
+assuming 6443:
+
+```bash
 mkdir -p ~/.kube
+PORT=$(podman inspect kinc-default-control-plane \
+       --format '{{(index .NetworkSettings.Ports "6443/tcp" 0).HostPort}}')
 podman cp kinc-default-control-plane:/etc/kubernetes/admin.conf ~/.kube/config
-sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
+sed -i "s|server: https://.*:6443|server: https://127.0.0.1:${PORT}|g" ~/.kube/config
 
-# Use your cluster
 kubectl get nodes
 kubectl get pods -A
 ```
+
+Releases are at [github.com/T0MASD/kinc/releases](https://github.com/T0MASD/kinc/releases).
+`./tools/build.sh` builds the image from this tree instead, which is what you
+want when changing kinc itself; see [build.sh](#buildsh).
 
 ### Deploy Multiple Nodes
 
