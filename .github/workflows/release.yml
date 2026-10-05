@@ -583,7 +583,11 @@ jobs:
               # then name something other than what was verified.
               digest=$(skopeo inspect --format '{{.Digest}}' "docker://${name}-${arch}")
               echo "  ${arch}: ${digest}"
-              podman manifest add "$name" "${name}-${arch}@${digest}"
+              # Repository plus digest, with no tag between them: podman refuses
+              # a reference carrying both ("Docker references with both a tag
+              # and digest are currently not supported"). The digest is what
+              # makes this exact, so the tag is the part to drop.
+              podman manifest add "$name" "${name%:*}@${digest}"
             done
             podman manifest push --all "$name" "docker://$name"
             echo "  pushed $name"
