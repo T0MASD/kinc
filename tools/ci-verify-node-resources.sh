@@ -44,6 +44,18 @@ bytes() {
 # 1500m -> 1.5, 2 -> 2
 cores() { awk -v v="${1:-0}" 'BEGIN { if (v ~ /m$/) { sub(/m$/, "", v); print v/1000 } else print v+0 }'; }
 
+# The kernel's own copy of a unit's limits. systemctl show reports what systemd
+# intends, which is not the same thing: a controller that was never delegated
+# makes systemd accept a setting the kernel never receives, and show still
+# repeats it back. Reading the cgroup is what distinguishes configured from
+# enforced, and it is the only way to catch the io case at all.
+cgfile() {
+    local unit="$1" file="$2" rel
+    rel=$(systemctl --user show "$unit" -p ControlGroup --value 2>/dev/null)
+    [ -n "$rel" ] || return 1
+    cat "/sys/fs/cgroup${rel}/${file}" 2>/dev/null
+}
+
 nodes=$(podman ps --format '{{.Names}}' | grep "^kinc-${CLUSTER}-" | sort)
 [ -n "$nodes" ] || { echo "❌ no nodes running for cluster '${CLUSTER}'"; exit 1; }
 
@@ -67,6 +79,12 @@ if [ -z "${KINC_NODE_MEMORY:-}${KINC_NODE_CPUS:-}${KINC_CLUSTER_MEMORY:-}${KINC_
         done
         q=$(systemctl --user show "${n}.service" -p CPUQuotaPerSecUSec --value)
         [ "$q" = "infinity" ] || fail "${n}: CPUQuota=${q}, but no limit was asked for"
+        # The floors and weights have defaults of their own, and a default that
+        # quietly changed would be as wrong as a limit that quietly failed.
+        low=$(cgfile "${n}.service" memory.low || echo 0)
+        [ "${low:-0}" = "0" ] || fail "${n}: memory.low=${low}, but no floor was asked for"
+        w=$(cgfile "${n}.service" cpu.weight || echo 100)
+        [ "${w:-100}" = "100" ] || fail "${n}: cpu.weight=${w}, but no weight was asked for"
     done
     [ "$status" -eq 0 ] && ok "${CLUSTER}: unlimited, as asked"
     exit "$status"
@@ -139,6 +157,57 @@ else
         [ "$got" = "infinity" ] || fail "${n}: CPUQuota=${got}, but no per-node cpu was asked for"
     done
     [ "$status" -eq 0 ] && ok "${CLUSTER}: no per-node cpu limit, as asked"
+fi
+
+# --- floors and weights, read from the kernel ------------------------------
+# Asserted against the cgroup rather than against systemctl show, because the
+# two disagree exactly where it matters. These are what decide the split when
+# the host is contended; the limits above only decide the ceiling, and a node
+# that holds its ceiling while being reclaimed to nothing still passes every
+# check that looks only at MemoryHigh.
+if [ -n "${KINC_NODE_MEMORY:-}${KINC_CONTROL_PLANE_MEMORY:-}${KINC_WORKER_MEMORY:-}" ]; then
+    for n in $nodes; do
+        asked=$(want_memory_for "$n")
+        [ -n "$asked" ] || continue
+        want=$(bytes "$asked")
+        got=$(cgfile "${n}.service" memory.low)
+        if [ -z "$got" ]; then
+            fail "${n}: no memory.low in the cgroup - the floor was not applied"
+        elif [ "$got" != "$want" ]; then
+            fail "${n}: memory.low is ${got} bytes, asked for ${asked} (${want})"
+        else
+            ok "${n}: floor enforced at memory.low=${asked}"
+        fi
+    done
+fi
+
+if [ -n "${KINC_NODE_CPUS:-}${KINC_CONTROL_PLANE_CPUS:-}${KINC_WORKER_CPUS:-}" ]; then
+    for n in $nodes; do
+        asked=$(want_cpus_for "$n")
+        [ -n "$asked" ] || continue
+        want=$(awk -v c="$asked" 'BEGIN { w = int(c * 100); if (w < 1) w = 1; if (w > 10000) w = 10000; print w }')
+        got=$(cgfile "${n}.service" cpu.weight)
+        if [ "$got" != "$want" ]; then
+            fail "${n}: cpu.weight is ${got:-absent}, expected ${want} for ${asked} cores"
+        else
+            ok "${n}: weighted at cpu.weight=${want}"
+        fi
+
+        # io is the one that fails silently. The controller is not delegated to a
+        # user manager by default, and without it systemd accepts IOWeight and the
+        # kernel never sees it - io.weight does not exist to be read. Asserting the
+        # file's absence as a failure is the whole point of checking here: nothing
+        # else in this suite can tell a delegated io controller from a missing one.
+        io=$(cgfile "${n}.service" io.weight)
+        if [ -z "$io" ]; then
+            fail "${n}: no io.weight in the cgroup - the io controller was not delegated, so IOWeight is ignored (see tools/ci-prepare-host.sh Check 0c)"
+        else
+            # io.weight reads back as "default <n>", optionally with per-device lines.
+            got_io=$(printf '%s\n' "$io" | awk '/^default /{print $2; exit}')
+            [ "$got_io" = "$want" ] && ok "${n}: weighted at io.weight=${want}" \
+                || fail "${n}: io.weight is ${got_io:-unparsed}, expected ${want}"
+        fi
+    done
 fi
 
 # --- the slice -------------------------------------------------------------

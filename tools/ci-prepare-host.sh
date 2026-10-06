@@ -52,6 +52,58 @@ else
   echo "✅ Lingering: enabled for $(id -un)"
 fi
 
+# kinc's nodes are rootless units, and systemd hands a user manager only the
+# cpu, memory and pids controllers by default. io is not among them.
+#
+# The failure is silent in the way that matters: IOWeight= on a rootless unit is
+# parsed, accepted, and then does nothing, because the controller that would
+# enforce it was never delegated. systemctl show reports the value back, so the
+# unit looks configured while the limit does not exist.
+#
+# Delegating it is a host decision, not something the image can carry - the user
+# manager running the nodes belongs to the host, not to the node.
+echo "━━━ Check 0c: cgroup io Delegation ━━━"
+_user_cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers"
+if [ -r "$_user_cg" ] && grep -qw io "$_user_cg"; then
+  echo "✅ io delegated: $(tr ' ' ',' < "$_user_cg")"
+else
+  echo "  Delegating io to the user manager..."
+  sudo mkdir -p /etc/systemd/system/user@.service.d
+  printf '[Service]\nDelegate=cpu cpuset io memory pids\n' \
+    | sudo tee /etc/systemd/system/user@.service.d/10-kinc-delegate.conf >/dev/null
+  sudo systemctl daemon-reload
+  # Delegation is read when the user manager starts, so the drop-in does nothing
+  # until it restarts - and restarting it stops every unit it owns. That is safe
+  # here and nowhere else: this runs before anything is deployed. If nodes are
+  # already running, say so rather than taking them down underneath someone.
+  if systemctl --user list-units 'kinc-*' --all --no-legend 2>/dev/null | grep -q .; then
+    echo "⚠️  nodes are already running - not restarting the user manager"
+    echo "    Run 'systemctl restart user@$(id -u).service' when the cluster can stop,"
+    echo "    or IOWeight stays unenforced."
+  else
+    # Not fatal. This script runs under set -e and its job is to prepare a host,
+    # not to decide that one is unusable: a manager that refuses to restart
+    # leaves IOWeight unenforced, which the resources gate reports precisely.
+    sudo systemctl restart "user@$(id -u).service" || true
+    sleep 2
+    if [ -r "$_user_cg" ] && grep -qw io "$_user_cg"; then
+      echo "✅ io delegated: $(tr ' ' ',' < "$_user_cg")"
+    else
+      echo "⚠️  io still not delegated after restarting the user manager"
+    fi
+  fi
+fi
+# Weight-based io control also needs a scheduler that implements it. Delegation
+# makes IOWeight reach the kernel; BFQ or blk-iocost is what makes the kernel act
+# on it. Reported rather than changed, because the right answer depends on the
+# device and on what else the host is doing.
+for _d in /sys/block/*/queue/scheduler; do
+  [ -r "$_d" ] || continue
+  _dev=$(echo "$_d" | cut -d/ -f4)
+  case "$_dev" in loop*|ram*|zram*) continue ;; esac
+  echo "   ${_dev}: $(cat "$_d")"
+done
+
 echo "━━━ Check 1: IP Forwarding ━━━"
 if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
   echo "Enabling IP forwarding..."
