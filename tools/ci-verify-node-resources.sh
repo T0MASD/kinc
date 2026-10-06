@@ -67,6 +67,33 @@ kc() { KUBECONFIG="$KUBECONFIG_FILE" kubectl "$@"; }
 
 echo "=== ${CLUSTER}: node resources ==="
 
+# --- the pod pid limit ------------------------------------------------------
+# Unconditional, because it is not something the operator asks for: it ships in
+# the KubeletConfiguration and applies to every cluster. Checked before the
+# "nothing was asked for" exit below, which returns early.
+#
+# Asserted on a pod's cgroup rather than on the config that produced it. kubeadm
+# owns /var/lib/kubelet/config.yaml and rewrites it, so the file the kubelet
+# reads is not the file this repo ships - a value that never survived into the
+# cluster's kubelet-config would still be present in the source and absent from
+# every node.
+want_pids=4096
+for n in $nodes; do
+    pm=$(podman exec "$n" sh -c '
+        for d in /sys/fs/cgroup/kubepods* ; do
+            [ -d "$d" ] || continue
+            find "$d" -mindepth 2 -name pids.max 2>/dev/null | head -1
+        done | head -1' 2>/dev/null)
+    if [ -z "$pm" ]; then
+        fail "${n}: no pod cgroup carrying pids.max - podPidsLimit cannot be confirmed"
+        continue
+    fi
+    got=$(podman exec "$n" cat "$pm" 2>/dev/null)
+    [ "$got" = "$want_pids" ] \
+        && ok "${n}: pods capped at pids.max=${got}" \
+        || fail "${n}: pod pids.max is ${got:-unreadable}, expected ${want_pids} from podPidsLimit"
+done
+
 # --- nothing asked for: assert nothing was done ---------------------------
 # Every variable that asks for something, including the per-role ones. Leaving
 # those out of this guard sent a weighted cluster down the "nothing was asked
