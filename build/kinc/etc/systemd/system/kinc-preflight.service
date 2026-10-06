@@ -9,7 +9,16 @@ ConditionPathExists=!/var/lib/kubeadm-initialized
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-TimeoutStartSec=120
+# Sized for the image pre-pull, which is the slow thing this unit does.
+#
+# 120s was sized for a warm image store, where the crictl check finds every
+# control-plane image present and the pull is skipped entirely - so the timeout
+# never bit in CI or on a machine that had run kinc before. A cold store has to
+# fetch roughly half a gigabyte before kubeadm can start, and every machine
+# joining a multi-host cluster is cold by definition. Exceeding it kills
+# preflight mid-pull, and kubeadm-init and kinc-postinit then fail as
+# dependencies, which reads as a broken cluster rather than a slow download.
+TimeoutStartSec=15min
 Restart=no
 
 # Pass environment variables from container to service.

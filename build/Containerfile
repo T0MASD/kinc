@@ -56,6 +56,12 @@ RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
     && dnf install -y \
       systemd \
       conntrack-tools nftables iptables-nft iproute ethtool util-linux kmod \
+# wireguard-tools is the userspace half of the multi-host transport. The
+# kernel half needs nothing added: a node container can already create the
+# link, because CAP_NET_ADMIN is evaluated against the owning user namespace.
+# Without wg(8), preflight on a cluster that spans machines dies at its first
+# 'wg set' with status 127.
+      wireguard-tools \
       libseccomp pigz fuse-overlayfs \
       nfs-utils iscsi-initiator-utils \
       bash ca-certificates curl jq yq procps-ng which hostname \
@@ -143,6 +149,7 @@ COPY --chmod=0755 base/usr/local/bin/crun-wrapper.sh /usr/local/bin/crun-wrapper
 # Copy kinc-specific components
 # New: Multi-service architecture for better observability
 COPY kinc/etc/systemd/system/kinc-preflight.service /etc/systemd/system/kinc-preflight.service
+COPY kinc/etc/systemd/system/kinc-tunnel.service /etc/systemd/system/kinc-tunnel.service
 COPY kinc/etc/systemd/system/kubeadm-init.service /etc/systemd/system/kubeadm-init.service
 COPY kinc/etc/systemd/system/kinc-postinit.service /etc/systemd/system/kinc-postinit.service
 COPY kinc/etc/systemd/system/kinc-faro-kubeconfig.service /etc/systemd/system/kinc-faro-kubeconfig.service
@@ -232,6 +239,7 @@ RUN rm -f /etc/cni/net.d/100-crio-bridge.conflist \
 # New: Multi-service architecture (preflight → kubeadm-init → postinit)
 RUN echo "Enabling kinc services ..." \
     && systemctl enable kinc-preflight.service \
+    && systemctl enable kinc-tunnel.service \
     && systemctl enable kubeadm-init.service \
     && systemctl enable kinc-postinit.service \
     && systemctl enable kinc-faro-kubeconfig.service \
