@@ -20,7 +20,18 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    # One definition, run once per architecture, because the verification below
+    # is the point of a release and an arm64 image that was never booted is not
+    # a release. GitHub's arm64 runners are native, so nothing is emulated.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     
     steps:
       - name: Checkout repository
@@ -89,10 +100,10 @@ jobs:
           cd build
           
           # Build the kinc node image with proper tags
-          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
-          PATCH_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_VERSION_UNDERSCORED }}-latest"
-          MINOR_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_MINOR_VERSION }}-latest"
-          LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}-${{ matrix.arch }}"
+          PATCH_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_VERSION_UNDERSCORED }}-latest-${{ matrix.arch }}"
+          MINOR_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_MINOR_VERSION }}-latest-${{ matrix.arch }}"
+          LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}"
           LOCAL_TEST_TAG="localhost/kinc/node:v${{ env.K8S_VERSION }}"
           
           echo "Building image with tags:"
@@ -186,7 +197,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: kinc-diagnostics-release-${{ env.BUILD_TAG }}
+          name: kinc-diagnostics-release-${{ env.BUILD_TAG }}-${{ matrix.arch }}
           path: artifacts/diagnostics/
           retention-days: 90
           if-no-files-found: warn
@@ -195,7 +206,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: audit-log-release-${{ env.BUILD_TAG }}
+          name: audit-log-release-${{ env.BUILD_TAG }}-${{ matrix.arch }}
           path: artifacts/audit/
           retention-days: 90
           if-no-files-found: ignore
@@ -220,7 +231,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: run-summary-release-${{ env.BUILD_TAG }}
+          name: run-summary-release-${{ env.BUILD_TAG }}-${{ matrix.arch }}
           path: artifacts/summary/
           retention-days: 90
           if-no-files-found: warn
@@ -229,7 +240,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: faro-events-release-${{ env.BUILD_TAG }}
+          name: faro-events-release-${{ env.BUILD_TAG }}-${{ matrix.arch }}
           path: artifacts/faro/
           retention-days: 90
           if-no-files-found: ignore
@@ -238,10 +249,10 @@ jobs:
         run: |
           echo "=== Pushing images to registry ==="
           
-          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
-          PATCH_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_VERSION_UNDERSCORED }}-latest"
-          MINOR_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_MINOR_VERSION }}-latest"
-          LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}-${{ matrix.arch }}"
+          PATCH_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_VERSION_UNDERSCORED }}-latest-${{ matrix.arch }}"
+          MINOR_LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:v${{ env.K8S_MINOR_VERSION }}-latest-${{ matrix.arch }}"
+          LATEST_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}"
           
           # Push versioned tag
           echo "Pushing $IMAGE_TAG..."
@@ -465,7 +476,7 @@ jobs:
           EOF
 
       - name: Create release notes
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && matrix.arch == 'amd64'
         run: |
           echo "=== Creating release notes ==="
           
@@ -520,9 +531,80 @@ jobs:
           echo "Release notes created"
 
   # Optional: Create GitHub release if this was triggered by a tag
+  # The tags consumers pull. Each leg above published only its own
+  # architecture, under a suffixed name; this is where those become one name
+  # that resolves per-architecture. A puller asks for :v1.37.0-4 and the
+  # registry hands it the image for the machine it is on - which is the whole
+  # point, because the fleet now has both.
+  publish-manifests:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Work out the tag names
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          # The same parsing as the build job, for the same reason it is done
+          # there: the tag is the only input and every name derives from it.
+          K8S_VERSION_UNDERSCORED=$(echo "$TAG" | sed 's/^v//' | cut -d'-' -f1)
+          K8S_MINOR_VERSION=$(echo "$K8S_VERSION_UNDERSCORED" | cut -d'_' -f1-2 | cut -d'.' -f1-2)
+          {
+            echo "BUILD_TAG=$TAG"
+            echo "KINC_PATCH=$(echo "$TAG" | cut -d'-' -f2)"
+            echo "K8S_VERSION_UNDERSCORED=$K8S_VERSION_UNDERSCORED"
+            echo "K8S_MINOR_VERSION=$K8S_MINOR_VERSION"
+            echo "IMAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          } >> $GITHUB_ENV
+
+      - name: Log in to Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Assemble the multi-architecture tags
+        run: |
+          set -euo pipefail
+          IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+          publish() {
+            local name="$1"
+            echo "=== $name ==="
+            # Remove any local list left by a retry, so this is idempotent.
+            podman manifest rm "$name" 2>/dev/null || true
+            podman manifest create "$name"
+            for arch in amd64 arm64; do
+              # By digest, not by tag: a suffixed tag could be overwritten by a
+              # later run between this step and the push, and the list would
+              # then name something other than what was verified.
+              digest=$(skopeo inspect --format '{{.Digest}}' "docker://${name}-${arch}")
+              echo "  ${arch}: ${digest}"
+              podman manifest add "$name" "${name}-${arch}@${digest}"
+            done
+            podman manifest push --all "$name" "docker://$name"
+            echo "  pushed $name"
+          }
+
+          publish "${IMG}:${{ env.BUILD_TAG }}"
+
+          # The floating tags follow the same rule the build job used: a
+          # pre-release patch moves none of them.
+          if [[ "${{ env.KINC_PATCH }}" =~ [^0-9] ]]; then
+            echo "Pre-release (patch ${{ env.KINC_PATCH }}): leaving the floating tags alone"
+          else
+            publish "${IMG}:v${{ env.K8S_VERSION_UNDERSCORED }}-latest"
+            publish "${IMG}:v${{ env.K8S_MINOR_VERSION }}-latest"
+            publish "${IMG}:latest"
+          fi
+
+      - name: Show what a puller now gets
+        run: |
+          skopeo inspect --raw "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}" \
+            | jq -r '.manifests[] | "  " + .platform.os + "/" + .platform.architecture + "  " + .digest'
+
   create-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: build-and-push
+    needs: [build-and-push, publish-manifests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
