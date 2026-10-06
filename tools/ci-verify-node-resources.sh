@@ -79,11 +79,14 @@ echo "=== ${CLUSTER}: node resources ==="
 # every node.
 want_pids=4096
 for n in $nodes; do
+    # The pod's cgroup, not a container's inside it. podPidsLimit is applied to
+    # the pod sandbox; the container cgroups below it carry no limit of their own
+    # and read "max" while inheriting the pod's. Reading one of those reports an
+    # unlimited pod on a cluster where the limit is working perfectly, which is
+    # what the first version of this check did.
     pm=$(podman exec "$n" sh -c '
-        for d in /sys/fs/cgroup/kubepods* ; do
-            [ -d "$d" ] || continue
-            find "$d" -mindepth 2 -name pids.max 2>/dev/null | head -1
-        done | head -1' 2>/dev/null)
+        find /sys/fs/cgroup/kubepods* -name pids.max -path "*/pod*" \
+             ! -path "*/crio-*" 2>/dev/null | head -1' 2>/dev/null)
     if [ -z "$pm" ]; then
         fail "${n}: no pod cgroup carrying pids.max - podPidsLimit cannot be confirmed"
         continue
@@ -91,7 +94,7 @@ for n in $nodes; do
     got=$(podman exec "$n" cat "$pm" 2>/dev/null)
     [ "$got" = "$want_pids" ] \
         && ok "${n}: pods capped at pids.max=${got}" \
-        || fail "${n}: pod pids.max is ${got:-unreadable}, expected ${want_pids} from podPidsLimit"
+        || fail "${n}: pod pids.max is ${got:-unreadable} at ${pm}, expected ${want_pids} from podPidsLimit"
 done
 
 # --- nothing asked for: assert nothing was done ---------------------------
