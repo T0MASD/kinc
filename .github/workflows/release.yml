@@ -147,7 +147,11 @@ jobs:
       - name: Test built image
         run: |
           set -euo pipefail
-          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}"
+          # Suffixed, because that is what this leg built. The unsuffixed tag
+          # does not exist until publish-manifests assembles it, and reading
+          # labels from a name that is not there fails the release before a
+          # single test has run.
+          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_TAG }}-${{ matrix.arch }}"
 
           echo "=== Image labels ==="
           podman inspect "$IMAGE_TAG" --format '{{json .Config.Labels}}' | jq .
