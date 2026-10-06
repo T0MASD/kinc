@@ -588,10 +588,11 @@ sed "s/VolumeName=kinc-etc-kubernetes/VolumeName=kinc-${CLUSTER_NAME}-etc-kubern
 # Multi-host knobs. All are unset for a single-machine cluster, and then every
 # placeholder below renders empty and the quadlet is what it always was.
 #
-#   KINC_API_BIND     address the API server is published on (default loopback)
-#   KINC_WG_DIR       this node's WireGuard material: private, address, peers
-#   KINC_ADVERTISE    file holding the endpoint a joining node dials
-#   KINC_NODE_SUBNET  the /24 this machine's node containers sit on
+#   KINC_API_BIND        address the API server is published on (default loopback)
+#   KINC_WG_DIR          this node's WireGuard material: private, address, peers
+#   KINC_ADVERTISE       file holding the endpoint a joining node dials
+#   KINC_API_EXTRA_SANS  file of further API server names, one per line
+#   KINC_NODE_SUBNET     the /24 this machine's node containers sit on
 #
 # Only the control plane publishes a WireGuard port; the quadlet says why a
 # worker must not.
@@ -605,6 +606,10 @@ if [ -n "${KINC_WG_DIR:-}" ]; then
 fi
 if [ -n "${KINC_ADVERTISE:-}" ]; then
     ADVERTISE_VOLUME="Volume=${KINC_ADVERTISE}:/etc/kinc/advertise-addr:ro,Z"
+fi
+EXTRA_SANS_VOLUME=""
+if [ -n "${KINC_API_EXTRA_SANS:-}" ]; then
+    EXTRA_SANS_VOLUME="Volume=${KINC_API_EXTRA_SANS}:/etc/kinc/extra-sans:ro,Z"
 fi
 
 # Copy and customize container file
@@ -620,6 +625,7 @@ sed -e "s/ContainerName=kinc-control-plane/ContainerName=kinc-${CLUSTER_NAME}-co
     -e "s|WG_VOLUME_PLACEHOLDER|${WG_VOLUME}|g" \
     -e "s|WG_PUBLISH_PLACEHOLDER|${WG_PUBLISH}|g" \
     -e "s|ADVERTISE_VOLUME_PLACEHOLDER|${ADVERTISE_VOLUME}|g" \
+    -e "s|EXTRA_SANS_VOLUME_PLACEHOLDER|${EXTRA_SANS_VOLUME}|g" \
     -e "s/NETWORK_UNIT_PLACEHOLDER/${NETWORK_UNIT}/g" \
     -e "s|STORAGE_VOLUME_PLACEHOLDER|${CLUSTER_STORAGE}|g" \
     -e "s|NODE_STORE_PLACEHOLDER|$(node_store "${CONTROL_PLANE_NAME}")|g" \
@@ -1165,10 +1171,16 @@ _resolved_reservations
 echo
 echo "📋 Next steps:"
 echo
+# admin.conf names the control plane's own hostname, which resolves only inside
+# the cluster network, so the server is rewritten to something the client can
+# reach. Loopback and the published port is right for a client on this machine
+# and wrong for every other one, and a cluster reached through a name or a
+# load-balanced address is told so here rather than hand-edited afterwards.
+KUBECONFIG_SERVER="${KINC_KUBECONFIG_SERVER:-127.0.0.1:${CLUSTER_PORT}}"
 echo "  # Extract kubeconfig"
 echo "  mkdir -p ~/.kube"
 echo "  podman cp kinc-${CLUSTER_NAME}-control-plane:/etc/kubernetes/admin.conf ~/.kube/kinc-${CLUSTER_NAME}-config"
-echo "  sed -i 's|server: https://.*:6443|server: https://127.0.0.1:${CLUSTER_PORT}|g' ~/.kube/kinc-${CLUSTER_NAME}-config"
+echo "  sed -i 's|server: https://.*:6443|server: https://${KUBECONFIG_SERVER}|g' ~/.kube/kinc-${CLUSTER_NAME}-config"
 echo
 echo "  # Use cluster"
 echo "  export KUBECONFIG=~/.kube/kinc-${CLUSTER_NAME}-config"

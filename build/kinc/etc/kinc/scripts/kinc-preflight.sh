@@ -193,7 +193,26 @@ if [[ "$ADV" != "$CONTROL_PLANE_NAME" ]]; then
     ADV_SAN=(-e "/CONTROL_PLANE_NAME_PLACEHOLDER/a\\  - ${ADV}")
 fi
 
-sed "${ADV_SAN[@]}" \
+# The endpoint is one name among several the API server may be reached by. A
+# cluster fronted per-machine is the case that needs this: each kubelet dials a
+# proxy on its own hypervisor, so every one of those addresses is a name the
+# certificate has to carry, and the endpoint knob can only express one.
+#
+# kubeadm uploads certSANs into kube-system/kubeadm-config, so a control plane
+# joining later mints its serving certificate from this same list without being
+# told again. Omitting one surfaces only when a client happens to use it.
+EXTRA_SANS=()
+if [[ -s /etc/kinc/extra-sans ]]; then
+    while read -r san; do
+        san="${san%%#*}"
+        san="$(tr -d '[:space:]' <<<"$san")"
+        [[ -n "$san" ]] || continue
+        EXTRA_SANS+=(-e "/CONTROL_PLANE_NAME_PLACEHOLDER/a\\  - ${san}")
+        log "Additional API server name: ${san}"
+    done < /etc/kinc/extra-sans
+fi
+
+sed "${ADV_SAN[@]}" "${EXTRA_SANS[@]}" \
     -e "s/CONTAINER_IP_PLACEHOLDER/$NODE_IP/g" \
     -e "s/CONTROL_PLANE_NAME_PLACEHOLDER/${CONTROL_PLANE_NAME}/g" \
     -e "s/CONTROL_PLANE_ENDPOINT_PLACEHOLDER/${ADV}:6443/g" \

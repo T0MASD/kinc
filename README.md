@@ -278,6 +278,48 @@ The name has to be in the certificate, so it is fixed when the cluster is
 created - a running cluster cannot be renamed without regenerating the API
 server's certificates.
 
+### Reaching It By More Than One Address
+
+The endpoint is one name. A cluster is often reached by several: a name for
+clients, a load-balanced address, and one proxy address per machine. Every one
+of them is a name the API server's certificate has to carry, and
+`KINC_API_EXTRA_SANS` points at a file listing them, one per line, `#` for
+comments:
+
+```bash
+cat > $HOME/kinc-api-sans <<'EOF'
+kube.example.test     # what clients use
+10.91.0.20            # the load-balanced address
+10.64.40.1            # this machine's proxy
+10.64.100.1           # the second machine's
+EOF
+
+KINC_ADVERTISE=$HOME/kinc-advertise-addr \
+KINC_API_EXTRA_SANS=$HOME/kinc-api-sans \
+  ./tools/deploy.sh
+```
+
+kubeadm uploads `certSANs` into `kube-system/kubeadm-config`, so a control plane
+joining later mints its serving certificate from the same list without being
+told again.
+
+A per-machine proxy is what you reach for when the kubelets cannot share one
+address. `kube-proxy` is a DaemonSet, so a Service address exists only once a
+node is running the cluster's own networking: a kubelet pointed at one has to
+reach the API server before the thing that implements that address is there.
+A plain TCP proxy on each machine, listing the control planes as backends, is
+outside that ordering, and each of its addresses goes in the list above.
+
+`KINC_KUBECONFIG_SERVER` sets what the extracted kubeconfig says, for a client
+that is not on the machine that built the cluster:
+
+```bash
+KINC_KUBECONFIG_SERVER=kube.example.test:6443 ./tools/deploy.sh
+```
+
+Left unset it is loopback and the published port, which is what a client on this
+machine uses.
+
 ### More Than One Control Plane
 
 A control plane is a node role, not a separate path: the same tool joins it,

@@ -179,6 +179,14 @@ Three things this gets right that a hand-rolled version usually does not:
   leave the interface they arrived on, and they are dropped.
 - **Two masquerade exemptions.** Both the node subnets and the transit subnets
   must escape netavark's masquerade.
+- **A client outside the cluster needs a route back.** The routes above carry
+  node-to-node traffic, which is what forms the cluster. A client on some other
+  network - a load-balanced address, an appliance arriving over a VPN - reaches a
+  node on the strength of the host's own routing, and its reply leaves the
+  namespace looking for a return route that only exists for the peer subnets. The
+  request arrives, the reply is dropped, and the address reads as a backend that
+  is up and answering nothing. Every network clients arrive from belongs in the
+  same exemptions and routes as the peers.
 
 ### 3. The gateway, for the tunnelled machine
 
@@ -384,6 +392,16 @@ loses quorum. Placement is the whole point of spreading them.
 
 Writes kept working — two of three members is a quorum — and the workload never
 moved. This is the case everyone expects to work, and it does.
+
+One qualification, measured on a different cluster and so reported as such: the
+member stopped above was not the etcd leader. On a four-machine cluster reached
+through a load-balanced address, stopping the machine that held the **leader**
+gave roughly a minute in which that address refused connections and a surviving
+control plane's API answered a TLS handshake and then timed out. It recovered
+with no intervention once the election settled. The quorum arithmetic is the
+same either way — what moves is the leader, and the gap is the election plus the
+front end noticing. It is worth knowing before reading it as a failure to fail
+over.
 
 ### A tunnel node that is restarted
 

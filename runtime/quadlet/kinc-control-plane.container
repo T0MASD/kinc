@@ -67,10 +67,12 @@ Volume=NODE_STORE_PLACEHOLDER:/root/.local/share/containers/storage:rw,Z
 # a tmpfs in this container, so a volume under it was RAM-backed.
 Volume=STORAGE_VOLUME_PLACEHOLDER:/tmp/kinc-storage:rw,Z
 Volume=/lib/modules:/lib/modules:ro
-# Tunnel material for a multi-host cluster, and the endpoint a joining node
-# dials. Both are empty placeholders on a single-machine cluster.
+# Tunnel material for a multi-host cluster, the endpoint a joining node dials,
+# and any further names the API server must answer to. All are empty
+# placeholders on a single-machine cluster.
 WG_VOLUME_PLACEHOLDER
 ADVERTISE_VOLUME_PLACEHOLDER
+EXTRA_SANS_VOLUME_PLACEHOLDER
 
 # Network configuration
 #
