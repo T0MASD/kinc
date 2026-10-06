@@ -26,7 +26,12 @@
 
 ### Prerequisites
 
-- **Podman** (rootless)
+- **Podman** (rootless), and `openssl`, `kubectl`, `awk`, `sed`, `numfmt` on PATH
+- **Lingering enabled for your user** - `sudo loginctl enable-linger $USER`.
+  kinc's nodes are systemd `--user` units, and a user manager is stopped when
+  your last session ends, so without this a cluster is destroyed when you log
+  out: deploy reports success, the cluster is genuinely Ready, and `podman ps`
+  is empty when you come back, with nothing in any log because nothing failed
 - **IP forwarding enabled**
 - **Sufficient inotify limits** (for multiple clusters)
 - **Sufficient kernel keyring limits** (for multiple clusters)
