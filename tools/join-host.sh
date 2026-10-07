@@ -16,6 +16,13 @@
 #       cp2:10.99.0.4:10.89.50.10:control-plane \
 #       w1:10.99.0.2:10.89.50.11 w2:10.99.0.3:10.89.50.12
 #
+# How big each node is, by the same names deploy.sh uses. Unset means the node
+# takes the machine, which is right when it has the machine to itself and wrong
+# the moment anything else shares it:
+#   KINC_NODE_MEMORY=8G   KINC_NODE_CPUS=11      every node
+#   KINC_CONTROL_PLANE_MEMORY / _CPUS            control planes instead
+#   KINC_WORKER_MEMORY / _CPUS                   workers instead
+#
 # A control plane additionally needs the cluster's shared material - the three
 # CAs and the service account keypair deploy.sh minted - in ~/kinc-ca (or
 # $KINC_CA_DIR). Copy that directory from the machine that created the cluster.
@@ -36,7 +43,7 @@
 # cluster's own config, but the policy file they name is written per node.
 set -euo pipefail
 
-[ $# -ge 4 ] || { sed -n '2,31p' "$0" | sed 's/^# \?//'; exit 1; }
+[ $# -ge 4 ] || { sed -n '2,43p' "$0" | sed 's/^# \?//'; exit 1; }
 CP_ADDR="$1"; CA_HASH="$2"; SUBNET="$3"; shift 3
 
 IMAGE="${KINC_IMAGE:-localhost/kinc/node:v1.37.0}"
@@ -49,6 +56,32 @@ Q="$HOME/.config/containers/systemd"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 [ ${#CA_HASH} -eq 64 ] || { echo "❌ CA hash is not a sha256 digest: '${CA_HASH}'"; exit 1; }
+
+# shellcheck source=tools/lib-node-limits.sh
+. "$(dirname "$0")/lib-node-limits.sh"
+
+# Antrea builds its datapath on these. A node starts and goes Ready without them,
+# and then every pod scheduled to it fails with
+#
+#   /var/run/antrea/cni.sock: connect: no such file or directory
+#
+# which reads as a missing CNI. The agent is what is missing, and its own log says
+# why: it tries to modprobe from inside the pod, where a rootless node has no
+# CAP_SYS_MODULE. ci-prepare-host.sh does this for the machines it prepares; a
+# machine joining from here never runs it.
+#
+# A module compiled into the kernel never appears in /sys/module, so
+# modules.builtin is consulted too.
+for m in openvswitch geneve; do
+    [ -d "/sys/module/$m" ] && continue
+    grep -qw "$m" "/lib/modules/$(uname -r)/modules.builtin" 2>/dev/null && continue
+    sudo modprobe "$m" 2>/dev/null || true
+    [ -d "/sys/module/$m" ] || {
+        echo "❌ kernel module '${m}' is neither loaded nor builtin, and could not be loaded"
+        echo "   Antrea needs it on the host; the node will come up Ready and refuse every pod."
+        echo "   sudo modprobe ${m}   - and add it to /etc/modules-load.d so a reboot keeps it"
+        exit 1; }
+done
 
 podman network exists "$NET" 2>/dev/null || podman network create --subnet "$SUBNET" "$NET" >/dev/null
 mkdir -p "$Q"
@@ -65,6 +98,18 @@ for spec in "$@"; do
         || { echo "❌ ${NAME}: spec is <name>:<node-address>:<podman-address>[:<role>]"; exit 1; }
     STATE="$HOME/.local/share/kinc/${NAME}"
     WGDIR="$HOME/kinc-wg-${NAME}"
+
+    # Sized by the same names deploy.sh uses: KINC_NODE_* for every node, with the
+    # per-role variables overriding where the split should be weighted. Unset
+    # means unsized, which is what this did for every node before.
+    if [ "$ROLE" = "control-plane" ]; then
+        _MEM="${KINC_CONTROL_PLANE_MEMORY:-${KINC_NODE_MEMORY:-}}"
+        _CPUS="${KINC_CONTROL_PLANE_CPUS:-${KINC_NODE_CPUS:-}}"
+    else
+        _MEM="${KINC_WORKER_MEMORY:-${KINC_NODE_MEMORY:-}}"
+        _CPUS="${KINC_WORKER_CPUS:-${KINC_NODE_CPUS:-}}"
+    fi
+    build_role_limits "$_MEM" "$_CPUS"
 
     # The tunnel is one way to make a node reachable, not the only one, so its
     # material is mounted when present rather than demanded. Without it the node
@@ -144,8 +189,18 @@ YAML
         -e "s|NODE_STORE_PLACEHOLDER|${NAME}-store|g" \
         -e "s|WORKER_IP_PLACEHOLDER|${POD_IP}|g" \
         -e "s|CLUSTER_SLICE_PLACEHOLDER|${NET}.slice|g" \
-        -e "s|NODE_LIMITS_PLACEHOLDER||g" \
+        -e "s|NODE_LIMITS_PLACEHOLDER|${_ROLE_LIMITS}|g" \
         runtime/quadlet/kinc-worker.container > "${Q}/${NAME}.container"
+
+    # The node's own view of what it was given. Without it the kubelet advertises
+    # the whole machine - every core and every byte - while the cgroup above caps
+    # it, so the scheduler places against a figure the node cannot honour.
+    # deploy.sh has always done this for the nodes it creates; until now a node
+    # joined from elsewhere got the ceilings and not the reserves, which is the
+    # worse half to have on its own.
+    if [ -n "$_ROLE_ENV" ]; then
+        sed -i "/^Environment=KUBECONFIG/a ${_ROLE_ENV%\\n}" "${Q}/${NAME}.container"
+    fi
 
     # A control plane joining an audited cluster has to be able to audit.
     #
