@@ -60,7 +60,7 @@ else
     _RESERVE_CPU="${KINC_NODE_RESERVED_CPU:-500m}"
 fi
 
-_SYS_MEM_KI=""; _KUBE_MEM_KI=""; _SYS_CPU=""
+_SYS_MEM_KI=""; _KUBE_MEM_KI=""; _SYS_CPU=""; _KUBE_CPU=""
 
 if [[ -n "${KINC_NODE_MEMORY:-}" ]]; then
     _total_kb=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
@@ -83,18 +83,38 @@ fi
 
 if [[ -n "${KINC_NODE_CPUS:-}" ]]; then
     _total_cpu=$(nproc)
+    # Two different reserves, and they were one.
+    #
+    # systemReserved is what the OTHER nodes on this machine take: the machine
+    # has nproc, this node was given KINC_NODE_CPUS, the difference belongs to
+    # its neighbours. kubeReserved is what THIS node's own kubelet and runtime
+    # need. They are independent, and tying the second to the first made a node
+    # that is alone on its machine advertise every core it had - nproc equals
+    # KINC_NODE_CPUS there, so the difference is zero, and the node's own reserve
+    # was dropped along with the neighbours' share. Measured on two single-node
+    # VMs: both advertised their whole CPUQuota as schedulable, leaving the
+    # kubelet and CRI-O to compete with pods for cores already promised away.
     _reserved=$(awk -v t="$_total_cpu" -v c="${KINC_NODE_CPUS}" 'BEGIN { r = t - c; print (r > 0 ? r : 0) }')
     if [[ "$_reserved" != "0" ]]; then
         _SYS_CPU="$_reserved"
-        log "cpu: ${KINC_NODE_CPUS} of ${_total_cpu}, less ${_RESERVE_CPU} for the node itself"
-    else
-        log "⚠️  KINC_NODE_CPUS=${KINC_NODE_CPUS} is not below this machine's ${_total_cpu}; nothing reserved"
     fi
+    # Refused rather than applied: a reserve at or above the node's own limit
+    # leaves nothing to schedule, which is the memory path's rule and was not
+    # the cpu path's.
+    if awk -v r="${_RESERVE_CPU%m}" -v rm="${_RESERVE_CPU}" -v c="${KINC_NODE_CPUS}" \
+        'BEGIN { res = (rm ~ /m$/) ? r/1000 : r; exit !(res >= c) }'; then
+        log "❌ ${_RESERVE_CPU} is reserved for this node's own components but the node is limited to ${KINC_NODE_CPUS}"
+        log "   Nothing would be left to schedule. Raise KINC_NODE_CPUS or lower KINC_NODE_RESERVED_CPU."
+        exit 1
+    fi
+    _KUBE_CPU="${_RESERVE_CPU}"
+    log "cpu: ${KINC_NODE_CPUS} of ${_total_cpu}, less ${_RESERVE_CPU} for the node itself"
+    [[ -z "$_SYS_CPU" ]] && log "   alone on this machine: nothing reserved for neighbours"
 fi
 
 # Everything asked for was above this machine's size, so there is nothing to
 # reserve and any previous render must still go.
-if [[ -z "${_SYS_MEM_KI}${_SYS_CPU}" ]]; then
+if [[ -z "${_SYS_MEM_KI}${_SYS_CPU}${_KUBE_CPU}" ]]; then
     rm -f "$DROPIN"
     exit 0
 fi
@@ -105,11 +125,13 @@ tmp="${DROPIN}.tmp"
 {
     echo "apiVersion: kubelet.config.k8s.io/v1beta1"
     echo "kind: KubeletConfiguration"
-    echo "systemReserved:"
-    [[ -n "$_SYS_CPU" ]]    && echo "  cpu: \"${_SYS_CPU}\""
-    [[ -n "$_SYS_MEM_KI" ]] && echo "  memory: \"${_SYS_MEM_KI}\""
+    if [[ -n "${_SYS_CPU}${_SYS_MEM_KI}" ]]; then
+        echo "systemReserved:"
+        [[ -n "$_SYS_CPU" ]]    && echo "  cpu: \"${_SYS_CPU}\""
+        [[ -n "$_SYS_MEM_KI" ]] && echo "  memory: \"${_SYS_MEM_KI}\""
+    fi
     echo "kubeReserved:"
-    [[ -n "$_SYS_CPU" ]]    && echo "  cpu: \"${_RESERVE_CPU}\""
+    [[ -n "$_KUBE_CPU" ]]   && echo "  cpu: \"${_KUBE_CPU}\""
     [[ -n "$_KUBE_MEM_KI" ]] && echo "  memory: \"${_KUBE_MEM_KI}\""
 } > "$tmp"
 mv -f "$tmp" "$DROPIN"
