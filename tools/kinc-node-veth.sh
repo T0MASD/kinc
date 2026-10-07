@@ -58,23 +58,35 @@ find_handle() {
     return 1
 }
 NSRUN() { nsenter -t "$HANDLE" -m -- nsenter --net="$NETNS" "$@"; }
-external_if() { ip route get 8.8.8.8 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
-
 apply_nat() {
     # Masquerade the TRANSIT subnet, not the node subnet: netavark already
     # rewrites to whatever leaves the namespace, which is now this veth, so
     # traffic reaches the host as ${NS_IP}. A rule matching the node subnet
     # matches nothing and costs every container its egress.
     #
-    # Only for traffic leaving the external interface. Inter-node traffic must
-    # not be translated or a node's identity is lost on the way.
+    # On every egress, not only the one holding the default route. The transit
+    # /30 is private to this machine - nothing off it has a route back - so an
+    # address that leaves wearing it gets no reply at all.
+    #
+    # It used to match oifname <default route interface>, which is right when the
+    # machine reaches the cluster the same way it reaches the internet, and wrong
+    # the moment those differ: a host whose peers are over a tunnel sends to them
+    # through wg0 while its default route is a NAT interface, so transit traffic
+    # left untranslated and vanished. What leaves this way is the NAMESPACE's own
+    # traffic - aardvark forwarding DNS, chiefly - so the symptom is that pods
+    # cannot resolve anything while the node reaches every control plane by
+    # address, and it reads as a DNS fault rather than a routing one.
+    #
+    # Node traffic is untouched: it is exempt from masquerade inside the namespace
+    # and arrives here still carrying the node's own address, which is what keeps
+    # a node's identity across machines.
     nft -f - <<NFT
 table ip kinc_veth
 delete table ip kinc_veth
 table ip kinc_veth {
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        ip saddr ${NS_ADDR} oifname "$1" masquerade
+        ip saddr ${NS_ADDR} masquerade
     }
 }
 NFT
@@ -83,7 +95,6 @@ NFT
 assert() {
     [ -e "$NETNS" ] || { log "no rootless netns yet (start a node first)"; return 1; }
     HANDLE=$(find_handle) || { log "no conmon handle into the namespace"; return 1; }
-    local extif; extif=$(external_if); [ -n "$extif" ] || return 1
 
     if ! NSRUN ip link show "$VETH_NS" >/dev/null 2>&1; then
         log "plumbing ${VETH_HOST} <-> ${VETH_NS}"
@@ -100,7 +111,7 @@ assert() {
     ip link set "$VETH_HOST" up
     ip route replace "$POD_SUBNET" via "$NS_IP" dev "$VETH_HOST"
     NSRUN ip route replace default via "$HOST_IP" dev "$VETH_NS"
-    apply_nat "$extif"
+    apply_nat
 
     # Re-asserted every pass: netavark rewrites its ruleset whenever a container
     # changes, and the exemption goes at the top of its own chain so a verdict
