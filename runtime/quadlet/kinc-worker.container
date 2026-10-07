@@ -69,6 +69,14 @@ Volume=NODE_STORE_PLACEHOLDER:/root/.local/share/containers/storage:rw,Z
 # a tmpfs in this container, so a volume under it was RAM-backed.
 Volume=STORAGE_VOLUME_PLACEHOLDER:/tmp/kinc-storage:rw,Z
 Volume=/lib/modules:/lib/modules:ro
+# A worker's own tunnel material. Each node container on a machine needs its
+# own key and address, so this is per node rather than per machine.
+WG_VOLUME_PLACEHOLDER
+# A joining control plane mounts the cluster's shared material here, the
+# same directory the first control plane was given. Empty for a worker,
+# which authenticates by the CA hash in its join config and holds none of
+# this.
+CA_VOLUME_PLACEHOLDER
 
 # Network configuration
 # A worker publishes nothing. It is reached over the cluster network by the

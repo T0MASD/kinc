@@ -1,0 +1,23 @@
+[Unit]
+Description=kinc Multi-Host Tunnel
+Documentation=https://github.com/T0MASD/kinc
+# Before anything that needs this node's address to exist. Deliberately NOT
+# conditioned on the init marker the way preflight is: wg0 lives in the
+# container's network namespace and dies with it, so a node that has already
+# joined still needs its tunnel rebuilt on every start. Conditioning this unit
+# would restore the bug it exists to fix - a restarted node coming back with no
+# tunnel, never registering, and reporting only that its mirror pod cannot be
+# registered yet.
+Before=kinc-preflight.service kubeadm-init.service kubelet.service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/kinc/scripts/kinc-tunnel.sh
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
