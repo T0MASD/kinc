@@ -346,6 +346,27 @@ else
 fi
 
 echo ""
+# --- the node's own reserve, which is separate from its neighbours' ---------
+# systemReserved.cpu is what the OTHER nodes on the machine take; kubeReserved
+# .cpu is what this node's own kubelet and runtime need. A node alone on its
+# machine has no neighbours, so the first is legitimately absent - and the
+# second was dropped with it, leaving the node advertising every core it had.
+# Asserted on allocatable rather than on the drop-in, because the drop-in is
+# what this repo writes and allocatable is what the scheduler believes.
+if [ -n "${KINC_NODE_CPUS:-}${KINC_CONTROL_PLANE_CPUS:-}${KINC_WORKER_CPUS:-}" ]; then
+    for n in $nodes; do
+        asked=$(want_cpus_for "$n")
+        [ -n "$asked" ] || continue
+        cap=$(cores "$(kc get node "$n" -o jsonpath='{.status.capacity.cpu}' 2>/dev/null)")
+        alloc=$(cores "$(kc get node "$n" -o jsonpath='{.status.allocatable.cpu}' 2>/dev/null)")
+        if awk -v a="$alloc" -v c="$cap" 'BEGIN { exit !(a >= c) }'; then
+            fail "${n}: advertises ${alloc} of ${cap} cores with nothing reserved for the kubelet and runtime"
+        else
+            ok "${n}: reserves $(awk -v c="$cap" -v a="$alloc" 'BEGIN{printf "%.2f", c-a}') cores for itself"
+        fi
+    done
+fi
+
 [ "$status" -eq 0 ] && ok "${CLUSTER}: asked, enforced and advertised all agree" \
                     || echo "❌ ${CLUSTER}: they do not agree"
 exit "$status"
