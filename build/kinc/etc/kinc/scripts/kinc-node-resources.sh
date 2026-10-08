@@ -45,7 +45,13 @@ install -d -m 0755 "$DROPIN_DIR"
 # thing, so kinc takes either. numfmt does not: --from=iec rejects the "i"
 # outright, and --from=auto reads a bare "4G" as 4,000,000,000, which would
 # leave the reserve disagreeing with the cgroup limit by 7% in silence.
-bytes_of() { numfmt --from=iec "${1%i}"; }
+#
+# The suffix is upper-cased because podman spells the same quantity "8g", and
+# that is what someone writing a quadlet by hand reaches for. numfmt rejects it,
+# and the caller below used to carry on with an empty result - the node then
+# reserved CPU, reserved no memory at all, and advertised every byte the machine
+# had. Taking either spelling costs one expansion.
+bytes_of() { local _v="${1^^}"; numfmt --from=iec "${_v%I}" 2>/dev/null; }
 
 # What this node needs to be a node, before any pod is scheduled. Measured idle
 # on an empty cluster: a control plane's cgroup held 2956MiB and a worker's
@@ -64,8 +70,22 @@ _SYS_MEM_KI=""; _KUBE_MEM_KI=""; _SYS_CPU=""; _KUBE_CPU=""
 
 if [[ -n "${KINC_NODE_MEMORY:-}" ]]; then
     _total_kb=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
-    _limit_kb=$(( $(bytes_of "${KINC_NODE_MEMORY}") / 1024 ))
-    _kube_kb=$(( $(bytes_of "${_RESERVE_MEM}") / 1024 ))
+    # A value numfmt cannot read is a mistake in the spec, not a reason to go on.
+    # This used to fall through to the "not below this machine's NNNNMi" warning
+    # below, which is a true statement about a different problem: it sends the
+    # reader to check the size of a figure whose spelling is what was wrong, and
+    # the node comes up having reserved nothing.
+    _limit_b=$(bytes_of "${KINC_NODE_MEMORY}") || :
+    [[ -n "$_limit_b" ]] || {
+        log "❌ KINC_NODE_MEMORY=${KINC_NODE_MEMORY} is not a quantity this can read"
+        log "   Write it as 8G, 8g or 8Gi - a plain number of bytes also works."
+        exit 1; }
+    _kube_b=$(bytes_of "${_RESERVE_MEM}") || :
+    [[ -n "$_kube_b" ]] || {
+        log "❌ KINC_NODE_RESERVED_MEMORY=${_RESERVE_MEM} is not a quantity this can read"
+        exit 1; }
+    _limit_kb=$(( _limit_b / 1024 ))
+    _kube_kb=$(( _kube_b / 1024 ))
     if (( _limit_kb > 0 && _limit_kb < _total_kb )); then
         if (( _kube_kb >= _limit_kb )); then
             log "❌ ${_RESERVE_MEM} is reserved for this node's own components but the node is limited to ${KINC_NODE_MEMORY}"
