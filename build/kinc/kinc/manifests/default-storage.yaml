@@ -115,25 +115,42 @@ metadata:
   name: local-path-config
   namespace: local-path-storage
 data:
-  # sharedFileSystemPath, not nodePathMap.
+  # nodePathMap, so every PV carries node affinity.
   #
-  # Every node mounts the same host directory at /tmp/kinc-storage, so a volume
-  # is reachable from any of them and the PV needs no node affinity. It also
-  # means a PV outlives its container: /tmp is a tmpfs here, so volumes under a
-  # per-node path were RAM-backed and lost on restart.
+  # This was sharedFileSystemPath, on the premise that "every node mounts the same
+  # host directory at /tmp/kinc-storage, so a volume is reachable from any of
+  # them". That has not been true since each node got its own storage volume:
+  # /tmp/kinc-storage is NAME-storage per node, and across machines it is a
+  # different disk entirely. Measured on a six-node cluster, six separate
+  # directories with different contents:
   #
-  # It does NOT remove the helper pod. The provisioner still creates one to run
-  # mkdir - verified in its log, with this config applied - so the Node
-  # authorizer race that denies the kubelet GET on that pod for about a second
-  # is unchanged. That was the reason this was tried; it was not the reason it
-  # is kept.
+  #   machine A   cp1/pv/dynamic: 4   cp3: 2   w-1: 4   w1: 0
+  #   machine B   w-1/pv/dynamic: 1   w2: 2
   #
-  # The trade: a volume written on one node is readable from another, which
-  # local path storage would not normally give you. On one host, for a
-  # throwaway cluster, that is what a shared filesystem means.
+  # A PV with no node affinity on storage that is node-local is a silent data
+  # loss: a Pod rescheduled elsewhere mounts an EMPTY directory at the same path
+  # and starts over, with no error, no warning and nothing in any event. With
+  # affinity it refuses to schedule and says why:
+  #
+  #   0/7 nodes are available: 1 node(s) didn't match PersistentVolume's node
+  #   affinity
+  #
+  # The path is unchanged, so existing volumes keep working and nothing moves.
+  # Only new PVs differ, by carrying the affinity they always should have.
+  #
+  # The tmpfs worry in the old comment is answered by the path, not by the mode:
+  # /tmp/kinc-storage is a mounted volume in every topology kinc builds, so
+  # nothing under it is RAM-backed either way.
   config.json: |-
     {
-            "sharedFileSystemPath": "/tmp/kinc-storage/dynamic"
+            "nodePathMap": [
+                    {
+                            "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+                            "paths": [
+                                    "/tmp/kinc-storage/dynamic"
+                            ]
+                    }
+            ]
     }
   setup: |-
     #!/bin/sh
