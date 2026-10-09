@@ -9,6 +9,14 @@
 #   install-node-veth.sh 10.89.21.0/24 10.99.21.0/30 \
 #       10.78.0.22=10.89.22.0/24 10.78.0.71=10.89.43.0/24
 #
+# Environment, both optional:
+#   TENANT_UID       whose rootless namespace to plumb into. Defaults to the
+#                    invoking user, through SUDO_USER; set it when running as
+#                    root for a service user that has no sudo rights.
+#   NODE_SUPERNETS   space-separated ranges that must keep their source address
+#                    across machines. Defaults to kinc's own 10.89.0.0/16 and
+#                    10.99.0.0/16; a fleet addressed differently must say so.
+#
 # The transit /30 is a point-to-point link between the host and the namespace;
 # it carries no node traffic and only has to be unique on this machine. Give
 # each machine a different one anyway, so a packet's source says where it came
@@ -19,13 +27,28 @@
 # veth that no longer exists, which looks like a node that joined and went
 # quiet. See tools/kinc-node-veth.sh.
 set -euo pipefail
-[ $# -ge 2 ] || { sed -n '2,20p' "$0" | sed 's/^# \?//'; exit 1; }
+[ $# -ge 2 ] || { sed -n '2,28p' "$0" | sed 's/^# \?//'; exit 1; }
 SUBNET="$1"; TRANSIT="$2"; shift 2
 
 [[ "$SUBNET"  =~ ^[0-9.]+\.0/24$   ]] || { echo "❌ subnet must be a /24 ending in .0: '${SUBNET}'"; exit 1; }
 [[ "$TRANSIT" =~ ^([0-9.]+)\.0/30$ ]] || { echo "❌ transit must be a /30 ending in .0: '${TRANSIT}'"; exit 1; }
 TP="${BASH_REMATCH[1]}"
 HOST_ADDR="${TP}.1/30"; NS_ADDR="${TP}.2/30"
+
+# Whose namespace this veth goes into. The script sudo's for everything it does,
+# so it is meant to be run as the node's user - but a service user often has no
+# sudo rights at all, and then the only way to run it is as root, where id -u is
+# 0 and the veth is plumbed into root's namespace instead of the node's. The unit
+# comes up, the node comes up, and nothing routes.
+#
+# SUDO_USER covers `sudo install-node-veth.sh`, and TENANT_UID covers running it
+# as root outright. Same resolution the service itself uses.
+TENANT_UID="${TENANT_UID:-$(id -u "${SUDO_USER:-$USER}")}"
+
+# What must NOT be masqueraded on the way out of the namespace: the ranges that
+# carry node-to-node traffic, where a node's own address is its identity. kinc's
+# own addressing by default; a fleet on anything else passes its ranges here.
+NODE_SUPERNETS="${NODE_SUPERNETS:-10.89.0.0/16 10.99.0.0/16}"
 
 SELF=$(dirname "$(readlink -f "$0")")
 sudo install -m 0755 "${SELF}/kinc-node-veth.sh" /usr/local/sbin/kinc-node-veth.sh
@@ -37,11 +60,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=TENANT_UID=$(id -u)
+Environment=TENANT_UID=${TENANT_UID}
 Environment=POD_SUBNET=${SUBNET}
 Environment=HOST_ADDR=${HOST_ADDR}
 Environment=NS_ADDR=${NS_ADDR}
 Environment=INTERVAL=10
+# Quoted, because Environment= splits on whitespace: unquoted, a list of networks
+# sets only the first and discards the rest with one warning in the journal. The
+# default here is kinc's own addressing; a fleet using any other range has to say
+# so, or every packet leaving a node is masqueraded to the transit address and
+# the node looks like it has no network at all.
+Environment="NODE_SUPERNETS=${NODE_SUPERNETS}"
 ExecStart=/usr/local/sbin/kinc-node-veth.sh
 Restart=always
 RestartSec=5
