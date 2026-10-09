@@ -162,7 +162,13 @@ jobs:
           # derived from Faro's own config so the two cover the same types and
           # cannot drift - a type watched by one and not the other leaves half
           # the question unanswerable.
-          export KINC_AUDIT_RESOURCES="$(./tools/faro-audit-resources.sh)"
+          # Assign and export separately. `export V="$(cmd)"` takes its exit status
+          # from `export`, which always succeeds, so a failing command substitution
+          # survives `set -e` and leaves V empty - here, a cluster built with no
+          # audit flags at all, reported as success. release.yml already does it
+          # this way.
+          KINC_AUDIT_RESOURCES="$(./tools/faro-audit-resources.sh)"
+          export KINC_AUDIT_RESOURCES
           
           # Deploy using systemd-driven approach
           ./tools/deploy.sh
@@ -697,7 +703,13 @@ jobs:
           export KINC_WORKERS=1
           export KINC_ENABLE_FARO=true
           # Derived from Faro's config so the two cover the same types.
-          export KINC_AUDIT_RESOURCES="$(./tools/faro-audit-resources.sh)"
+          # Assign and export separately. `export V="$(cmd)"` takes its exit status
+          # from `export`, which always succeeds, so a failing command substitution
+          # survives `set -e` and leaves V empty - here, a cluster built with no
+          # audit flags at all, reported as success. release.yml already does it
+          # this way.
+          KINC_AUDIT_RESOURCES="$(./tools/faro-audit-resources.sh)"
+          export KINC_AUDIT_RESOURCES
           ./tools/deploy.sh
         shell: bash
 
@@ -882,7 +894,13 @@ jobs:
           echo "Deploying cluster: default (port 6443)"
           export CLUSTER_NAME=default
           export KINC_ENABLE_FARO=true
-          export KINC_AUDIT_RESOURCES="$(./tools/faro-audit-resources.sh)"
+          # Assign and export separately. `export V="$(cmd)"` takes its exit status
+          # from `export`, which always succeeds, so a failing command substitution
+          # survives `set -e` and leaves V empty - here, a cluster built with no
+          # audit flags at all, reported as success. release.yml already does it
+          # this way.
+          KINC_AUDIT_RESOURCES="$(./tools/faro-audit-resources.sh)"
+          export KINC_AUDIT_RESOURCES
           ./tools/deploy.sh
           echo "✅ Cluster 'default' deployment initiated"
           echo ""
