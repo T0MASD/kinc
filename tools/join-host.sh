@@ -122,6 +122,10 @@ for spec in "$@"; do
         _MEM="${KINC_WORKER_MEMORY:-${KINC_NODE_MEMORY:-}}"
         _CPUS="${KINC_WORKER_CPUS:-${KINC_NODE_CPUS:-}}"
     fi
+    # Every node from join-host.sh has a join.conf, both roles, so the
+    # node-side default reserve is 1Gi / 200m.
+    check_reservation_fits "$_MEM" 1Gi "${NAME}" || exit 1
+    check_cpu_reservation_fits "$_CPUS" 200m "${NAME}" || exit 1
     build_role_limits "$_MEM" "$_CPUS"
 
     # The tunnel is one way to make a node reachable, not the only one, so its
