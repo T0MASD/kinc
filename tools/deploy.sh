@@ -344,6 +344,24 @@ KINC_WORKERS="${KINC_WORKERS:-0}"
 #   KINC_CONTROL_PLANE_MEMORY=3G    this node instead, if set
 #   KINC_WORKER_MEMORY=1G           those nodes instead, if set
 #
+# SET BUT EMPTY is a caller bug, not an opt-out, and it is the one shape that
+# produces a healthy cluster recording nothing. It happens when the list is
+# built with
+#     export KINC_AUDIT_RESOURCES="$(./tools/faro-audit-resources.sh)"
+# because `export` is itself a command: the assignment takes ITS exit status,
+# which is always 0, so a failing substitution survives `set -e` and leaves the
+# variable set and empty. Assign first, export second - see release.yml.
+# UNSET remains the legitimate "no auditing", same opt-in shape as Faro.
+if [[ -n "${KINC_AUDIT_RESOURCES+x}" && -z "${KINC_AUDIT_RESOURCES}" ]]; then
+    echo "❌ KINC_AUDIT_RESOURCES is set but empty." >&2
+    echo "   Something built it and failed. Unset it to deploy without auditing;" >&2
+    echo "   otherwise this cluster would come up healthy and audit nothing." >&2
+    echo "   If you used  export VAR=\"\$(...)\"  write it as two statements:" >&2
+    echo "     KINC_AUDIT_RESOURCES=\"\$(./tools/faro-audit-resources.sh)\"" >&2
+    echo "     export KINC_AUDIT_RESOURCES" >&2
+    exit 1
+fi
+
 CP_MEMORY="${KINC_CONTROL_PLANE_MEMORY:-${KINC_NODE_MEMORY:-}}"
 CP_CPUS="${KINC_CONTROL_PLANE_CPUS:-${KINC_NODE_CPUS:-}}"
 WORKER_MEMORY="${KINC_WORKER_MEMORY:-${KINC_NODE_MEMORY:-}}"
