@@ -92,6 +92,70 @@ table ip kinc_veth {
 NFT
 }
 
+# Pasta copies the host's routes into the rootless namespace, onto its own
+# interface: the host's connected subnets ("10.17.1.0/24 dev eth0") and every
+# peer route install-node-veth.sh added ("<peer node subnet> via <peer> dev
+# eth0"). Being more specific than the default route this script points at the
+# veth, they win - so replies to the hypervisor and traffic to other machines'
+# nodes leave through pasta, masqueraded to the host's address. The far side
+# then sees the machine instead of the node: a control plane joining from another
+# machine is rejected by etcd ("rejected connection on peer endpoint"), and the
+# hypervisor cannot reach a node at its own address.
+#
+# Re-point those routes through the veth: on pasta's interface, every connected
+# route and every route inside NODE_SUPERNETS. Pasta's default route (egress to
+# the internet) and the podman bridge are left alone. Re-asserted every pass,
+# because pasta recreates the namespace with its copies.
+#
+# Only for traffic FROM NODE_SUPERNETS - the addresses that keep their identity
+# across machines, the same set exempted from masquerade above - through a table
+# of their own. That covers the node subnets, and also what a node answers FROM
+# that is not its own subnet: a VIP on the LB plane (kube-vip, MetalLB), whose
+# replies must leave the way the request came in. Scoping by POD_SUBNET alone
+# missed those, and the VIP stopped answering.
+#
+# Everything else keeps pasta's routes. The namespace is shared: another podman
+# network outside NODE_SUPERNETS - a second cluster on a subnet nothing routes -
+# is exempted from masquerade towards those ranges like every network here.
+# Through pasta it is translated to the host's address and works; re-pointed it
+# would leave the veth wearing an address the far side cannot route back.
+REPOINT_TABLE="${KINC_REPOINT_TABLE:-1000}"
+ip2int() { local IFS=.; set -- $1; echo $(( ($1<<24) | ($2<<16) | ($3<<8) | $4 )); }
+in_supernets() {
+    local dst="${1%/*}" len="${1#*/}" sn net slen mask
+    [ "$len" = "$1" ] && len=32
+    for sn in $NODE_SUPERNETS; do
+        net="${sn%/*}"; slen="${sn#*/}"
+        [ "$len" -ge "$slen" ] || continue
+        mask=$(( slen == 0 ? 0 : (0xffffffff << (32 - slen)) & 0xffffffff ))
+        [ $(( $(ip2int "$dst") & mask )) -eq $(( $(ip2int "$net") & mask )) ] && return 0
+    done
+    return 1
+}
+repoint_pasta_routes() {
+    local pasta_if line dst
+    pasta_if=$(NSRUN ip -4 route show default | awk -v v="$VETH_NS" '{for (i=1;i<NF;i++) if ($i=="dev" && $(i+1)!=v) {print $(i+1); exit}}')
+    [ -n "$pasta_if" ] || return 0
+    local s
+    for s in $NODE_SUPERNETS; do
+        NSRUN ip rule show | grep -q "from ${s} lookup ${REPOINT_TABLE}\b" \
+            || NSRUN ip rule add from "$s" lookup "$REPOINT_TABLE" priority "$REPOINT_TABLE"
+    done
+    NSRUN ip -4 route show dev "$pasta_if" | while read -r line; do
+        dst="${line%% *}"
+        [ "$dst" = "default" ] && continue
+        case " $line " in
+            *" scope link "*) ;;                       # a host connected subnet
+            *) in_supernets "$dst" || continue ;;      # a peer route into the node planes
+        esac
+        # Already in the table: done - otherwise every pass would "re-route" the
+        # same subnet.
+        NSRUN ip -4 route show "$dst" table "$REPOINT_TABLE" | grep -q . && continue
+        NSRUN ip route replace "$dst" via "$HOST_IP" dev "$VETH_NS" onlink table "$REPOINT_TABLE" 2>/dev/null \
+            && log "routed ${dst} through ${VETH_NS} instead of ${pasta_if} (from ${NODE_SUPERNETS})"
+    done
+}
+
 assert() {
     [ -e "$NETNS" ] || { log "no rootless netns yet (start a node first)"; return 1; }
     HANDLE=$(find_handle) || { log "no conmon handle into the namespace"; return 1; }
@@ -118,6 +182,7 @@ assert() {
         ip route replace "$_s" via "$NS_IP" dev "$VETH_HOST"
     done
     NSRUN ip route replace default via "$HOST_IP" dev "$VETH_NS"
+    repoint_pasta_routes
     apply_nat
 
     # Re-asserted every pass: netavark rewrites its ruleset whenever a container
