@@ -96,8 +96,21 @@ for spec in "$@"; do
     esac
     [ -n "${NODE_ADDR:-}" ] && [ -n "${POD_IP:-}" ] \
         || { echo "❌ ${NAME}: spec is <name>:<node-address>:<podman-address>[:<role>]"; exit 1; }
-    STATE="$HOME/.local/share/kinc/${NAME}"
-    WGDIR="$HOME/kinc-wg-${NAME}"
+    # What podman, systemd and the volumes call this node, as distinct from
+    # what Kubernetes calls it.
+    #
+    # One machine can carry a node of more than one cluster, and the node name
+    # is only unique WITHIN a cluster: nexos runs a2-w-1 of apps and a2-w-1 of
+    # fleet. Without this they contend for one container name, one quadlet
+    # filename and four volume names, and the second join silently adopts the
+    # first node's state. kinc_fleet's own VM-side naming is kinc-<cluster>-
+    # <node> for exactly this reason.
+    #
+    # HostName stays ${NAME}: it is what the kubelet registers as, and that
+    # must remain the cluster's own name for the node.
+    INST="${KINC_INSTANCE_PREFIX:-}${NAME}"
+    STATE="$HOME/.local/share/kinc/${INST}"
+    WGDIR="$HOME/kinc-wg-${INST}"
 
     # Sized by the same names deploy.sh uses: KINC_NODE_* for every node, with the
     # per-role variables overriding where the split should be weighted. Unset
@@ -134,7 +147,7 @@ for spec in "$@"; do
         SKIP_PHASES="preflight,control-plane-prepare/download-certs"
     fi
 
-    systemctl --user stop "${NAME}.service" 2>/dev/null || true
+    systemctl --user stop "${INST}.service" 2>/dev/null || true
     rm -rf "$STATE"
     mkdir -p "${STATE}/join" "${STATE}/dropins/kubeadm-init" "${STATE}/dropins/kinc-postinit"
     sed "s|JOIN_SKIP_PHASES_PLACEHOLDER|${SKIP_PHASES}|" \
@@ -169,28 +182,29 @@ YAML
     # This is the same thing rm -rf on the host-side state above is doing: the
     # node is being created, so it starts from nothing.
     for v in var-data etc-kubernetes store storage; do
-        podman volume rm -f "${NAME}-${v}" >/dev/null 2>&1 || true
-        podman volume create "${NAME}-${v}" >/dev/null 2>&1 || true
+        podman volume rm -f "${INST}-${v}" >/dev/null 2>&1 || true
+        podman volume create "${INST}-${v}" >/dev/null 2>&1 || true
     done
 
-    sed -e "s|kinc-NODE_NAME_PLACEHOLDER|${NAME}|g" \
+    sed -e "s|kinc-INSTANCE_PLACEHOLDER|${INST}|g" \
+        -e "s|kinc-NODE_NAME_PLACEHOLDER|${NAME}|g" \
         -e "s|^Image=.*|Image=${IMAGE}|" \
-        -e "s|Volume=kinc-var-data:|Volume=${NAME}-var-data:|g" \
-        -e "s|Volume=kinc-etc-kubernetes:|Volume=${NAME}-etc-kubernetes:|g" \
-        -e "s|kinc-var-data-volume.service|${NAME}-var-data-volume.service|g" \
-        -e "s|kinc-etc-kubernetes-volume.service|${NAME}-etc-kubernetes-volume.service|g" \
+        -e "s|Volume=kinc-var-data:|Volume=${INST}-var-data:|g" \
+        -e "s|Volume=kinc-etc-kubernetes:|Volume=${INST}-etc-kubernetes:|g" \
+        -e "s|kinc-var-data-volume.service|${INST}-var-data-volume.service|g" \
+        -e "s|kinc-etc-kubernetes-volume.service|${INST}-etc-kubernetes-volume.service|g" \
         -e "s|WG_VOLUME_PLACEHOLDER|${WG_VOLUME}|g" \
         -e "s|CA_VOLUME_PLACEHOLDER|${CA_VOLUME}|g" \
         -e "s|JOIN_DIR_PLACEHOLDER|${STATE}/join|g" \
         -e "s|JOIN_DROPIN_DIR_PLACEHOLDER|${STATE}/dropins/kubeadm-init|g" \
         -e "s|POSTINIT_DROPIN_DIR_PLACEHOLDER|${STATE}/dropins/kinc-postinit|g" \
         -e "s|NETWORK_UNIT_PLACEHOLDER|${NET}|g" \
-        -e "s|STORAGE_VOLUME_PLACEHOLDER|${NAME}-storage|g" \
-        -e "s|NODE_STORE_PLACEHOLDER|${NAME}-store|g" \
+        -e "s|STORAGE_VOLUME_PLACEHOLDER|${INST}-storage|g" \
+        -e "s|NODE_STORE_PLACEHOLDER|${INST}-store|g" \
         -e "s|WORKER_IP_PLACEHOLDER|${POD_IP}|g" \
         -e "s|CLUSTER_SLICE_PLACEHOLDER|${NET}.slice|g" \
         -e "s|NODE_LIMITS_PLACEHOLDER|${_ROLE_LIMITS}|g" \
-        runtime/quadlet/kinc-worker.container > "${Q}/${NAME}.container"
+        runtime/quadlet/kinc-worker.container > "${Q}/${INST}.container"
 
     # The node's own view of what it was given. Without it the kubelet advertises
     # the whole machine - every core and every byte - while the cgroup above caps
@@ -199,7 +213,7 @@ YAML
     # joined from elsewhere got the ceilings and not the reserves, which is the
     # worse half to have on its own.
     if [ -n "$_ROLE_ENV" ]; then
-        sed -i "/^Environment=KUBECONFIG/a ${_ROLE_ENV%\\n}" "${Q}/${NAME}.container"
+        sed -i "/^Environment=KUBECONFIG/a ${_ROLE_ENV%\\n}" "${Q}/${INST}.container"
     fi
 
     # A control plane joining an audited cluster has to be able to audit.
@@ -217,7 +231,7 @@ YAML
     # mentions audit.
     if [ "$ROLE" = "control-plane" ] && [ -n "${KINC_AUDIT_RESOURCES:-}" ]; then
         sed -i "/^Environment=KUBECONFIG/a Environment=KINC_AUDIT_RESOURCES=${KINC_AUDIT_RESOURCES}" \
-            "${Q}/${NAME}.container"
+            "${Q}/${INST}.container"
     fi
 
     # The cluster's config volume belongs to the machine that built the cluster.
@@ -225,7 +239,7 @@ YAML
     # copying the baked-in config into it. Without the mount preflight uses the
     # image's own writable /etc/kinc/config, which is all a joining node needs:
     # it reads join.conf, not the cluster's kubeadm.conf.
-    sed -i "\|/etc/kinc/config|d;s/ *${NAME}-config-volume.service//g" "${Q}/${NAME}.container"
+    sed -i "\|/etc/kinc/config|d;s/ *${INST}-config-volume.service//g" "${Q}/${INST}.container"
 
     echo "  ${NAME}: ${ROLE}, address ${NODE_ADDR}, podman ${POD_IP}"
 done
