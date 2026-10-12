@@ -152,7 +152,15 @@ for spec in "$@"; do
     mkdir -p "${STATE}/join" "${STATE}/dropins/kubeadm-init" "${STATE}/dropins/kinc-postinit"
     sed "s|JOIN_SKIP_PHASES_PLACEHOLDER|${SKIP_PHASES}|" \
         runtime/config/dropins/join.conf > "${STATE}/dropins/kubeadm-init/join.conf"
-    cp runtime/config/dropins/postinit.conf "${STATE}/dropins/kinc-postinit/postinit.conf"
+    # The postinit drop-in is role-specific. Both roles skip the cluster-scoped
+    # manifests, but a joining control plane still has to drop the taint kubeadm
+    # gave it - see runtime/config/dropins/postinit-control-plane.conf. Giving
+    # every role the worker drop-in is what left joined control planes tainted.
+    if [ "$ROLE" = "control-plane" ]; then
+        cp runtime/config/dropins/postinit-control-plane.conf "${STATE}/dropins/kinc-postinit/postinit.conf"
+    else
+        cp runtime/config/dropins/postinit.conf "${STATE}/dropins/kinc-postinit/postinit.conf"
+    fi
 
     sed -e "s|CONTROL_PLANE_ENDPOINT_PLACEHOLDER|${CP_ADDR}:6443|g" \
         -e "s|CA_HASH_PLACEHOLDER|${CA_HASH}|g" \
