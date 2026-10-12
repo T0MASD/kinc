@@ -370,10 +370,16 @@ WORKER_CPUS="${KINC_WORKER_CPUS:-${KINC_NODE_CPUS:-}}"
 # shellcheck source=tools/lib-node-limits.sh
 . "$(dirname "$0")/lib-node-limits.sh"
 
+# The initialiser has no join.conf, so the node defaults to 2Gi / 500m.
+check_reservation_fits "$CP_MEMORY" 2Gi "control plane" || exit 1
+check_cpu_reservation_fits "$CP_CPUS" 500m "control plane" || exit 1
 build_role_limits "$CP_MEMORY" "$CP_CPUS"
 NODE_LIMITS="$_ROLE_LIMITS"
 NODE_ENV="$_ROLE_ENV"
 
+# A worker joins, so it has join.conf and the node defaults to 1Gi / 200m.
+check_reservation_fits "$WORKER_MEMORY" 1Gi "worker" || exit 1
+check_cpu_reservation_fits "$WORKER_CPUS" 200m "worker" || exit 1
 build_role_limits "$WORKER_MEMORY" "$WORKER_CPUS"
 WORKER_NODE_LIMITS="$_ROLE_LIMITS"
 WORKER_NODE_ENV="$_ROLE_ENV"
