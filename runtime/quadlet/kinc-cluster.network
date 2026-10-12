@@ -26,3 +26,11 @@ NetworkName=NETWORK_NAME_PLACEHOLDER
 # different node and nothing it wrote about itself is true any more.
 Subnet=NODE_SUBNET_PLACEHOLDER
 Gateway=NODE_GATEWAY_PLACEHOLDER
+# The host's MTU, not podman's default. A rootless network inherits pasta's
+# 65520, so every node advertises a ~65K TCP MSS. Where an L4 proxy (pasta,
+# passt, slirp) sits on the path it adopts that MSS and hands 65K segments to
+# 1500-byte links with no PMTUD signal back: small replies arrive, a TLS
+# handshake never completes, and the first image pull hangs. Antrea also sizes
+# its tunnel MTU off this interface. deploy.sh fills it from the host's
+# default-route interface; KINC_NODE_MTU overrides.
+Options=mtu=NODE_MTU_PLACEHOLDER

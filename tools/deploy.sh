@@ -286,10 +286,24 @@ if [[ ! "$CLUSTER_NODE_SUBNET" =~ ^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\.0/24$ ]
 fi
 NODE_PREFIX="${BASH_REMATCH[1]}"
 CLUSTER_NODE_GATEWAY="${NODE_PREFIX}.1"
+
+# The node network's MTU: the host's default-route interface, unless KINC_NODE_MTU
+# says otherwise (e.g. when machines reach each other over a tunnel with a
+# smaller MTU than the default route). Without it the network inherits pasta's
+# 65520 - see runtime/quadlet/kinc-cluster.network.
+if [ -z "${KINC_NODE_MTU:-}" ]; then
+    _mtu_dev=$(ip -o route show default 2>/dev/null | awk '{for (i=1;i<NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+    KINC_NODE_MTU=$(cat "/sys/class/net/${_mtu_dev}/mtu" 2>/dev/null || echo 1500)
+fi
+if ! [[ "$KINC_NODE_MTU" =~ ^[0-9]+$ ]] || [ "$KINC_NODE_MTU" -lt 1280 ]; then
+    echo "❌ KINC_NODE_MTU must be a number of at least 1280, not '${KINC_NODE_MTU}'"
+    exit 1
+fi
 CONTROL_PLANE_IP=$(get_cluster_node_ip 0)
 
 echo "🌐 API Server will be available at: https://127.0.0.1:${CLUSTER_PORT}"
 echo "🔗 Pod subnet: $CLUSTER_POD_SUBNET"
+echo "🔗 Node network MTU: $KINC_NODE_MTU"
 echo "🔗 Service subnet: $CLUSTER_SERVICE_SUBNET"
 echo "🔗 Node subnet: $CLUSTER_NODE_SUBNET (control plane ${CONTROL_PLANE_IP})"
 
@@ -527,6 +541,7 @@ mkdir -p ~/.config/containers/systemd/
 sed -e "s/NETWORK_NAME_PLACEHOLDER/${NETWORK_NAME}/g" \
     -e "s|NODE_SUBNET_PLACEHOLDER|${CLUSTER_NODE_SUBNET}|g" \
     -e "s|NODE_GATEWAY_PLACEHOLDER|${CLUSTER_NODE_GATEWAY}|g" \
+    -e "s|NODE_MTU_PLACEHOLDER|${KINC_NODE_MTU}|g" \
     runtime/quadlet/kinc-cluster.network > ~/.config/containers/systemd/${NETWORK_UNIT}
 
 # Copy and customize volume files
