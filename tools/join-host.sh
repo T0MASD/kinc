@@ -83,7 +83,21 @@ for m in openvswitch geneve; do
         exit 1; }
 done
 
-podman network exists "$NET" 2>/dev/null || podman network create --subnet "$SUBNET" "$NET" >/dev/null
+# The node network's MTU: the host's default-route interface, unless KINC_NODE_MTU
+# says otherwise (e.g. when machines reach each other over a tunnel with a
+# smaller MTU than the default route). Without it the network inherits pasta's
+# 65520 - see runtime/quadlet/kinc-cluster.network.
+if [ -z "${KINC_NODE_MTU:-}" ]; then
+    _mtu_dev=$(ip -o route show default 2>/dev/null | awk '{for (i=1;i<NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+    KINC_NODE_MTU=$(cat "/sys/class/net/${_mtu_dev}/mtu" 2>/dev/null || echo 1500)
+fi
+if ! [[ "$KINC_NODE_MTU" =~ ^[0-9]+$ ]] || [ "$KINC_NODE_MTU" -lt 1280 ]; then
+    echo "❌ KINC_NODE_MTU must be a number of at least 1280, not '${KINC_NODE_MTU}'"
+    exit 1
+fi
+podman network exists "$NET" 2>/dev/null || podman network create --subnet "$SUBNET" --opt mtu="$KINC_NODE_MTU" "$NET" >/dev/null
+_have=$(podman network inspect "$NET" --format '{{index .Options "mtu"}}' 2>/dev/null)
+[ "$_have" = "$KINC_NODE_MTU" ] || echo "⚠️  network ${NET} has mtu '${_have:-unset}', not ${KINC_NODE_MTU}: it predates this setting; recreate it to apply"
 mkdir -p "$Q"
 cd "$REPO"
 
