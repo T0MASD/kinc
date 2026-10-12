@@ -124,4 +124,4 @@ Slice=CLUSTER_SLICE_PLACEHOLDER
 NODE_LIMITS_PLACEHOLDER
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
