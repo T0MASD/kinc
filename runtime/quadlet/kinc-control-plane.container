@@ -30,10 +30,16 @@ Tmpfs=/run:rw,rshared,nosuid,nodev,tmpcopyup
 Tmpfs=/run/lock:rw,rprivate,nosuid,nodev,tmpcopyup
 
 # Volume mounts (rootless configuration)
-# rslave so network namespaces created inside are visible to Antrea's agent,
-# which refuses to start on a private mount: "path /var/run/netns is mounted on
-# /var but it is not a shared or slave mount".
-Volume=kinc-var-data:/var:Z,rslave
+# rshared, not rslave. Antrea's agent only needs /var/run/netns to be shared OR
+# slave, so rslave satisfied it and the mount looked correct. A CSI node plugin
+# needs more: its container asks for a Bidirectional mount of
+# /var/lib/kubelet, and CRI-O refuses to create such a container unless the
+# path is on a SHARED mount - CreateContainer fails with
+#   "... is mounted on /var but it is not a shared mount"
+# so the plugin never starts and never registers with the kubelet. The driver
+# bind-mounts volumes INSIDE the node and the kubelet has to see them, so
+# propagation must travel container -> host; rslave only carries host -> container.
+Volume=kinc-var-data:/var:Z,rshared
 Volume=kinc-etc-kubernetes:/etc/kubernetes:Z
 Volume=kinc-config:/etc/kinc/config:ro,Z
 # The cluster CA, minted before this container starts so that every join config
