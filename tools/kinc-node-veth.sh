@@ -109,7 +109,14 @@ assert() {
     ip link show "$VETH_HOST" >/dev/null 2>&1 || return 1
     ip addr show dev "$VETH_HOST" | grep -q "$HOST_IP" || ip addr add "$HOST_ADDR" dev "$VETH_HOST" 2>/dev/null || true
     ip link set "$VETH_HOST" up
-    ip route replace "$POD_SUBNET" via "$NS_IP" dev "$VETH_HOST"
+    # POD_SUBNET may be a LIST. A machine can carry nodes of more than one
+    # cluster, and they share this namespace - one rootless podman, one veth,
+    # one transit /30 - so the only thing that is per-cluster is the route.
+    # A machine carrying a node of two clusters routes both through it.
+    local _s
+    for _s in $POD_SUBNET; do
+        ip route replace "$_s" via "$NS_IP" dev "$VETH_HOST"
+    done
     NSRUN ip route replace default via "$HOST_IP" dev "$VETH_NS"
     apply_nat
 
