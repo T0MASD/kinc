@@ -30,7 +30,11 @@ set -euo pipefail
 [ $# -ge 2 ] || { sed -n '2,28p' "$0" | sed 's/^# \?//'; exit 1; }
 SUBNET="$1"; TRANSIT="$2"; shift 2
 
-[[ "$SUBNET"  =~ ^[0-9.]+\.0/24$   ]] || { echo "❌ subnet must be a /24 ending in .0: '${SUBNET}'"; exit 1; }
+# One or more /24s, space separated: a machine can carry nodes of more than one
+# cluster and they share a single veth and transit /30.
+for _s in $SUBNET; do
+  [[ "$_s" =~ ^[0-9.]+\.0/24$ ]] || { echo "❌ each subnet must be a /24 ending in .0: '${_s}'"; exit 1; }
+done
 [[ "$TRANSIT" =~ ^([0-9.]+)\.0/30$ ]] || { echo "❌ transit must be a /30 ending in .0: '${TRANSIT}'"; exit 1; }
 TP="${BASH_REMATCH[1]}"
 HOST_ADDR="${TP}.1/30"; NS_ADDR="${TP}.2/30"
