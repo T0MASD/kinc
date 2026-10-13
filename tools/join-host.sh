@@ -46,7 +46,7 @@ set -euo pipefail
 [ $# -ge 4 ] || { sed -n '2,43p' "$0" | sed 's/^# \?//'; exit 1; }
 CP_ADDR="$1"; CA_HASH="$2"; SUBNET="$3"; shift 3
 
-IMAGE="${KINC_IMAGE:-localhost/kinc/node:v1.37.0}"
+IMAGE="${KINC_IMAGE:-localhost/kinc/node:v1.37.1}"
 # The cluster's shared control-plane material, needed only to join a control
 # plane. Copied here from ~/.local/share/kinc/<cluster>/ca on the machine that
 # created the cluster.
