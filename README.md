@@ -98,7 +98,7 @@ kinc is consumed as a published image. `KINC_IMAGE` names which one, and
 ```bash
 git clone https://github.com/T0MASD/kinc.git && cd kinc
 
-export KINC_IMAGE=ghcr.io/t0masd/kinc:v1.37.0-3
+export KINC_IMAGE=ghcr.io/t0masd/kinc:v1.37.1-0
 USE_BAKED_IN_CONFIG=true ./tools/deploy.sh
 ```
 
@@ -618,7 +618,7 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=myapp ./tools/deploy.sh
 **Environment Variables:**
 - `CLUSTER_NAME`: Cluster identifier (default: `default`)
 - `FORCE_PORT`: Override auto port allocation
-- `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.37.0`)
+- `KINC_IMAGE`: Image to use (default: `localhost/kinc/node:v1.37.1`)
 - `KINC_SKIP_SYSCTL_CHECKS`: Bypass inotify/keyring checks (default: `false`)
 - `KINC_ENABLE_FARO`: Enable Faro event capture (default: `false`, CI: `true`)
 - `KINC_AUDIT_RESOURCES`: Comma-separated `<group>/<resource>` to audit reads and deletes of (default: unset, no audit flags at all)
@@ -701,7 +701,7 @@ podman run -d --name kinc-cluster \
   --sysctl net.netfilter.nf_conntrack_tcp_timeout_close_wait=3600 \
   -p 127.0.0.1:6443:6443/tcp \
   --env container=podman \
-  localhost/kinc/node:v1.37.0
+  localhost/kinc/node:v1.37.1
 
 # Wait for cluster (~40 seconds)
 timeout 300 bash -c 'until podman exec kinc-cluster test -f /var/lib/kinc-initialized 2>/dev/null; do sleep 2; done'
@@ -1204,10 +1204,10 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=cluster02 ./tools/deploy.sh
 
 ## Components
 
-- **Kubernetes:** v1.37.0
+- **Kubernetes:** v1.37.1
 - **CRI-O:** v1.37.1
-- **kubeadm:** v1.37.0
-- **kubectl:** v1.37.0
+- **kubeadm:** v1.37.1
+- **kubectl:** v1.37.1
 - **CNI:** Antrea v2.7.0 (Open vSwitch datapath, geneve between nodes)
 - **Storage:** local-path-provisioner
 - **Base:** Fedora 44

@@ -1388,7 +1388,7 @@ jobs:
               PREV=ghcr.io/t0masd/kinc@sha256:a68f8f88d08ac566de1712cec94c0a417ad3cb92e0b462f9a8322ec991df101c
               echo "::notice::upgrading from ${PREV} (v1.37.0-3)"
               KINC_IMAGE="$PREV" KINC_WORKERS=0 KINC_NODE_MEMORY=5G KINC_ENABLE_FARO=true ./tools/deploy.sh
-            gate: ./tools/ci-verify-image-change-restart.sh default localhost/kinc/node:v1.37.0
+            gate: ./tools/ci-verify-image-change-restart.sh default localhost/kinc/node:v1.37.1
 
           # The mechanism on its own: a sibling image differing only in a value a
           # provisioning step renders, so what the assertion sees can come from
