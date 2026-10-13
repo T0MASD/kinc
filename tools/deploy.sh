@@ -438,7 +438,10 @@ fi
 # Clean up any leftover artifacts from previous failed deployments
 echo
 echo "🧹 Step 1: Cleaning up any leftover artifacts"
-rm -f ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-*.*
+# The glob also matches kinc-<cluster>-<node>.container.d, the user's drop-in directory for that node, which is
+# theirs to keep. rm deletes every file it can and fails only on those directories, so the guard both preserves
+# them and stops that failure aborting the deploy under set -e - which it did, at step 1, before any node existed.
+rm -f ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-*.* 2>/dev/null || true
 systemctl --user daemon-reload
 systemctl --user reset-failed 2>/dev/null || true
 echo "✅ Ready for deployment"
