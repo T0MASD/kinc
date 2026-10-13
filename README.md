@@ -1205,7 +1205,7 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=cluster02 ./tools/deploy.sh
 ## Components
 
 - **Kubernetes:** v1.37.1
-- **CRI-O:** v1.37.1
+- **CRI-O:** v1.37.2
 - **kubeadm:** v1.37.1
 - **kubectl:** v1.37.1
 - **CNI:** Antrea v2.7.0 (Open vSwitch datapath, geneve between nodes)
