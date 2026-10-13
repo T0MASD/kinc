@@ -88,7 +88,10 @@ fi
 echo "✅ Cluster state removed"
 
 echo "Removing Quadlet files..."
-rm -f ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-*.*
+# The glob also matches the user's per-node drop-in directories (kinc-<cluster>-<node>.container.d), which are
+# theirs to keep. rm deletes every file it can and fails only on those, so the guard preserves them and stops
+# that failure aborting the cleanup under set -e.
+rm -f ~/.config/containers/systemd/kinc-${CLUSTER_NAME}-*.* 2>/dev/null || true
 rm -f ~/.config/systemd/user/kinc-${CLUSTER_NAME}.slice
 echo "✅ Quadlet files removed"
 
