@@ -252,6 +252,24 @@ RUN echo "Enabling kinc services ..." \
 RUN chmod -R 755 /kinc/manifests/
 
 # Verify installation and configuration
+# The kubeadm in the image must be the version the baked-in config deploys.
+#
+# kubernetesVersion in kubeadm.conf decides the control plane kubeadm installs;
+# the packages decide the kubeadm doing it. They are bumped together, but the
+# packages come from whatever mirror dnf picks, and a mirror can serve the
+# previous update for hours after Bodhi reports the new one stable. That built
+# an image labelled 1.37.1 carrying kubeadm 1.37.0 - and said nothing.
+RUN set -eu; \
+    want=$(sed -n 's/^kubernetesVersion: *//p' /etc/kinc/kubeadm.conf); \
+    have=$(kubeadm version -o short); \
+    if [ "$want" != "$have" ]; then \
+        echo "kubeadm.conf deploys Kubernetes $want, but this image installed kubeadm $have."; \
+        echo "If the update was only just pushed, the mirror dnf chose may not carry it yet:"; \
+        echo "rebuild later, with CACHE_BUST=\$(date +%s), until the versions agree."; \
+        exit 1; \
+    fi; \
+    echo "✅ kubeadm $have matches kubernetesVersion $want"
+
 # The phase list kubeadm offers must match what kinc's phased init was written
 # against.
 #
