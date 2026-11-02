@@ -1210,7 +1210,7 @@ KINC_SKIP_SYSCTL_CHECKS=true CLUSTER_NAME=cluster02 ./tools/deploy.sh
 - **kubectl:** v1.37.1
 - **CNI:** Antrea v2.7.0 (Open vSwitch datapath, geneve between nodes)
 - **Storage:** local-path-provisioner
-- **Base:** Fedora 44
+- **Base:** Fedora 45
 
 ---
 

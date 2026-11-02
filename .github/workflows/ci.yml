@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   # Does the image build, and does a cluster come up, on aarch64. The build has
-  # never been architecture-specific - fedora:44 is multi-arch and everything
+  # never been architecture-specific - fedora:45 is multi-arch and everything
   # else arrives through dnf - but "should work" is not a test, and a release
   # that publishes an arm64 image needs one before it does.
   #
