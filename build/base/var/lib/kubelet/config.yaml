@@ -28,7 +28,7 @@ fileCheckFrequency: 0s
 healthzBindAddress: 127.0.0.1
 healthzPort: 10248
 httpCheckFrequency: 0s
-imageMaximumGCAge: 0s
+imageMaximumGCAge: 168h
 imageMinimumGCAge: 0s
 logging:
   flushFrequency: 0
