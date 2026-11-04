@@ -550,6 +550,40 @@ is rotated once at 16MiB and keeps one previous file, and
 run. A rewrite that fails also goes to the journal under the `crun-wrapper` tag,
 because the alternative is silence followed by a container that will not create.
 
+### Container Capabilities
+
+A container gets CRI-O's default capability set — `CHOWN`, `DAC_OVERRIDE`,
+`FSETID`, `FOWNER`, `SETGID`, `SETUID`, `SETPCAP`, `NET_BIND_SERVICE`, `KILL`
+— and nothing more. One that needs another asks for it:
+
+```yaml
+securityContext:
+  capabilities:
+    add: ["NET_ADMIN"]
+```
+
+That works for any capability, not only the ones listed above. The node's own
+PID 1 holds the full set inside its user namespace (`CapBnd
+000001ffffffffff`), and CRI-O applies a pod's `add` on top of the default, so
+the default is a floor rather than a ceiling. Antrea's `antrea-ovs` is the
+worked example: it asks for `SYS_NICE` and `IPC_LOCK`, neither of which is a
+default, and holds both.
+
+Being rootless does not decide this list. It is tempting to read "rootless" as
+"capabilities are harmless here", and the second half does not follow from the
+first. Container root is a uid in a user namespace, so a capability is scoped
+to that namespace and is not host root — but within it, `SYS_ADMIN` still
+mounts filesystems, `NET_RAW` still forges packets on the pod network, and
+`DAC_READ_SEARCH` still bypasses file permission checks. A pod that runs as
+uid 0 receives every default capability in its effective set, and the pods most
+likely to run as uid 0 are the ones that build or unpack things, which is also
+where untrusted input arrives.
+
+`SYS_RESOURCE` in particular buys nothing. The kernel checks it against the
+initial user namespace, which is the whole reason the crun wrapper above
+exists; granting it to every container changes no outcome. See
+[Container Creation and OOM Scores](#container-creation-and-oom-scores).
+
 ## Configuration Modes
 
 ### Baked-In Config (Zero-Config)
