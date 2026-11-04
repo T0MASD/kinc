@@ -814,6 +814,13 @@ jobs:
         run: ./tools/ci-verify-node-resources.sh default
         shell: bash
 
+      # A second kinc-postinit run is a no-op for the cluster: no addon rolled,
+      # an older image's PV left alone, retries bounded. Before the restart,
+      # because the run reads the boot's /tmp/kubeadm-final.conf.
+      - name: Verify kinc-postinit can run again without changing the cluster
+        run: ./tools/ci-verify-postinit-rerun.sh default
+        shell: bash
+
       # Last, and before teardown, so every capture above describes a cluster
       # that had not been restarted - and so the thing being tested is the
       # second boot, which no other job reaches. Only here: this is the job

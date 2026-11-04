@@ -7,8 +7,14 @@ ConditionPathExists=/var/lib/kubeadm-initialized
 ConditionPathExists=!/var/lib/kinc-initialized
 # Retry limits belong to the unit, not the service. Without these the default
 # burst of 5 stops the retries above well before a slow API has come up.
+#
+# 20 starts per boot. This was StartLimitIntervalSec=0, which does not mean
+# "no window" but "no limit": a failure that is not transient retried every
+# 10 s for as long as the node ran (7,534 times, 2026-11-02 to -04). infinity
+# makes the 20 a total, so a persistent fault ends as a failed unit someone
+# can see instead of a loop nobody does.
 StartLimitBurst=20
-StartLimitIntervalSec=0
+StartLimitIntervalSec=infinity
 
 [Service]
 Type=oneshot
@@ -17,9 +23,10 @@ TimeoutStartSec=900
 # The script waits a bounded time for node registration and then exits. With
 # Restart=no, anything that delays the API means the CNI is never applied at
 # all, which presents as CoreDNS stuck in ContainerCreating rather than as the
-# bootstrap failure it is. Retrying is safe by construction: the unit writes
-# its success marker only on success, and ConditionPathExists=! above refuses
-# to run once that marker exists.
+# bootstrap failure it is. Retrying is safe because each step checks before
+# it writes: addons are created only when missing, objects that exist are left
+# alone (tools/ci-verify-postinit-rerun.sh), and the success marker is written
+# only on success, after which ConditionPathExists=! refuses to run.
 Restart=on-failure
 RestartSec=10
 
