@@ -19,7 +19,8 @@ set -euo pipefail
 
 CLUSTER="${1:-default}"
 CP="kinc-${CLUSTER}-control-plane"
-k() { podman exec "$CP" env KUBECONFIG=/etc/kubernetes/admin.conf kubectl "$@"; }
+# -i, so a manifest on stdin reaches kubectl.
+k() { podman exec -i "$CP" env KUBECONFIG=/etc/kubernetes/admin.conf kubectl "$@"; }
 gen() { k -n kube-system get "$1" -o jsonpath='{.metadata.generation}'; }
 
 echo "=== ${CLUSTER}: kinc-postinit run again changes nothing ==="
