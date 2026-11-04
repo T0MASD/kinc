@@ -554,7 +554,7 @@ because the alternative is silence followed by a container that will not create.
 
 A container gets CRI-O's default capability set — `CHOWN`, `DAC_OVERRIDE`,
 `FSETID`, `FOWNER`, `SETGID`, `SETUID`, `SETPCAP`, `NET_BIND_SERVICE`, `KILL`
-— and nothing more. One that needs another asks for it:
+— plus `NET_ADMIN`, and nothing more. One that needs another asks for it:
 
 ```yaml
 securityContext:
@@ -568,6 +568,13 @@ PID 1 holds the full set inside its user namespace (`CapBnd
 the default is a floor rather than a ceiling. Antrea's `antrea-ovs` is the
 worked example: it asks for `SYS_NICE` and `IPC_LOCK`, neither of which is a
 default, and holds both.
+
+`NET_ADMIN` is in the default list for upgrades rather than on merit. A cluster
+created before `kinc-postinit.sh` asked for it on kube-proxy's behalf has a
+DaemonSet that does not request it, and postinit runs once, on the node that ran
+`kubeadm init` — so upgrading such a cluster's node image would take the
+capability away from a kube-proxy that still needs it. It can leave this list
+once clusters have rolled through a release that patches the DaemonSet.
 
 kube-proxy is the one component in the cluster that this is load-bearing for.
 kinc drops its `privileged` flag for rootless operation, and its nftables
