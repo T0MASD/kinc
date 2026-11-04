@@ -58,9 +58,20 @@ kubeadm init phase addon kube-proxy --config=/tmp/kubeadm-final.conf || {
 }
 log "✅ kube-proxy addon created"
 
-# Patch kube-proxy to remove privileged flag for rootless operation
-log "Patching kube-proxy DaemonSet to remove privileged flag..."
-if kubectl patch daemonset kube-proxy -n kube-system --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/securityContext/privileged", "value": false}]'; then
+# Patch kube-proxy to drop privileged and ask for the one capability it needs.
+#
+# NET_ADMIN is not optional: kube-proxy's nftables backend creates its own
+# table, and without it every start ends
+#
+#   unable to create ipv4 proxier: could not run nftables command:
+#   Error: Could not process rule: Operation not permitted
+#   add table ip kube-proxy
+#
+# which is a CrashLoopBackOff, no ClusterIP routing, and then an antrea-agent
+# that cannot reach the API through it. It used to arrive unasked from CRI-O's
+# default_capabilities; that list is now CRI-O's own, so it is requested here.
+log "Patching kube-proxy DaemonSet for rootless operation..."
+if kubectl patch daemonset kube-proxy -n kube-system --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/securityContext/privileged", "value": false}, {"op": "add", "path": "/spec/template/spec/containers/0/securityContext/capabilities", "value": {"add": ["NET_ADMIN"]}}]'; then
     log "✅ kube-proxy patched for rootless operation"
 else
     log "❌ Failed to patch kube-proxy for rootless operation"

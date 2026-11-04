@@ -569,6 +569,13 @@ the default is a floor rather than a ceiling. Antrea's `antrea-ovs` is the
 worked example: it asks for `SYS_NICE` and `IPC_LOCK`, neither of which is a
 default, and holds both.
 
+kube-proxy is the one component in the cluster that this is load-bearing for.
+kinc drops its `privileged` flag for rootless operation, and its nftables
+backend still has to create a table, so `kinc-postinit.sh` gives it `NET_ADMIN`
+in the same patch. Without it every start ends `Operation not permitted` on
+`add table ip kube-proxy`, which is a CrashLoopBackOff, no ClusterIP routing,
+and an antrea-agent that cannot reach the API through it.
+
 Being rootless does not decide this list. It is tempting to read "rootless" as
 "capabilities are harmless here", and the second half does not follow from the
 first. Container root is a uid in a user namespace, so a capability is scoped
