@@ -653,6 +653,15 @@ jobs:
         run: ./tools/ci-collect-diagnostics.sh default || true
         shell: bash
 
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kinc-diagnostics-tunnel-${{ github.run_number }}
+          path: artifacts/
+          include-hidden-files: true
+          retention-days: 7
+
 
   test-multi-node:
     runs-on: ubuntu-latest
