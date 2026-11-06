@@ -52,19 +52,50 @@ log "✅ Kubelet configured for rootless operation via kubeadm config"
 # different points. kube-proxy runs with hostNetwork, so it is placeable before
 # any CNI exists - and it has to be, since the patch immediately below edits the
 # DaemonSet this creates.
-kubeadm init phase addon kube-proxy --config=/tmp/kubeadm-final.conf || {
-    log "❌ Failed to create the kube-proxy addon"
-    exit 1
-}
-log "✅ kube-proxy addon created"
-
-# Patch kube-proxy to remove privileged flag for rootless operation
-log "Patching kube-proxy DaemonSet to remove privileged flag..."
-if kubectl patch daemonset kube-proxy -n kube-system --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/securityContext/privileged", "value": false}]'; then
-    log "✅ kube-proxy patched for rootless operation"
+#
+# Created only when it does not exist yet, and patched below only when it
+# differs. This script runs on every control plane that joins and again on
+# every retry, and `kubeadm init phase addon kube-proxy` resets the DaemonSet
+# to kubeadm's own (privileged, no capabilities) - so the patch then put it
+# back: two rollouts, kube-proxy restarted on every node of the cluster, per
+# run. On 2026-11-02 a joining control plane failed further down on every run
+# and retried for two days: 7,534 runs, kube-proxy generation 23k, and a
+# LoadBalancer IP that refused whichever connections met a node between its
+# old kube-proxy and its new one.
+if kubectl -n kube-system get daemonset kube-proxy >/dev/null 2>&1; then
+    log "✅ kube-proxy addon already present: left as it is"
 else
-    log "❌ Failed to patch kube-proxy for rootless operation"
-    exit 1
+    kubeadm init phase addon kube-proxy --config=/tmp/kubeadm-final.conf || {
+        log "❌ Failed to create the kube-proxy addon"
+        exit 1
+    }
+    log "✅ kube-proxy addon created"
+fi
+
+# Patch kube-proxy to drop privileged and ask for the one capability it needs.
+#
+# NET_ADMIN is not optional: kube-proxy's nftables backend creates its own
+# table, and without it every start ends
+#
+#   unable to create ipv4 proxier: could not run nftables command:
+#   Error: Could not process rule: Operation not permitted
+#   add table ip kube-proxy
+#
+# which is a CrashLoopBackOff, no ClusterIP routing, and then an antrea-agent
+# that cannot reach the API through it. It used to arrive unasked from CRI-O's
+# default_capabilities; that list is now CRI-O's own, so it is requested here.
+kp_sc=$(kubectl -n kube-system get daemonset kube-proxy \
+    -o jsonpath='{.spec.template.spec.containers[0].securityContext.privileged} {.spec.template.spec.containers[0].securityContext.capabilities.add}')
+if [[ "$kp_sc" == 'false ["NET_ADMIN"]' ]]; then
+    log "✅ kube-proxy already set up for rootless operation"
+else
+    log "Patching kube-proxy DaemonSet for rootless operation..."
+    if kubectl patch daemonset kube-proxy -n kube-system --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/securityContext/privileged", "value": false}, {"op": "add", "path": "/spec/template/spec/containers/0/securityContext/capabilities", "value": {"add": ["NET_ADMIN"]}}]'; then
+        log "✅ kube-proxy patched for rootless operation"
+    else
+        log "❌ Failed to patch kube-proxy for rootless operation"
+        exit 1
+    fi
 fi
 
 # Install the CNI. Antrea is the cluster network: it reads each node's CIDR from
@@ -133,12 +164,20 @@ fi
 #
 # The config is the one kubeadm-init rendered - same boot, same tmpfs - so the
 # addon is built from exactly what the control plane was.
-log "Installing the CoreDNS addon..."
-if kubeadm init phase addon coredns --config=/tmp/kubeadm-final.conf; then
-    log "✅ CoreDNS addon created"
+#
+# Only when it does not exist yet, for the same reason as kube-proxy above: a
+# joining control plane re-applying it undoes whatever the cluster has changed
+# in it since, and restarts it.
+if kubectl -n kube-system get deployment coredns >/dev/null 2>&1; then
+    log "✅ CoreDNS addon already present: left as it is"
 else
-    log "❌ Failed to create the CoreDNS addon"
-    exit 1
+    log "Installing the CoreDNS addon..."
+    if kubeadm init phase addon coredns --config=/tmp/kubeadm-final.conf; then
+        log "✅ CoreDNS addon created"
+    else
+        log "❌ Failed to create the CoreDNS addon"
+        exit 1
+    fi
 fi
 
 # Wait for nodes to be ready first
@@ -215,11 +254,19 @@ if [[ -f /kinc/manifests/shared-storage.yaml ]]; then
     install -d -m 1777 /tmp/kinc-storage/shared
     log "📁 Shared storage directory ready (1777, usable by non-root consumers)"
 
+    # Created when missing, never changed. A PersistentVolume's source is
+    # immutable, so `apply` fails outright on a PV an older image made with
+    # another hostPath (/mnt/kinc-storage before d110154) - and a failure here
+    # restarts this whole script. The cluster's existing volume is the cluster's.
     log "Installing the shared storage class..."
-    if kubectl apply -f /kinc/manifests/shared-storage.yaml; then
-        log "✅ Shared storage installed"
+    if out=$(kubectl create -f /kinc/manifests/shared-storage.yaml 2>&1) \
+       || ! grep -v 'AlreadyExists' <<<"$out" | grep -q 'Error'; then
+        log "✅ Shared storage installed (existing objects left as they are)"
+        have=$(kubectl get pv kinc-shared -o jsonpath='{.spec.hostPath.path}' 2>/dev/null || true)
+        [[ "$have" == /tmp/kinc-storage/shared ]] \
+            || log "ℹ️  PV kinc-shared points at ${have:-nothing}, not /tmp/kinc-storage/shared: made by an older image; delete it while unbound to move it"
     else
-        log "❌ Failed to install shared storage"
+        log "❌ Failed to install shared storage: $out"
         exit 1
     fi
 fi
