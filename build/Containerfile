@@ -27,7 +27,7 @@
 
 # kinc Consolidated Kubernetes Node
 # Single-stage Dockerfile that combines base Fedora + CRI-O + kinc components
-FROM fedora:44
+FROM fedora:45
 
 # What systemd reads to know it is in a container, and which manager runs it.
 # systemd-detect-virt reports this, and a unit can act on it through
@@ -50,9 +50,7 @@ ARG CACHE_BUST=1
 # - packages that provide semi-core kubernetes functionality
 RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
     && dnf update -y \
-    # Everything from Fedora 44's released updates. cri-o1.37 was the last
-    # holdout, pinned to updates-testing while it gathered karma as
-    # FEDORA-2026-a91d5d8a66; it went stable on 2026-09-30 and the pin is gone.
+    # Everything from Fedora 45's released repositories; nothing is pinned.
     && dnf install -y \
       systemd \
       conntrack-tools nftables iptables-nft iproute ethtool util-linux kmod \
@@ -71,7 +69,14 @@ RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
       kubernetes1.37 \
       kubernetes1.37-kubeadm \
       cri-tools1.37 \
-    && dnf clean all
+    && dnf clean all \
+    # Fedora 45's containers-common (0.69.2) ships the signature policy at
+    # /usr/share/containers/policy.json and no longer at /etc. CRI-O reads only
+    # /etc/containers/policy.json, so without this every image pull fails - and
+    # it surfaces as kubeadm timing out at wait-control-plane, not as a pull
+    # error. Copy the distro's own policy rather than carry one that can drift.
+    && { test -e /etc/containers/policy.json \
+         || install -D -m 0644 /usr/share/containers/policy.json /etc/containers/policy.json; }
 
 # Configure systemd (separate layer for better caching)
 # The kernel API filesystems a rootless container is not allowed to mount.
@@ -321,7 +326,7 @@ RUN crio --version \
     && echo "SystemD services enabled:" \
     && systemctl list-unit-files | grep enabled | grep -E "(crio|kubelet|kinc-preflight|kubeadm-init|kinc-postinit|kinc-cgroup-setup|kinc-node-resources|kinc-check-state)" \
     && echo "Rootless configurations:" \
-    && ls -la /etc/containers/storage.conf /etc/crio/crio.conf.d/04-rootless-storage.conf /etc/crio/crio.conf.d/05-rootless-cgroup.conf \
+    && ls -la /etc/containers/policy.json /etc/containers/storage.conf /etc/crio/crio.conf.d/04-rootless-storage.conf /etc/crio/crio.conf.d/05-rootless-cgroup.conf \
     && echo "✅ CRI-O container runtime configured with rootless support"
 
 # systemd exits on SIGRTMIN+3, not SIGTERM (which re-executes it)
