@@ -668,6 +668,16 @@ jobs:
             podman exec $c bash -c 'systemctl --no-pager --failed; systemctl --no-pager status kinc-preflight kubeadm-join kubeadm-init kubelet crio; ip -br a; ip r; wg show; ping -c2 -W2 10.99.0.1; ping -c2 -W2 10.99.0.2; curl -sk -m5 https://10.99.0.1:6443/healthz; echo' > $d/$c-state.txt 2>&1
             podman exec $c journalctl --no-pager -b > $d/$c-journal.txt 2>&1
           done
+          { echo '== host AppArmor'; sudo aa-status 2>&1 | grep -iE 'wg|wireguard|profiles are|processes'; ls /etc/apparmor.d | grep -iE 'wg|wireguard';
+            sudo dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | tail -20;
+            echo '== file modes'; ls -la $HOME/wgmesh/cp $HOME/kinc-wg-kinc-default-w1;
+            c=kinc-default-control-plane
+            echo '== wg reads the file'; podman exec $c wg set wg0 private-key /etc/kinc/wg/private listen-port 51820; echo "rc=$?";
+            echo '== wg reads stdin (pipe)'; podman exec $c bash -c 'wg set wg0 private-key <(cat /etc/kinc/wg/private) listen-port 51820'; echo "rc=$?";
+            echo '== wg reads /dev/stdin'; podman exec $c bash -c 'wg set wg0 private-key /dev/stdin listen-port 51820 < /etc/kinc/wg/private'; echo "rc=$?";
+            echo '== wg setconf from stdin'; podman exec $c bash -c 'printf "[Interface]\nPrivateKey = %s\nListenPort = 51820\n" "$(cat /etc/kinc/wg/private)" | wg addconf wg0 /dev/stdin'; echo "rc=$?";
+            podman exec $c wg show wg0;
+            sudo dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | tail -10; } > $d/apparmor-experiment.txt 2>&1
           ls -la $d
         shell: bash
 
