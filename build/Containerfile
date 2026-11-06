@@ -66,9 +66,12 @@ RUN echo "Installing Packages (cache bust: $CACHE_BUST)..." \
       cri-o1.37 crun \
       containernetworking-plugins \
       container-selinux \
-      kubernetes1.37 \
-      kubernetes1.37-kubeadm \
       cri-tools1.37 \
+    # bisect only: 1.37.1 has left f45's repos, so take it from Koji.
+    && k=https://kojipkgs.fedoraproject.org/packages/kubernetes1.37/1.37.1/1.fc45/$(uname -m) \
+    && dnf install -y $k/kubernetes1.37-1.37.1-1.fc45.$(uname -m).rpm \
+         $k/kubernetes1.37-client-1.37.1-1.fc45.$(uname -m).rpm \
+         $k/kubernetes1.37-kubeadm-1.37.1-1.fc45.$(uname -m).rpm \
     && dnf clean all \
     # Fedora 45's containers-common (0.69.2) ships the signature policy at
     # /usr/share/containers/policy.json and no longer at /etc. CRI-O reads only
