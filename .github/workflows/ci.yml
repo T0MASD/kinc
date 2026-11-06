@@ -614,7 +614,7 @@ jobs:
           mkdir -p ~/.kube
           podman exec kinc-default-control-plane cat /etc/kubernetes/admin.conf > ~/.kube/config
           sed -i 's|server: https://.*:6443|server: https://127.0.0.1:6443|g' ~/.kube/config
-          for _ in $(seq 1 90); do
+          for _ in $(seq 1 30); do
             [ "$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l)" = 2 ] && break
             sleep 10
           done
@@ -652,6 +652,33 @@ jobs:
         if: always()
         run: ./tools/ci-collect-diagnostics.sh default || true
         shell: bash
+
+      - name: Debug the worker join (debug branch only)
+        if: always()
+        run: |
+          set +e
+          mkdir -p artifacts/debug; d=artifacts/debug
+          { uname -a; cat /etc/os-release; podman version; podman info --format json; } > $d/host.txt 2>&1
+          sysctl -a 2>/dev/null | grep -E "unprivileged_userns|apparmor|ip_forward|rp_filter" > $d/sysctl.txt
+          podman ps -a > $d/podman-ps.txt 2>&1
+          podman network ls > $d/podman-net.txt 2>&1; podman network inspect kinc-default >> $d/podman-net.txt 2>&1
+          for c in kinc-default-control-plane kinc-default-w1; do
+            podman inspect $c > $d/$c-inspect.json 2>&1
+            podman logs $c > $d/$c-console.txt 2>&1
+            podman exec $c bash -c 'systemctl --no-pager --failed; systemctl --no-pager status kinc-preflight kubeadm-join kubeadm-init kubelet crio; ip -br a; ip r; wg show; ping -c2 -W2 10.99.0.1; ping -c2 -W2 10.99.0.2; curl -sk -m5 https://10.99.0.1:6443/healthz; echo' > $d/$c-state.txt 2>&1
+            podman exec $c journalctl --no-pager -b > $d/$c-journal.txt 2>&1
+          done
+          ls -la $d
+        shell: bash
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kinc-diagnostics-tunnel-${{ github.run_number }}
+          path: artifacts/
+          include-hidden-files: true
+          retention-days: 7
 
 
   test-multi-node:
