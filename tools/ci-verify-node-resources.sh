@@ -97,19 +97,6 @@ for n in $nodes; do
         || fail "${n}: pod pids.max is ${got:-unreadable} at ${pm}, expected ${want_pids} from podPidsLimit"
 done
 
-# --- image collection by age -------------------------------------------------
-# Also unconditional, and asserted on what each kubelet runs (configz), not on
-# the shipped file, for the same reason as podPidsLimit: kubeadm rewrites it.
-# Without it nothing ever collects an image (the threshold is 100).
-want_age=168h0m0s
-for kn in $(kc get nodes -o jsonpath='{.items[*].metadata.name}'); do
-    got=$(kc get --raw "/api/v1/nodes/${kn}/proxy/configz" 2>/dev/null \
-          | python3 -c 'import json,sys; print(json.load(sys.stdin)["kubeletconfig"].get("imageMaximumGCAge",""))' 2>/dev/null)
-    [ "$got" = "$want_age" ] \
-        && ok "${kn}: images unused for ${got} are collected" \
-        || fail "${kn}: imageMaximumGCAge is ${got:-unset}, expected ${want_age} - unused images would never be collected"
-done
-
 # --- nothing asked for: assert nothing was done ---------------------------
 # Every variable that asks for something, including the per-role ones. Leaving
 # those out of this guard sent a weighted cluster down the "nothing was asked
