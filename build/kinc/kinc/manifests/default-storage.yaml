@@ -75,6 +75,12 @@ spec:
         - name: local-path-provisioner
           image: docker.io/kindest/local-path-provisioner:v20240202-8f1494ea
           imagePullPolicy: IfNotPresent
+          resources:
+            # Ships with none at all. 29Mi peak working set over six days, 9Mi
+            # RSS. It only acts when a PVC is created or deleted, so this is a
+            # floor for the scheduler rather than a bound on anything.
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
           command:
             - local-path-provisioner
             - --debug

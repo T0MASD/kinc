@@ -6016,8 +6016,17 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           resources:
+            # Upstream ships a CPU request and NO memory request, so the
+            # scheduler counts the cluster's CNI as zero memory on every node.
+            # Measured on apps 2026-11-08: 178Mi peak working set over six days,
+            # of which only 64Mi is RSS - the rest is page cache, which cgroup
+            # v2 reclaims at the limit rather than OOM-killing for. 384Mi is
+            # twice the peak and six times the resident set.
             requests:
               cpu: 200m
+              memory: 128Mi
+            limits:
+              memory: 384Mi
           ports:
             - containerPort: 10350
               name: api
@@ -6086,8 +6095,13 @@ spec:
           image: "docker.io/antrea/antrea-agent-ubuntu:v2.7.0"
           imagePullPolicy: IfNotPresent
           resources:
+            # 32Mi peak working set, 23Mi RSS. Flat - it is the OVS daemon, not
+            # the agent that watches the API.
             requests:
               cpu: 200m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
           command: ["start_ovs"]
           args:
             - "--log_file_max_size=100"
